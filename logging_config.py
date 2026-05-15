@@ -31,7 +31,7 @@ def setup_logging(name="ln_operator", log_dir=None):
 
     # ─── Terminal handler (INFO+) ─────────────────────────────────
     console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
+    console.setLevel(logging.WARNING)
     console.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)-8s %(message)s",
         datefmt="%H:%M:%S"
