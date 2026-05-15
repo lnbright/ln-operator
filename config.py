@@ -4,61 +4,62 @@ All tuneable settings in one place.
 """
 
 import os
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
 
 # ─── LND connection ───────────────────────────────────────────────
 LND_REST_URL = os.getenv("LND_REST_URL", "https://127.0.0.1:9000")
 LND_CERT = os.getenv("LND_CERT", "/home/lnd/tls.cert")
 LND_MACAROON = os.getenv("LND_MACAROON", "/home/lnd/data/chain/bitcoin/mainnet/admin.macaroon")
 
-# ─── Anthropic API (for the 10% agent layer) ─────────────────────
+# ─── Anthropic API ────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 
-# ─── Telegram alerts ─────────────────────────────────────────────
+# ─── Telegram ─────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# ─── Database ────────────────────────────────────────────────────
+# ─── Database ─────────────────────────────────────────────────────
 DB_PATH = os.getenv("LN_OPERATOR_DB", os.path.join(os.path.dirname(__file__), "ln_operator.db"))
 
 # ─── Channel management thresholds ───────────────────────────────
-# Rebalancing triggers
-REBALANCE_LOW_THRESHOLD = 0.20   # local ratio below this → needs rebalancing up
-REBALANCE_HIGH_THRESHOLD = 0.80  # local ratio above this → needs rebalancing down
-REBALANCE_TARGET = 0.50          # target local ratio after rebalance
+REBALANCE_LOW_THRESHOLD = 0.20
+REBALANCE_HIGH_THRESHOLD = 0.80
+REBALANCE_TARGET = 0.50
 
-# Fee policy (dynamic, based on local balance ratio)
-FEE_BASE_MSAT = 0                # base fee in millisats (0 is modern best practice)
-FEE_MIN_PPM = 50                 # floor fee rate when channel is full (local high)
-FEE_MAX_PPM = 500                # ceiling fee rate when channel is depleted (local low)
+FEE_BASE_MSAT = 0
+FEE_MIN_PPM = 50
+FEE_MAX_PPM = 500
 
-# Rebalancing cost limits (per-channel, adaptive)
-REBALANCE_MAX_AMOUNT_RATIO = 0.5 # never rebalance more than 50% of capacity in one go
-REBALANCE_HARD_CAP_PPM = 500     # absolute ceiling — never pay more than this, ever
-REBALANCE_REVENUE_RATIO = 0.5    # for proven channels: max fee = earned_ppm × this ratio
-REBALANCE_DISCOVERY_PPM = 150    # for new/unproven channels: budget to discover if they route
-REBALANCE_DEADWEIGHT_PPM = 50    # for channels that had a chance and earned nothing
-REBALANCE_DISCOVERY_DAYS = 30    # how many days of balanced time before judging a channel
-REBALANCE_BALANCED_RATIO = 0.30  # channel counts as "balanced" when local ratio is above this
-REBALANCE_BALANCED_RATIO_HIGH = 0.70  # ... and below this
+REBALANCE_MAX_AMOUNT_RATIO = 0.5
+REBALANCE_HARD_CAP_PPM = 500
+REBALANCE_REVENUE_RATIO = 0.5
+REBALANCE_DISCOVERY_PPM = 150
+REBALANCE_DEADWEIGHT_PPM = 50
+REBALANCE_DISCOVERY_DAYS = 30
+REBALANCE_BALANCED_RATIO = 0.30
+REBALANCE_BALANCED_RATIO_HIGH = 0.70
 
 # ─── Investment advisor settings ─────────────────────────────────
-# Treasury reserve
-TREASURY_MIN_RATIO = 0.10        # always keep at least 10% of investment as reserve
-TREASURY_MONTHS_RESERVE = 3      # or 3 months of avg rebalancing costs, whichever is higher
+TREASURY_MIN_RATIO = 0.10
+TREASURY_MONTHS_RESERVE = 3
 
-# Channel sizing
-MIN_CHANNEL_SIZE_SATS = 1_000_000   # absolute minimum channel size (1M)
-PREFERRED_CHANNEL_SIZE_SATS = 3_000_000  # preferred minimum (3M)
-MAX_CHANNEL_SIZE_SATS = 16_777_215  # LND wumbo channel max without additional config
+MIN_CHANNEL_SIZE_SATS = 1_000_000
+PREFERRED_CHANNEL_SIZE_SATS = 3_000_000
+MAX_CHANNEL_SIZE_SATS = 16_777_215
 
-# Peer scoring weights (must sum to 1.0)
 PEER_SCORE_WEIGHTS = {
-    "capacity": 0.20,       # total node capacity
-    "channels": 0.15,       # number of channels
-    "uptime": 0.20,         # node uptime / availability
-    "centrality": 0.25,     # betweenness centrality (how many paths go through them)
-    "diversity": 0.20,      # how much they improve YOUR graph diversity
+    "capacity": 0.20,
+    "channels": 0.15,
+    "uptime": 0.20,
+    "centrality": 0.25,
+    "diversity": 0.20,
 }
 
 # ─── External data sources ───────────────────────────────────────
@@ -66,6 +67,6 @@ MEMPOOL_API = "https://mempool.space/api"
 ONEML_API = "https://1ml.com"
 
 # ─── Cron schedule defaults ──────────────────────────────────────
-FEE_UPDATE_INTERVAL_MINUTES = 30    # how often to update fees
-REBALANCE_CHECK_INTERVAL_MINUTES = 60  # how often to check for rebalance candidates
-MONITOR_INTERVAL_MINUTES = 15       # how often to check channel health for alerts
+FEE_UPDATE_INTERVAL_MINUTES = 30
+REBALANCE_CHECK_INTERVAL_MINUTES = 60
+MONITOR_INTERVAL_MINUTES = 15
