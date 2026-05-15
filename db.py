@@ -1,0 +1,422 @@
+"""
+LN Operator — Database Layer (30%)
+SQLite database for tracking channel performance, rebalancing history,
+peer performance, and investment decisions over time.
+"""
+
+import sqlite3
+import json
+import time
+from contextlib import contextmanager
+from config import DB_PATH
+
+
+def init_db():
+    """Create all tables if they don't exist."""
+    with get_conn() as conn:
+        conn.executescript(SCHEMA)
+
+
+@contextmanager
+def get_conn():
+    """Context manager for database connections."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+SCHEMA = """
+-- ─── Channel snapshots (taken every monitoring run) ─────────────
+CREATE TABLE IF NOT EXISTS channel_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    chan_id          TEXT NOT NULL,
+    peer_pubkey      TEXT NOT NULL,
+    peer_alias       TEXT,
+    capacity         INTEGER NOT NULL,
+    local_balance    INTEGER NOT NULL,
+    remote_balance   INTEGER NOT NULL,
+    local_ratio      REAL NOT NULL,
+    is_active        INTEGER NOT NULL DEFAULT 1,
+    fee_rate_ppm     INTEGER,
+    base_fee_msat    INTEGER,
+    total_sent       INTEGER DEFAULT 0,
+    total_received   INTEGER DEFAULT 0,
+    num_updates      INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_chan_snap_ts ON channel_snapshots(ts);
+CREATE INDEX IF NOT EXISTS idx_chan_snap_chan ON channel_snapshots(chan_id);
+
+-- ─── Fee update log ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS fee_updates (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    chan_id          TEXT NOT NULL,
+    peer_alias       TEXT,
+    old_fee_ppm      INTEGER,
+    new_fee_ppm      INTEGER,
+    old_base_msat    INTEGER,
+    new_base_msat    INTEGER,
+    local_ratio      REAL NOT NULL,
+    reason           TEXT
+);
+
+-- ─── Rebalance attempts ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS rebalance_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    source_chan_id    TEXT NOT NULL,
+    target_chan_id    TEXT NOT NULL,
+    source_alias     TEXT,
+    target_alias     TEXT,
+    amount_sats      INTEGER NOT NULL,
+    fee_paid_sats    INTEGER,
+    fee_ppm          REAL,
+    success          INTEGER NOT NULL DEFAULT 0,
+    failure_reason   TEXT,
+    duration_seconds REAL
+);
+
+-- ─── Forwarding events (routing fees earned) ────────────────────
+CREATE TABLE IF NOT EXISTS forwarding_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    chan_in          TEXT NOT NULL,
+    chan_out         TEXT NOT NULL,
+    amount_in_sats   INTEGER NOT NULL,
+    amount_out_sats  INTEGER NOT NULL,
+    fee_earned_sats  INTEGER NOT NULL
+);
+
+-- ─── Peer performance tracking ──────────────────────────────────
+CREATE TABLE IF NOT EXISTS peer_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    pubkey           TEXT NOT NULL,
+    alias            TEXT,
+    action           TEXT NOT NULL,  -- 'opened', 'closed', 'evaluated', 'rejected'
+    channel_size     INTEGER,
+    reason           TEXT,
+    performance_notes TEXT
+);
+
+-- ─── Investment decisions ───────────────────────────────────────
+CREATE TABLE IF NOT EXISTS investment_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    total_sats       INTEGER NOT NULL,
+    treasury_reserve INTEGER NOT NULL,
+    deployable_sats  INTEGER NOT NULL,
+    plan_json        TEXT NOT NULL,      -- full recommendation as JSON
+    agent_summary    TEXT,               -- Claude's plain-English summary
+    executed         INTEGER DEFAULT 0,  -- did the user follow through?
+    outcome_notes    TEXT                -- post-hoc notes on how it went
+);
+
+-- ─── Network graph snapshots (periodic) ─────────────────────────
+CREATE TABLE IF NOT EXISTS graph_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    total_nodes      INTEGER,
+    total_channels   INTEGER,
+    total_capacity   INTEGER,
+    our_channels     INTEGER,
+    our_capacity     INTEGER,
+    our_peers        INTEGER
+);
+
+-- ─── Alerts sent ────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS alerts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    alert_type       TEXT NOT NULL,      -- 'channel_depleted', 'peer_offline', 'rebalance_failed', etc.
+    channel_id       TEXT,
+    message          TEXT NOT NULL,
+    sent_telegram    INTEGER DEFAULT 0
+);
+
+-- ─── Channel maturity tracking ──────────────────────────────────
+-- Tracks how much time each channel has spent in a balanced state,
+-- so the rebalance budget can distinguish "unproven" from "proven unprofitable".
+CREATE TABLE IF NOT EXISTS channel_maturity (
+    chan_id          TEXT PRIMARY KEY,
+    first_seen       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    balanced_seconds INTEGER NOT NULL DEFAULT 0,  -- cumulative time spent balanced
+    last_snapshot_ts INTEGER NOT NULL DEFAULT 0,   -- when we last checked
+    last_was_balanced INTEGER NOT NULL DEFAULT 0   -- was it balanced at last check?
+);
+"""
+
+
+# ─── Helper functions ────────────────────────────────────────────
+
+def save_channel_snapshot(channels: list[dict]):
+    """Save a snapshot of all channels."""
+    with get_conn() as conn:
+        for ch in channels:
+            conn.execute("""
+                INSERT INTO channel_snapshots
+                (chan_id, peer_pubkey, peer_alias, capacity, local_balance,
+                 remote_balance, local_ratio, is_active, fee_rate_ppm,
+                 base_fee_msat, total_sent, total_received, num_updates)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                ch["chan_id"], ch["peer_pubkey"], ch.get("peer_alias", ""),
+                ch["capacity"], ch["local_balance"], ch["remote_balance"],
+                ch["local_ratio"], int(ch.get("active", True)),
+                ch.get("fee_rate_ppm"), ch.get("base_fee_msat"),
+                ch.get("total_sent", 0), ch.get("total_received", 0),
+                ch.get("num_updates", 0)
+            ))
+
+
+def save_fee_update(chan_id, peer_alias, old_ppm, new_ppm, old_base, new_base,
+                    local_ratio, reason=""):
+    """Log a fee policy change."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO fee_updates
+            (chan_id, peer_alias, old_fee_ppm, new_fee_ppm, old_base_msat,
+             new_base_msat, local_ratio, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (chan_id, peer_alias, old_ppm, new_ppm, old_base, new_base,
+              local_ratio, reason))
+
+
+def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
+                           amount, fee_paid, success, failure_reason="",
+                           duration=0.0):
+    """Log a rebalance attempt."""
+    fee_ppm = (fee_paid / amount * 1_000_000) if amount > 0 and fee_paid else 0
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO rebalance_log
+            (source_chan_id, target_chan_id, source_alias, target_alias,
+             amount_sats, fee_paid_sats, fee_ppm, success, failure_reason,
+             duration_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (source_chan, target_chan, source_alias, target_alias,
+              amount, fee_paid, fee_ppm, int(success), failure_reason, duration))
+
+
+def save_forwarding_events(events: list[dict]):
+    """Log forwarding events from LND."""
+    with get_conn() as conn:
+        for ev in events:
+            conn.execute("""
+                INSERT INTO forwarding_log
+                (ts, chan_in, chan_out, amount_in_sats, amount_out_sats, fee_earned_sats)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                ev.get("timestamp", int(time.time())),
+                ev["chan_in"], ev["chan_out"],
+                ev["amount_in"], ev["amount_out"], ev["fee_earned"]
+            ))
+
+
+def save_investment_plan(total_sats, treasury, deployable, plan_dict, agent_summary=""):
+    """Log an investment recommendation."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO investment_log
+            (total_sats, treasury_reserve, deployable_sats, plan_json, agent_summary)
+            VALUES (?, ?, ?, ?, ?)
+        """, (total_sats, treasury, deployable, json.dumps(plan_dict), agent_summary))
+
+
+def save_alert(alert_type, message, channel_id=None, sent_telegram=False):
+    """Log an alert."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO alerts (alert_type, channel_id, message, sent_telegram)
+            VALUES (?, ?, ?, ?)
+        """, (alert_type, channel_id, message, int(sent_telegram)))
+
+
+# ─── Query helpers ───────────────────────────────────────────────
+
+def get_avg_monthly_rebalance_cost(months=3):
+    """Average monthly rebalancing cost over the last N months."""
+    cutoff = int(time.time()) - (months * 30 * 86400)
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COALESCE(SUM(fee_paid_sats), 0) as total_fees,
+                   COUNT(*) as attempts
+            FROM rebalance_log
+            WHERE ts > ? AND success = 1
+        """, (cutoff,)).fetchone()
+        total = row["total_fees"]
+        return total / months if months > 0 else 0
+
+
+def get_avg_monthly_fee_revenue(months=3):
+    """Average monthly routing fee revenue over the last N months."""
+    cutoff = int(time.time()) - (months * 30 * 86400)
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COALESCE(SUM(fee_earned_sats), 0) as total_fees
+            FROM forwarding_log
+            WHERE ts > ?
+        """, (cutoff,)).fetchone()
+        return row["total_fees"] / months if months > 0 else 0
+
+
+def get_channel_fee_revenue(chan_id, days=30):
+    """Fee revenue for a specific channel over last N days."""
+    cutoff = int(time.time()) - (days * 86400)
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COALESCE(SUM(fee_earned_sats), 0) as fees
+            FROM forwarding_log
+            WHERE (chan_in = ? OR chan_out = ?) AND ts > ?
+        """, (chan_id, chan_id, cutoff)).fetchone()
+        return row["fees"]
+
+
+def get_peer_history(pubkey):
+    """Get all historical actions for a peer."""
+    with get_conn() as conn:
+        return conn.execute("""
+            SELECT * FROM peer_history WHERE pubkey = ? ORDER BY ts DESC
+        """, (pubkey,)).fetchall()
+
+
+def get_recent_rebalance_stats(days=30):
+    """Rebalancing stats for the last N days."""
+    cutoff = int(time.time()) - (days * 86400)
+    with get_conn() as conn:
+        return conn.execute("""
+            SELECT COUNT(*) as total_attempts,
+                   SUM(success) as successes,
+                   COALESCE(SUM(CASE WHEN success=1 THEN fee_paid_sats END), 0) as total_fees,
+                   COALESCE(AVG(CASE WHEN success=1 THEN fee_ppm END), 0) as avg_fee_ppm,
+                   COALESCE(SUM(CASE WHEN success=1 THEN amount_sats END), 0) as total_rebalanced
+            FROM rebalance_log WHERE ts > ?
+        """, (cutoff,)).fetchone()
+
+
+def get_channel_performance(chan_id, days=30):
+    """Get performance summary for a channel."""
+    cutoff = int(time.time()) - (days * 86400)
+    with get_conn() as conn:
+        # Fee revenue
+        revenue = conn.execute("""
+            SELECT COALESCE(SUM(fee_earned_sats), 0) as fees,
+                   COUNT(*) as forwards
+            FROM forwarding_log
+            WHERE (chan_in = ? OR chan_out = ?) AND ts > ?
+        """, (chan_id, chan_id, cutoff)).fetchone()
+
+        # Rebalancing costs
+        rebal = conn.execute("""
+            SELECT COALESCE(SUM(fee_paid_sats), 0) as costs,
+                   COUNT(*) as attempts,
+                   SUM(success) as successes
+            FROM rebalance_log
+            WHERE (source_chan_id = ? OR target_chan_id = ?) AND ts > ?
+        """, (chan_id, chan_id, cutoff)).fetchone()
+
+        return {
+            "fee_revenue": revenue["fees"],
+            "forwards": revenue["forwards"],
+            "rebalance_cost": rebal["costs"],
+            "rebalance_attempts": rebal["attempts"],
+            "rebalance_successes": rebal["successes"] or 0,
+            "net_profit": revenue["fees"] - rebal["costs"],
+        }
+
+
+# ─── Channel maturity tracking ──────────────────────────────────
+
+def update_channel_maturity(chan_id, is_balanced_now):
+    """Update the balanced-time accumulator for a channel.
+
+    Called every monitoring run. If the channel was balanced at the last
+    snapshot AND is still balanced now, we add the elapsed time to
+    balanced_seconds.
+    """
+    now = int(time.time())
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM channel_maturity WHERE chan_id = ?", (chan_id,)
+        ).fetchone()
+
+        if row is None:
+            # First time seeing this channel
+            conn.execute("""
+                INSERT INTO channel_maturity
+                (chan_id, first_seen, balanced_seconds, last_snapshot_ts, last_was_balanced)
+                VALUES (?, ?, 0, ?, ?)
+            """, (chan_id, now, now, int(is_balanced_now)))
+            return
+
+        elapsed = now - row["last_snapshot_ts"]
+        # Only accumulate if it was balanced at BOTH the last check and now
+        add_seconds = elapsed if (row["last_was_balanced"] and is_balanced_now) else 0
+
+        conn.execute("""
+            UPDATE channel_maturity
+            SET balanced_seconds = balanced_seconds + ?,
+                last_snapshot_ts = ?,
+                last_was_balanced = ?
+            WHERE chan_id = ?
+        """, (add_seconds, now, int(is_balanced_now), chan_id))
+
+
+def get_channel_maturity(chan_id):
+    """Get maturity info for a channel.
+
+    Returns dict with:
+    - balanced_days: total days spent in a balanced state
+    - age_days: total days since first seen
+    - balanced_ratio: fraction of lifetime spent balanced
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM channel_maturity WHERE chan_id = ?", (chan_id,)
+        ).fetchone()
+
+    if row is None:
+        return {"balanced_days": 0, "age_days": 0, "balanced_ratio": 0}
+
+    now = int(time.time())
+    age_seconds = max(1, now - row["first_seen"])
+    return {
+        "balanced_days": row["balanced_seconds"] / 86400,
+        "age_days": age_seconds / 86400,
+        "balanced_ratio": row["balanced_seconds"] / age_seconds,
+    }
+
+
+def get_channel_earned_ppm(chan_id, days=30):
+    """Calculate the average ppm this channel has earned over the last N days.
+
+    Looks at forwarding events where this channel was involved (in or out)
+    and computes: total_fees / total_amount_routed * 1_000_000
+    """
+    cutoff = int(time.time()) - (days * 86400)
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COALESCE(SUM(fee_earned_sats), 0) as total_fees,
+                   COALESCE(SUM(amount_out_sats), 0) as total_routed
+            FROM forwarding_log
+            WHERE (chan_in = ? OR chan_out = ?) AND ts > ?
+        """, (chan_id, chan_id, cutoff)).fetchone()
+
+    if row["total_routed"] == 0:
+        return 0.0
+    return row["total_fees"] / row["total_routed"] * 1_000_000
+
+
+if __name__ == "__main__":
+    init_db()
+    print(f"Database initialised at {DB_PATH}")
