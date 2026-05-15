@@ -63,7 +63,32 @@ def cmd_invest(args):
         plan["deployable_sats"], plan, summary
     )
 
+    # Interactive follow-up loop
+    if ANTHROPIC_API_KEY:
+        _followup_loop(plan)
+
     return plan
+
+
+def _followup_loop(plan):
+    """Interactive Q&A loop after an investment plan is displayed."""
+    print("\n" + "─" * 55)
+    print("💬 Ask a follow-up question or press Enter to exit.")
+    print("─" * 55)
+
+    while True:
+        try:
+            question = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not question:
+            break
+
+        print("\n🤖 Agent: ", end="", flush=True)
+        answer = agent.get_followup_answer(plan, question)
+        print(answer)
 
 
 def cmd_fees(args):
