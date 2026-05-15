@@ -276,6 +276,7 @@ def plan_rebalances(channels=None):
             "target_chan_id": target_ch["chan_id"],
             "target_alias": target_ch["peer_alias"],
             "target_channel_point": target_ch["channel_point"],
+            "target_peer_pubkey": target_ch["peer_pubkey"],
             "target_local_ratio": target_ch["local_ratio"],
             "amount_sats": amount,
             "max_fee_sats": max_fee,
@@ -291,19 +292,14 @@ def plan_rebalances(channels=None):
     return plans, None
 
 
-# Note: actual circular rebalance execution requires the router RPC
-# (SendPaymentV2 with outgoing_chan_id). This is a placeholder that
-# logs the plan. Full implementation requires lnrpc routerrpc calls.
 def execute_rebalance(plan, dry_run=False):
-    """Execute a single rebalance operation.
-    
-    In production this would:
-    1. Create an invoice for the amount
-    2. Use router SendPaymentV2 with outgoing_chan_id = source
-       and last_hop_pubkey = target peer to force the circular path
-    3. Track the result
-    
-    For now, returns the plan with a placeholder.
+    """Execute a single circular rebalance using Router SendPaymentV2.
+
+    Forces the payment:
+    - OUT through plan["source_chan_id"]  (the overfull channel)
+    - BACK IN through plan["target_peer_pubkey"] (the depleted channel peer)
+
+    This guarantees liquidity moves exactly where we need it.
     """
     result = {
         "source_chan_id": plan["source_chan_id"],
@@ -319,15 +315,19 @@ def execute_rebalance(plan, dry_run=False):
     }
 
     if dry_run:
-        log.info("dry run: would rebalance %s→%s %s sats", plan["source_alias"], plan["target_alias"], f"{plan['amount_sats']:,}")
+        log.info("dry run: would rebalance %s→%s %s sats [%s, %d ppm cap]",
+                 plan["source_alias"], plan["target_alias"],
+                 f"{plan['amount_sats']:,}", plan.get("budget_tier","?"), plan["max_fee_ppm"])
         result["failure_reason"] = "dry_run"
         return result
 
-    log.info("executing rebalance: %s→%s %s sats (max fee %d ppm)",
-             plan["source_alias"], plan["target_alias"], f"{plan['amount_sats']:,}", plan["max_fee_ppm"])
+    log.info("executing rebalance: %s→%s %s sats (max fee %d ppm) [%s]",
+             plan["source_alias"], plan["target_alias"],
+             f"{plan['amount_sats']:,}", plan["max_fee_ppm"], plan.get("budget_tier","?"))
     start = time.time()
+
     try:
-        # Step 1: Create invoice
+        # Step 1: Create invoice on our own node
         invoice = lnd_client.add_invoice(
             plan["amount_sats"],
             memo=f"rebal:{plan['source_alias'][:10]}→{plan['target_alias'][:10]}"
@@ -336,24 +336,24 @@ def execute_rebalance(plan, dry_run=False):
 
         if not payment_request:
             result["failure_reason"] = "failed to create invoice"
+            log.error("rebalance aborted: could not create invoice")
             return result
 
-        # Step 2: Pay the invoice with fee limit
-        # NOTE: basic sendpayment doesn't support outgoing_chan_id.
-        # Full circular rebalance requires router RPC (SendPaymentV2).
-        # This is a simplified version that lets LND pick the route.
-        pay_result = lnd_client.send_payment(
-            payment_request,
+        # Step 2: Pay via Router SendPaymentV2
+        # - outgoing_chan_id forces the first hop out through the source (overfull) channel
+        # - last_hop_pubkey forces the last hop back in through the target peer
+        # - allow_self_payment=True is required for circular payments
+        pay_result = lnd_client.send_payment_v2(
+            payment_request=payment_request,
+            outgoing_chan_id=plan["source_chan_id"],
+            last_hop_pubkey=plan["target_peer_pubkey"],
             fee_limit_sat=plan["max_fee_sats"],
-            timeout_seconds=120
+            timeout_seconds=120,
         )
 
-        if pay_result.get("payment_error"):
-            result["failure_reason"] = pay_result["payment_error"]
-        else:
+        if pay_result["status"] == "SUCCEEDED":
             result["success"] = True
-            route = pay_result.get("payment_route", {})
-            result["fee_paid"] = int(route.get("total_fees", 0))
+            result["fee_paid"] = pay_result["fee_sat"]
             result["fee_ppm"] = (
                 result["fee_paid"] / plan["amount_sats"] * 1_000_000
                 if plan["amount_sats"] > 0 else 0
@@ -361,10 +361,15 @@ def execute_rebalance(plan, dry_run=False):
             log.info("rebalance success: %s→%s fee %d sats (%.0f ppm)",
                      plan["source_alias"], plan["target_alias"],
                      result["fee_paid"], result["fee_ppm"])
+        else:
+            result["failure_reason"] = pay_result.get("failure_reason", "unknown")
+            log.warning("rebalance failed: %s→%s: %s",
+                        plan["source_alias"], plan["target_alias"], result["failure_reason"])
 
     except Exception as e:
         result["failure_reason"] = str(e)
-        log.error("rebalance failed: %s→%s: %s", plan["source_alias"], plan["target_alias"], e)
+        log.error("rebalance exception: %s→%s: %s",
+                  plan["source_alias"], plan["target_alias"], e)
 
     duration = time.time() - start
 

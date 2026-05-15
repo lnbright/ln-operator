@@ -196,9 +196,8 @@ def get_network_info():
 # ─── Payments & Invoices ─────────────────────────────────────────
 
 def send_payment(payment_request, fee_limit_sat=None, timeout_seconds=60):
-    """Send a payment (used for circular rebalancing).
-    
-    For rebalancing, we'd use the router RPC, but this is the basic version.
+    """Send a basic payment — used for non-rebalance payments.
+    Does not support outgoing_chan_id. Use send_payment_v2 for rebalancing.
     """
     data = {
         "payment_request": payment_request,
@@ -207,6 +206,99 @@ def send_payment(payment_request, fee_limit_sat=None, timeout_seconds=60):
     if fee_limit_sat is not None:
         data["fee_limit"] = {"fixed": str(fee_limit_sat)}
     return _post("/v1/channels/transactions", data)
+
+
+def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
+                    fee_limit_sat, timeout_seconds=120):
+    """Send a circular rebalance payment using the Router RPC.
+
+    Forces the payment out through a specific channel (outgoing_chan_id)
+    and back in through a specific peer (last_hop_pubkey).
+
+    - outgoing_chan_id: chan_id of the overfull channel (source)
+    - last_hop_pubkey: pubkey of the depleted channel peer (target)
+    - fee_limit_sat: max fee we will pay in sats
+    - allow_self_payment: must be True for circular payments
+
+    Returns dict with keys: status, fee_sat, failure_reason
+    The endpoint streams JSON results — we read until we get a terminal status.
+    """
+    import base64
+    log.debug("send_payment_v2: outgoing_chan=%s last_hop=%s fee_limit=%d",
+              outgoing_chan_id, last_hop_pubkey[:12], fee_limit_sat)
+
+    # last_hop_pubkey must be base64-encoded bytes
+    last_hop_bytes = bytes.fromhex(last_hop_pubkey)
+    last_hop_b64 = base64.b64encode(last_hop_bytes).decode()
+
+    data = {
+        "payment_request": payment_request,
+        "outgoing_chan_id": str(outgoing_chan_id),
+        "last_hop_pubkey": last_hop_b64,
+        "fee_limit_sat": str(fee_limit_sat),
+        "timeout_seconds": timeout_seconds,
+        "allow_self_payment": True,
+        "no_inflight_updates": True,  # only send final result, not intermediate updates
+    }
+
+    url = f"{LND_REST_URL}/v2/router/send"
+
+    # This endpoint streams responses — read chunks until we get a terminal status
+    r = requests.post(
+        url,
+        headers=_headers(),
+        verify=LND_CERT,
+        json=data,
+        stream=True,
+        timeout=timeout_seconds + 10,
+    )
+    r.raise_for_status()
+
+    last_result = None
+    for line in r.iter_lines():
+        if not line:
+            continue
+        try:
+            import json as _json
+            chunk = _json.loads(line)
+            # Each chunk is wrapped: {"result": {...}} or {"error": {...}}
+            if "error" in chunk:
+                return {
+                    "status": "FAILED",
+                    "fee_sat": 0,
+                    "failure_reason": chunk["error"].get("message", "unknown error"),
+                }
+            result = chunk.get("result", chunk)
+            last_result = result
+            status = result.get("status", "")
+            if status in ("SUCCEEDED", "FAILED", "FAILED_NO_ROUTE"):
+                break
+        except Exception as e:
+            log.warning("could not parse payment stream chunk: %s", e)
+            continue
+
+    if last_result is None:
+        return {"status": "FAILED", "fee_sat": 0, "failure_reason": "no response from router"}
+
+    status = last_result.get("status", "FAILED")
+    fee_sat = 0
+
+    if status == "SUCCEEDED":
+        # Sum fees across all HTLCs
+        for htlc in last_result.get("htlcs", []):
+            route = htlc.get("route", {})
+            fee_sat += int(route.get("total_fees", 0))
+
+    failure_reason = last_result.get("failure_reason", "") if status != "SUCCEEDED" else ""
+
+    log.debug("send_payment_v2 result: status=%s fee=%d sats reason=%s",
+              status, fee_sat, failure_reason)
+
+    return {
+        "status": status,
+        "fee_sat": fee_sat,
+        "failure_reason": failure_reason,
+    }
 
 
 def add_invoice(amount_sats, memo="ln-operator-rebalance", expiry=3600):
