@@ -1,9 +1,18 @@
+# Secrets — never commit these
 .env
+
+# Database — stays on the Pi
 *.db
 *.db-shm
 *.db-wal
+
+# Python
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Logs
 cron.log
 *.log
