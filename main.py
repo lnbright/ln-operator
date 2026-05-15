@@ -99,10 +99,10 @@ def cmd_rebalance(args):
     print("\n⚡ LN Operator — Rebalance Check")
     print("=" * 40)
 
-    plans = engine.plan_rebalances()
+    plans, reason = engine.plan_rebalances()
 
     if not plans:
-        print("All channels within healthy range — no rebalancing needed.")
+        print(f"  {reason}")
         return []
 
     print(f"\nFound {len(plans)} rebalance candidate(s):\n")
@@ -188,7 +188,7 @@ def cmd_cron(args):
 
     # Step 2: Rebalance
     print("\n── Step 2: Rebalance Check ──")
-    plans = engine.plan_rebalances()
+    plans, reason = engine.plan_rebalances()
     rebalance_results = []
     if plans:
         for p in plans:
@@ -199,7 +199,7 @@ def cmd_cron(args):
             print(f"  {p['target_alias']}: {p['amount_sats']:,} sats "
                   f"[{tier}, {p['max_fee_ppm']} ppm cap] — {status}")
     else:
-        print("  All channels balanced.")
+        print(f"  {reason}")
 
     # Step 3: Monitor
     print("\n── Step 3: Health Check ──")

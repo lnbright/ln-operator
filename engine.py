@@ -226,8 +226,15 @@ def plan_rebalances(channels=None):
 
     needs_inbound, needs_outbound = find_rebalance_candidates(channels)
 
-    if not needs_inbound or not needs_outbound:
-        return []
+    if not needs_inbound and not needs_outbound:
+        return [], "all channels balanced"
+    if not needs_inbound:
+        return [], (f"{len(needs_outbound)} channel(s) overfull but none depleted — "
+                    f"no circular rebalance possible")
+    if not needs_outbound:
+        depleted = ", ".join(f"{c['peer_alias']} ({c['local_ratio']:.0%})" for c in needs_inbound)
+        return [], (f"{len(needs_inbound)} channel(s) depleted ({depleted}) but no overfull "
+                    f"channel to rebalance from — need more channels or top up on-chain")
 
     plans = []
     outbound_idx = 0
@@ -275,7 +282,7 @@ def plan_rebalances(channels=None):
         if source_available - amount < 50_000:
             outbound_idx += 1
 
-    return plans
+    return plans, None
 
 
 # Note: actual circular rebalance execution requires the router RPC
