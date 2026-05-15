@@ -7,6 +7,9 @@ Receives pre-digested data, returns plain-English analysis.
 import json
 import requests
 from config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+from logging_config import get_logger
+
+log = get_logger("agent")
 
 
 def get_investment_summary(plan):
@@ -48,10 +51,11 @@ def get_investment_summary(plan):
             if block.get("type") == "text":
                 text += block.get("text", "")
 
+        log.info("agent summary received (%d chars)", len(text))
         return text.strip() if text else _fallback_summary(plan)
 
     except Exception as e:
-        print(f"[agent] Claude API call failed: {e}")
+        log.error("Claude API call failed: %s", e)
         return _fallback_summary(plan)
 
 

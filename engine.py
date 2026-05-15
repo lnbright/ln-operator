@@ -16,6 +16,9 @@ from config import (
 )
 import lnd_client
 import db
+from logging_config import get_logger
+
+log = get_logger('engine')
 
 
 # ─── Fee Management ──────────────────────────────────────────────
@@ -262,6 +265,9 @@ def plan_rebalances(channels=None):
         max_fee_ppm = budget["max_fee_ppm"]
         max_fee = int(amount * max_fee_ppm / 1_000_000)
 
+        log.info("rebalance plan: %s→%s %s sats [%s, %d ppm cap]",
+                 source_ch["peer_alias"], target_ch["peer_alias"],
+                 f"{amount:,}", budget["tier"], max_fee_ppm)
         plans.append({
             "source_chan_id": source_ch["chan_id"],
             "source_alias": source_ch["peer_alias"],
@@ -313,9 +319,12 @@ def execute_rebalance(plan, dry_run=False):
     }
 
     if dry_run:
+        log.info("dry run: would rebalance %s→%s %s sats", plan["source_alias"], plan["target_alias"], f"{plan["amount_sats"]:,}")
         result["failure_reason"] = "dry_run"
         return result
 
+    log.info("executing rebalance: %s→%s %s sats (max fee %d ppm)",
+             plan["source_alias"], plan["target_alias"], f"{plan['amount_sats']:,}", plan["max_fee_ppm"])
     start = time.time()
     try:
         # Step 1: Create invoice
@@ -349,9 +358,13 @@ def execute_rebalance(plan, dry_run=False):
                 result["fee_paid"] / plan["amount_sats"] * 1_000_000
                 if plan["amount_sats"] > 0 else 0
             )
+            log.info("rebalance success: %s→%s fee %d sats (%.0f ppm)",
+                     plan["source_alias"], plan["target_alias"],
+                     result["fee_paid"], result["fee_ppm"])
 
     except Exception as e:
         result["failure_reason"] = str(e)
+        log.error("rebalance failed: %s→%s: %s", plan["source_alias"], plan["target_alias"], e)
 
     duration = time.time() - start
 
@@ -468,4 +481,5 @@ def sync_forwarding_history(hours=24):
     events = lnd_client.get_forwarding_history(start_time=start)
     if events:
         db.save_forwarding_events(events)
+        log.debug("synced %d forwarding events (last %dh)", len(events), hours)
     return len(events)

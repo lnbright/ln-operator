@@ -7,6 +7,9 @@ import json
 import requests
 import urllib3
 from config import LND_REST_URL, LND_CERT, LND_MACAROON
+from logging_config import get_logger
+
+log = get_logger("lnd_client")
 
 # LND uses self-signed certs
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -22,6 +25,7 @@ def _headers():
 def _get(endpoint, params=None):
     """GET request to LND REST API."""
     url = f"{LND_REST_URL}{endpoint}"
+    log.debug("GET %s", endpoint)
     r = requests.get(url, headers=_headers(), verify=LND_CERT, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
@@ -30,6 +34,7 @@ def _get(endpoint, params=None):
 def _post(endpoint, data=None):
     """POST request to LND REST API."""
     url = f"{LND_REST_URL}{endpoint}"
+    log.debug("POST %s", endpoint)
     r = requests.post(url, headers=_headers(), verify=LND_CERT, json=data or {}, timeout=60)
     r.raise_for_status()
     return r.json()
@@ -226,6 +231,7 @@ def resolve_aliases(channels):
                 info = get_node_info(pk)
                 cache[pk] = info.get("node", {}).get("alias", pk[:12])
             except Exception:
+                log.debug("could not resolve alias for %s", pk[:12])
                 cache[pk] = pk[:12]
         ch["peer_alias"] = cache[pk]
     return channels

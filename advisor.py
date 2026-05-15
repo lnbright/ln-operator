@@ -14,6 +14,9 @@ from config import (
 )
 import lnd_client
 import db
+from logging_config import get_logger
+
+log = get_logger('advisor')
 
 
 def build_investment_plan(total_sats):
@@ -27,7 +30,7 @@ def build_investment_plan(total_sats):
     - current_state (node summary)
     - not_recommended (things to avoid right now)
     """
-    print(f"[advisor] Building investment plan for {total_sats:,} sats...")
+    log.info("building investment plan for %s sats", f"{total_sats:,}")
 
     # 1. Gather current node state
     state = _gather_node_state()
@@ -183,6 +186,7 @@ def _check_fee_environment():
             assessment = "low"
             note = f"On-chain fees low ({fastest} sat/vB). Good time to open channels."
 
+        log.info("on-chain fees: %d sat/vB (%s)", fastest, assessment)
         return {
             "fastest_fee": fastest,
             "half_hour_fee": half_hour,
@@ -192,6 +196,7 @@ def _check_fee_environment():
             "note": note,
         }
     except Exception as e:
+        log.warning("could not fetch on-chain fees: %s", e)
         return {
             "fastest_fee": 0,
             "assessment": "unknown",
@@ -277,7 +282,7 @@ def _fetch_external_candidates(state):
                             "source": "1ml",
                         })
     except Exception as e:
-        print(f"[advisor] 1ML fetch failed: {e}")
+        log.warning("1ML fetch failed: %s", e)
 
     # 2. Use LND's local graph to find well-connected nodes we're not connected to
     try:
@@ -315,7 +320,7 @@ def _fetch_external_candidates(state):
             candidates.extend(graph_candidates)
 
     except Exception as e:
-        print(f"[advisor] Graph analysis failed: {e}")
+        log.warning("graph analysis failed: %s", e)
 
     # Deduplicate by pubkey
     seen = set()
@@ -396,8 +401,10 @@ def _score_candidates(candidates, state):
         )
         c["score_breakdown"] = scores
 
-    # Sort by score
     candidates.sort(key=lambda c: c["score"], reverse=True)
+    if candidates:
+        log.debug("top candidate: %s (score %.2f, %d channels)", 
+                  candidates[0].get("alias","?"), candidates[0]["score"], candidates[0].get("channel_count",0))
     return candidates
 
 
@@ -522,6 +529,9 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
     # Add onchain fee note to plan
     plan_note = fee_env.get("note", "")
 
+    log.info("allocation: %d action(s), %d concern(s)", len(actions), len(not_recommended))
+    for a in actions:
+        log.info("  → %s %s: %s sats", a["type"], a["peer_alias"], f"{a['amount_sats']:,}")
     # Sort actions by priority
     actions.sort(key=lambda a: a.get("priority", 99))
 

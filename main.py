@@ -22,6 +22,7 @@ from datetime import datetime
 import db
 import engine
 from config import ANTHROPIC_API_KEY
+from logging_config import setup_logging, get_logger
 import advisor
 import agent
 import telegram_bot
@@ -42,6 +43,8 @@ def cmd_invest(args):
     plan = advisor.build_investment_plan(amount)
 
     # 10% — Agent adds judgement
+    log_main = get_logger("main")
+    log_main.info("requesting agent analysis")
     print("\n[agent] Getting Claude's analysis...")
     summary = agent.get_investment_summary(plan)
     plan["agent_summary"] = summary
@@ -413,6 +416,11 @@ def main():
     p_hist.add_argument("days", type=int, nargs="?", default=30, help="Number of days (default: 30)")
 
     args = parser.parse_args()
+
+    # Initialise logging
+    setup_logging()
+    log = get_logger('main')
+    log.info("ln-operator starting: %s", args.command)
 
     # Initialise database
     db.init_db()
