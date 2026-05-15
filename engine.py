@@ -319,7 +319,7 @@ def execute_rebalance(plan, dry_run=False):
     }
 
     if dry_run:
-        log.info("dry run: would rebalance %s→%s %s sats", plan["source_alias"], plan["target_alias"], f"{plan["amount_sats"]:,}")
+        log.info("dry run: would rebalance %s→%s %s sats", plan["source_alias"], plan["target_alias"], f"{plan['amount_sats']:,}")
         result["failure_reason"] = "dry_run"
         return result
 
