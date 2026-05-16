@@ -68,6 +68,10 @@ def build_investment_plan(total_sats):
     # 6. Score and rank all candidates
     scored_candidates = _score_candidates(external_candidates, state)
 
+    # 6b. Enrich top candidates with live graph data (diversity, fees, reachability)
+    log.info("enriching top candidates with graph data...")
+    scored_candidates = _enrich_candidates_with_graph_data(scored_candidates, state)
+
     # 7. Allocate budget across actions
     actions, not_recommended = _allocate_budget(
         deployable, state, channel_analysis, scored_candidates, fee_env
@@ -349,6 +353,86 @@ def _fetch_external_candidates(state):
     return unique
 
 
+def _enrich_candidates_with_graph_data(candidates, state):
+    """Pull per-candidate graph data from LND for richer scoring and agent context.
+
+    For each top candidate, fetches:
+    - Their peer list (to compute diversity: how many peers we don't share)
+    - Their fee policies (average fee rate on their channels)
+    - Whether they're reachable (have a known address)
+
+    This is expensive (one API call per candidate) so we only do it for the
+    top N candidates that will actually appear in the plan.
+    """
+    our_peers = state["existing_peers"]
+    enriched = []
+
+    for c in candidates[:15]:  # only enrich top 15 — graph calls are slow
+        try:
+            node_info = lnd_client.get_node_info(c["pubkey"], include_channels=True)
+            node = node_info.get("node", {})
+            channels = node_info.get("channels", [])
+
+            # Compute diversity: what fraction of their peers are new to us?
+            their_peers = set()
+            total_fee_rate = 0
+            fee_count = 0
+
+            for ch in channels:
+                # Find the peer on the other end
+                n1 = ch.get("node1_pub", "")
+                n2 = ch.get("node2_pub", "")
+                peer_pk = n2 if n1 == c["pubkey"] else n1
+                if peer_pk:
+                    their_peers.add(peer_pk)
+
+                # Average fee rate from their policy
+                policy = ch.get("node1_policy") if n1 == c["pubkey"] else ch.get("node2_policy")
+                if policy and policy.get("fee_rate_milli_msat"):
+                    total_fee_rate += int(policy["fee_rate_milli_msat"]) / 1000  # convert to ppm
+                    fee_count += 1
+
+            # Diversity: fraction of their peers we're not already connected to
+            if their_peers:
+                new_peers = their_peers - our_peers - {state["pubkey"]}
+                diversity = len(new_peers) / len(their_peers)
+            else:
+                diversity = 0.5
+
+            avg_fee_ppm = int(total_fee_rate / fee_count) if fee_count > 0 else 0
+
+            # Is the node reachable?
+            addresses = node.get("addresses", [])
+            has_clearnet = any(
+                not a.get("addr", "").endswith(".onion")
+                for a in addresses
+            )
+
+            c["graph_data"] = {
+                "their_peer_count": len(their_peers),
+                "new_peers_to_us": len(their_peers - our_peers - {state["pubkey"]}),
+                "diversity_score": round(diversity, 3),
+                "avg_fee_ppm": avg_fee_ppm,
+                "has_clearnet": has_clearnet,
+                "addresses": [a.get("addr", "") for a in addresses[:3]],
+            }
+            c["diversity_score_computed"] = diversity
+
+        except Exception as e:
+            log.debug("could not enrich %s with graph data: %s", c.get("alias", "?"), e)
+            c["graph_data"] = None
+
+        enriched.append(c)
+
+    # Return enriched + any remaining un-enriched candidates
+    enriched_pubkeys = {c["pubkey"] for c in enriched}
+    for c in candidates[15:]:
+        if c["pubkey"] not in enriched_pubkeys:
+            enriched.append(c)
+
+    return enriched
+
+
 def _score_candidates(candidates, state):
     """Score and rank candidate peers.
     
@@ -392,9 +476,11 @@ def _score_candidates(candidates, state):
         else:
             scores["centrality"] = 0
 
-        # Diversity — check if connecting to this node reaches new parts of the graph
-        # Simple proxy: do we share any peers? Fewer shared = more diverse
-        scores["diversity"] = 0.5  # placeholder — enriched if we have graph data
+        # Diversity — use computed score from graph data if available, else placeholder
+        if c.get("diversity_score_computed") is not None:
+            scores["diversity"] = c["diversity_score_computed"]
+        else:
+            scores["diversity"] = 0.5  # placeholder
 
         # Check historical data
         peer_hist = db.get_peer_history(c["pubkey"])

@@ -241,29 +241,47 @@ def _build_compact_prompt(plan):
         for ch in analysis["unprofitable"][:3]:
             lines.append(f"  - {ch['peer_alias']}: {ch.get('reason', '')}")
 
-    # Recommended actions — include pubkeys so agent can look them up
+    # Recommended actions — include pubkeys and graph data so agent can research
     lines.append("")
     lines.append("Recommended actions (please research each peer before advising):")
     for a in plan.get("actions", []):
         lines.append(
             f"  {a['type'].upper()}: {a['peer_alias']} "
-            f"(pubkey: {a.get('peer_pubkey', 'unknown')[:20]}...) "
-            f"— {a['amount_sats']:,} sats — score {a.get('score', '?')} — {a.get('reason', '')}"
+            f"(pubkey: {a.get('peer_pubkey', 'unknown')}) "
+            f"— {a['amount_sats']:,} sats — score {a.get('score', '?')}"
         )
+        # Include graph data if available
+        gd = a.get("graph_data")
+        if gd:
+            lines.append(
+                f"    Graph: {a.get('channel_count',0)} channels, "
+                f"{a.get('capacity',0):,} sats capacity, "
+                f"avg fee {gd.get('avg_fee_ppm', '?')} ppm, "
+                f"diversity {gd.get('diversity_score', '?'):.0%} new peers, "
+                f"clearnet: {gd.get('has_clearnet', '?')}"
+            )
+        lines.append(f"    Engine reason: {a.get('reason', '')}")
     lines.append("")
 
-    # Top scored candidates not in actions (in case agent wants to suggest alternatives)
+    # Top scored candidates not in actions (for alternatives)
     candidates = plan.get("peer_candidates", [])
     if candidates:
         lines.append("Other top-scored candidates (for alternatives if needed):")
         for c in candidates[:5]:
-            lines.append(
+            gd = c.get("graph_data")
+            line = (
                 f"  - {c.get('alias', '?')} "
-                f"(pubkey: {c.get('pubkey', '')[:20]}...) "
+                f"(pubkey: {c.get('pubkey', '')}) "
                 f"score {c.get('score', '?')}, "
                 f"{c.get('channel_count', 0)} channels, "
                 f"{c.get('capacity', 0):,} sats"
             )
+            if gd:
+                line += (
+                    f", avg fee {gd.get('avg_fee_ppm','?')} ppm, "
+                    f"diversity {gd.get('diversity_score',0):.0%}"
+                )
+            lines.append(line)
     lines.append("")
 
     if plan.get("not_recommended"):
