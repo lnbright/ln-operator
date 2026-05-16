@@ -165,67 +165,51 @@ def _calculate_treasury(total_sats, state, num_new_channels=2, fee_rate_sat_vb=3
     min_reserve = int(total_sats * TREASURY_MIN_RATIO)
 
     # Anchor reserve for new channels
-    # LND already has existing_anchor_reserve locked in wallet.
-    # Each new anchor channel adds 10,000 sats to the reserve, up to the 100,000 cap.
     existing_reserve = state.get("current_anchor_reserve", 0)
     new_anchor_needed = min(
         num_new_channels * ANCHOR_RESERVE_PER_CHANNEL,
         max(0, ANCHOR_RESERVE_MAX - existing_reserve)
     )
 
-    # On-chain opening fees: real fee rate × ~250 vBytes per channel open tx
-    # 250 vBytes is approximate for a standard channel open (1 input, 2 outputs, P2WSH)
+    # On-chain opening fees: real fee rate x ~250 vBytes per channel open tx
     channel_open_tx_vbytes = 250
     onchain_open_fees = num_new_channels * fee_rate_sat_vb * channel_open_tx_vbytes
-    reasoning_parts.append(
-        f"est. open fees: {onchain_open_fees:,} sats "
-        f"({num_new_channels} × {fee_rate_sat_vb} sat/vB × {channel_open_tx_vbytes} vB)"
-    )
 
     # Cost-based reserve from historical data
     avg_monthly_cost = db.get_avg_monthly_rebalance_cost(months=3)
     cost_reserve = int(avg_monthly_cost * TREASURY_MONTHS_RESERVE)
 
-    # Also factor in potential channel close costs (on-chain fees)
-    # Rough estimate: 1 close could cost ~10-50k sats depending on fees
+    # Channel close buffer
     close_buffer = 50_000 * max(1, state["num_channels"] // 5)
 
+    # Build reasoning
     reasoning_parts = []
-    reasoning_parts.append(
-        f"anchor reserve for {num_new_channels} new channel(s): {new_anchor_needed:,} sats"
-    )
+    if cost_reserve > 0:
+        reasoning_parts.append(f"{TREASURY_MONTHS_RESERVE}mo avg rebalance cost: {cost_reserve:,} sats")
+    else:
+        reasoning_parts.append("no rebalancing history yet — using minimum ratio")
+    reasoning_parts.append(f"anchor reserve for {num_new_channels} new channel(s): {new_anchor_needed:,} sats")
     reasoning_parts.append(
         f"est. open fees: {onchain_open_fees:,} sats "
         f"({num_new_channels} x {fee_rate_sat_vb} sat/vB x {channel_open_tx_vbytes} vB)"
     )
+    reasoning_parts.append(f"close buffer: {close_buffer:,} sats")
 
-    if cost_reserve > 0:
-        reasoning_parts.append(
-            f"{TREASURY_MONTHS_RESERVE}mo avg rebalance cost: {cost_reserve:,} sats"
-        )
-    else:
-        reasoning_parts.append("no rebalancing history yet — using minimum ratio")
-
-    # Total reserve = max of minimum ratio OR historical costs,
-    # PLUS anchor reserve for new channels PLUS estimated on-chain fees
+    # Total reserve
     total_reserve = max(min_reserve, cost_reserve + close_buffer)
     total_reserve += new_anchor_needed + onchain_open_fees
-    reasoning_parts.append(
-        f"anchor reserve for {num_new_channels} new channel(s): {new_anchor_needed:,} sats"
-    )
 
-    # Don't reserve more than 30% of the total — that defeats the purpose
+    # Cap at 30%
     max_reserve = int(total_sats * 0.30)
     if total_reserve > max_reserve:
         total_reserve = max_reserve
         reasoning_parts.append(f"capped at 30% ({max_reserve:,} sats)")
 
-    reasoning_parts.append(f"close buffer: {close_buffer:,} sats")
-
     return {
         "reserve_sats": total_reserve,
         "reasoning": "; ".join(reasoning_parts),
     }
+
 
 
 def _check_fee_environment():
