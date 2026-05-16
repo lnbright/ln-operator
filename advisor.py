@@ -280,6 +280,13 @@ def _analyse_existing_channels(channels):
 def _fetch_candidates_from_graph(state):
     """Build candidate list from LND's local graph — the primary data source.
 
+    WHY local graph and not 1ML:
+    - Always available, always up to date, no external dependency
+    - Contains topology data (who connects to whom) which 1ML doesn't expose well
+    - Capacity numbers may be incomplete for distant nodes (gossip propagation
+      depends on your channel connections) — this improves as you add channels
+    - 1ML is used only to cross-check/confirm aliases, not as primary source
+
     Traverses the full network graph to:
     1. Build a map of every node with their channel count and total capacity
     2. Rank them by channel count to determine hub vs mid-tier
@@ -350,6 +357,12 @@ def _fetch_candidates_from_graph(state):
 
 def _enrich_with_1ml_aliases(candidates):
     """Optionally enrich candidate aliases from 1ML.
+
+    1ML is no longer the primary candidate source. We use it only to confirm
+    or correct the alias names the LND graph gossips. This matters because
+    aliases in the graph can be stale if a node updated their name recently.
+    Fails completely silently — if 1ML is down, candidates still have their
+    LND graph aliases which are good enough.
 
     1ML is no longer the primary source — it's used only to cross-reference
     aliases and confirm node names for the top candidates.
@@ -568,6 +581,10 @@ def _score_candidates(candidates, state):
     return candidates
 
 
+# ─── Hub/mid-tier classification ────────────────────────────────
+# A hub is defined by absolute channel count, not relative rank.
+# This is intentional — we want classification to be stable regardless
+# of how many nodes your local graph knows about.
 # Hub classification threshold — nodes in the top N by channel count are "hubs"
 HUB_CHANNEL_THRESHOLD = 100   # nodes with 100+ channels are considered hubs
 
@@ -661,6 +678,8 @@ def _make_open_action(candidate, size, reason, priority=2):
         "peer_pubkey": candidate["pubkey"],
         "amount_sats": size,
         "score": candidate["score"],
+        "network_rank": candidate.get("network_rank"),
+        "tier_hint": candidate.get("tier_hint"),
         "channel_count": candidate.get("channel_count", 0),
         "capacity": candidate.get("capacity", 0),
         "graph_data": gd,
@@ -724,6 +743,10 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
         # ── Step 3: Decide which tier to target ──────────────────
         max_new = min(remaining // PREFERRED_CHANNEL_SIZE_SATS, 10)
 
+        # Portfolio strategy decision:
+        # The goal is balanced connectivity — not all hubs (too much competition,
+        # all traffic flows through the same corridors) and not all mid-tier
+        # (less initial traffic). Start with hubs for backbone, then diversify.
         if hub_count == 0:
             # No hubs yet — shortlist top 10 hubs for agent to evaluate
             pool = hubs[:10] if hubs else candidates[:10]

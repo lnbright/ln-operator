@@ -50,13 +50,12 @@ You receive a shortlist of 10 candidate nodes from the Python engine. Your job:
 4. Also suggest the final budget allocation: given the deployable sats and
    minimum channel size shown in the plan below, how many channels and at what size?
 
-Output format — plain prose only, no markdown, no bullets:
-"Recommend opening channels to [name1], [name2], [name3].
-[Name1]: avg channel size X sats (Amboss/1ML), [one reason].
-[Name2]: avg channel size X sats, [one reason].
-[Name3]: avg channel size X sats, [one reason].
-Suggested allocation: [X] sats per channel across [N] channels.
-Fee environment: [one sentence]."
+Output — plain prose only. Zero markdown. No asterisks, no dashes, no headers.
+Start directly with: "Recommend opening channels to [name1], [name2], [name3]."
+Then one sentence per node: "[Name]: avg channel size X sats (source), [reason]."
+Then one sentence on allocation respecting the minimum channel size shown in the plan.
+Then one sentence on fee environment.
+If a candidate is disqualified (e.g. does not accept external channels), say so in one sentence.
 Max 200 words. Use sats not BTC."""
 
 
@@ -64,6 +63,16 @@ Max 200 words. Use sats not BTC."""
 
 def _run_agentic_call(system_prompt, user_message, max_tokens=2000, max_turns=5):
     """Run a Claude API call with web search enabled.
+
+    Web search turns this into an agentic loop:
+    1. We send the message to Claude
+    2. Claude responds with tool_use blocks (search requests)
+    3. We send tool_result blocks back
+    4. Claude searches, gets results, may search again
+    5. When Claude stops with stop_reason="end_turn" it's done
+
+    The actual web searches happen on Anthropic's infrastructure — we just
+    relay the tool_use/tool_result turns. max_turns prevents infinite loops.
 
     Handles the agentic loop: Claude may make multiple web search tool calls
     before producing a final text response. We keep sending tool results back
@@ -267,6 +276,10 @@ def _build_compact_prompt(plan):
                 f"clearnet: {gd.get('has_clearnet', '?')}"
             )
     lines.append("")
+    # The agent searches Amboss and 1ML to find real capacity and avg channel size.
+    # Local graph capacity is unreliable for distant nodes (depends on gossip
+    # propagation quality — improves as you add more channels). The agent
+    # triangulates between sources for confidence.
     lines.append("Search Amboss for each to find real capacity and avg channel size, then recommend top 3.")
     lines.append("")
 
