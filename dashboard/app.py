@@ -571,8 +571,6 @@ TEMPLATE = """
           </tr>
           {% endfor %}
         </tbody>
-      </table>
-      {% else %}
       </table></div>
       {% else %}
       <div class="empty-state">No invoices found</div>
