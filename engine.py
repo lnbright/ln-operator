@@ -1,7 +1,17 @@
 """
 LN Operator — Channel Management Engine (60% layer)
-Handles fee updates, rebalancing, and channel monitoring.
-All deterministic logic — no LLM calls.
+
+This is the core of the tool. All operations are deterministic — given the same
+channel state and config, you always get the same output. No LLM calls.
+
+Responsibilities:
+- Dynamic fee management: adjust each channel's fee rate based on its balance ratio
+- Smart rebalancing: move sats between channels with per-channel budget limits
+- Health monitoring: snapshot channel states, sync routing history, fire alerts
+- Forwarding history sync: pull new routing events from LND using offset pagination
+
+The engine reads live data from LND (via lnd_client) and historical data from
+SQLite (via db). It writes results back to SQLite for the dashboard and CLI to read.
 """
 
 import time
@@ -64,6 +74,8 @@ def update_all_fees(dry_run=False):
 
         # Only update if fee changed by more than 5 ppm (avoid gossip spam)
         if abs(new_ppm - old_ppm) < 5 and old_base == FEE_BASE_MSAT:
+            log.debug("fees: %s unchanged at %d ppm (local %.0f%%)",
+                      ch["peer_alias"], old_ppm, ch["local_ratio"] * 100)
             continue
 
         change = {
@@ -96,6 +108,12 @@ def update_all_fees(dry_run=False):
 
         updates.append(change)
 
+    if updates:
+        applied = sum(1 for u in updates if u.get("applied") is True)
+        log.info("fees: %d change(s) applied, %d failed",
+                 applied, len(updates) - applied)
+    else:
+        log.info("fees: all channels within 5 ppm tolerance — no changes needed")
     return updates
 
 
@@ -228,6 +246,13 @@ def plan_rebalances(channels=None):
         channels = lnd_client.resolve_aliases(channels)
 
     needs_inbound, needs_outbound = find_rebalance_candidates(channels)
+
+    log.info("rebalance: %d depleted, %d overfull channel(s) found",
+             len(needs_inbound), len(needs_outbound))
+    for ch in needs_inbound:
+        log.info("  depleted: %s at %.0f%% local", ch["peer_alias"], ch["local_ratio"] * 100)
+    for ch in needs_outbound:
+        log.info("  overfull: %s at %.0f%% local", ch["peer_alias"], ch["local_ratio"] * 100)
 
     if not needs_inbound and not needs_outbound:
         return [], "all channels balanced"
@@ -477,14 +502,58 @@ def get_channel_health_report(channels=None):
     # Save snapshot to database
     db.save_channel_snapshot(channels)
 
+    log.info("healthcheck: %d channel(s) active, %d inactive, overall local %.0f%%",
+             report["active_channels"], report["inactive_channels"],
+             report["overall_local_ratio"] * 100)
+    if report["alerts"]:
+        for alert in report["alerts"]:
+            log.warning("healthcheck alert [%s]: %s", alert["type"], alert["message"])
+    else:
+        log.info("healthcheck: all channels healthy")
+
     return report
 
 
-def sync_forwarding_history(hours=24):
-    """Fetch recent forwarding events from LND and save to database."""
-    start = int(time.time()) - (hours * 3600)
-    events = lnd_client.get_forwarding_history(start_time=start)
-    if events:
+def sync_forwarding_history():
+    """Fetch new forwarding events from LND using offset-based pagination.
+
+    Reads the last seen offset from sync_state, fetches only new events,
+    saves them (with duplicate protection via lnd_index), then updates
+    the offset. Safe to call from both cron and manual runs — will never
+    write the same event twice.
+    """
+    # Get the last offset we successfully synced
+    last_offset = int(db.get_sync_state("forwarding_index", 0))
+    log.debug("sync_forwarding_history: starting from offset %d", last_offset)
+
+    total_synced = 0
+    batch_size = 1000
+
+    while True:
+        events, new_offset = lnd_client.get_forwarding_history(
+            index_offset=last_offset,
+            max_events=batch_size,
+        )
+
+        if not events:
+            break
+
         db.save_forwarding_events(events)
-        log.debug("synced %d forwarding events (last %dh)", len(events), hours)
-    return len(events)
+        total_synced += len(events)
+        log.debug("synced batch of %d events, new offset %d", len(events), new_offset)
+
+        # Update the stored offset
+        db.set_sync_state("forwarding_index", new_offset)
+        last_offset = new_offset
+
+        # If we got fewer events than requested, we're caught up
+        if len(events) < batch_size:
+            break
+
+    if total_synced > 0:
+        log.info("sync_routing: %d new event(s) saved (offset now %d)",
+                 total_synced, last_offset)
+    else:
+        log.info("sync_routing: no new events since last run (offset %d)", last_offset)
+
+    return total_synced

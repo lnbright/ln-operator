@@ -4,13 +4,14 @@ LN Operator — Main CLI
 Channel management cron jobs and investment advisor.
 
 Usage:
-    python main.py invest <amount_sats>      — get an investment plan
-    python main.py fees [--dry-run]           — update channel fees
-    python main.py rebalance [--dry-run]      — run rebalancing
-    python main.py monitor                    — health check + alerts
-    python main.py cron                       — run fees + rebalance + monitor (for crontab)
-    python main.py status                     — quick node status summary
-    python main.py history [days]             — show recent activity from database
+    python main.py pipeline [--dry-run]            — run full pipeline (for crontab)
+    python main.py adjust_fees [--dry-run]         — adjust channel fee rates
+    python main.py rebalance_channels [--dry-run]  — rebalance depleted/overfull channels
+    python main.py sync_routing                    — sync routing events from LND
+    python main.py healthcheck                     — check channel health + fire alerts
+    python main.py invest <amount_sats>            — investment advisor
+    python main.py status                          — quick node overview
+    python main.py history [days]                  — recent activity from database
 """
 
 import sys
@@ -86,7 +87,7 @@ def _followup_loop(plan):
         print(answer)
 
 
-def cmd_fees(args):
+def cmd_adjust_fees(args):
     """Update fee policies on all channels."""
     print("\n⚡ LN Operator — Fee Policy Update")
     print("=" * 40)
@@ -115,7 +116,7 @@ def cmd_fees(args):
     return updates
 
 
-def cmd_rebalance(args):
+def cmd_rebalance_channels(args):
     """Check for and execute rebalancing."""
     print("\n⚡ LN Operator — Rebalance Check")
     print("=" * 40)
@@ -158,14 +159,20 @@ def cmd_rebalance(args):
     return results
 
 
-def cmd_monitor(args):
-    """Run health check and send alerts for any issues."""
-    print("\n⚡ LN Operator — Health Monitor")
+def cmd_sync_routing(args):
+    """Sync routing events from LND into the local database."""
+    print("\n⚡ LN Operator — Sync Routing History")
     print("=" * 40)
 
-    # Sync forwarding history first
-    num_events = engine.sync_forwarding_history(hours=24)
-    print(f"  Synced {num_events} forwarding events (last 24h)")
+    num_events = engine.sync_forwarding_history()
+    print(f"  Synced {num_events} new forwarding events")
+    return num_events
+
+
+def cmd_healthcheck(args):
+    """Snapshot channel states, check for problems, fire alerts."""
+    print("\n⚡ LN Operator — Health Check")
+    print("=" * 40)
 
     report = engine.get_channel_health_report()
 
@@ -180,7 +187,6 @@ def cmd_monitor(args):
         for alert in report["alerts"]:
             print(f"    • [{alert['type']}] {alert['message']}")
 
-            # Save and send alert
             db.save_alert(alert["type"], alert["message"], alert.get("chan_id"))
 
             if not args.no_telegram:
@@ -192,71 +198,94 @@ def cmd_monitor(args):
     return report
 
 
-def cmd_cron(args):
-    """Combined cron job: fees → rebalance → monitor."""
-    print(f"\n⚡ LN Operator — Cron Run ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
+def cmd_run(args):
+    """Full pipeline: adjust_fees → rebalance_channels → sync_routing → healthcheck."""
+    log_main = get_logger("main")
+    started = time.time()
+    dry = " [DRY RUN]" if args.dry_run else ""
+    log_main.info("pipeline starting%s", dry)
+    print(f"\n⚡ LN Operator — Pipeline Run ({datetime.now().strftime('%Y-%m-%d %H:%M')}){dry}")
     print("=" * 55)
 
-    # Step 1: Update fees FIRST (reputation shield)
-    print("\n── Step 1: Fee Update ──")
+    # Step 1: Adjust fees FIRST — protects reputation on depleted channels
+    print("\n── Step 1: Adjust Fees ──")
     fee_updates = engine.update_all_fees(dry_run=args.dry_run)
     if fee_updates:
         for u in fee_updates:
             d = "↑" if u["new_ppm"] > u["old_ppm"] else "↓"
-            print(f"  {d} {u['alias']}: {u['old_ppm']}→{u['new_ppm']} ppm")
+            print(f"  {d} {u['alias']}: {u['old_ppm']}→{u['new_ppm']} ppm (local {u['local_ratio']:.0%})")
     else:
         print("  No fee changes needed.")
 
-    # Step 2: Rebalance
-    print("\n── Step 2: Rebalance Check ──")
+    # Step 2: Rebalance channels
+    print("\n── Step 2: Rebalance Channels ──")
     plans, reason = engine.plan_rebalances()
     rebalance_results = []
     if plans:
         for p in plans:
             result = engine.execute_rebalance(p, dry_run=args.dry_run)
             rebalance_results.append(result)
-            status = "✓" if result["success"] else f"✗ {result['failure_reason']}"
-            tier = p.get('budget_tier', '?')
-            print(f"  {p['target_alias']}: {p['amount_sats']:,} sats "
-                  f"[{tier}, {p['max_fee_ppm']} ppm cap] — {status}")
+            if result["success"]:
+                print(f"  ✓ {p['source_alias']} → {p['target_alias']}: "
+                      f"{p['amount_sats']:,} sats, fee {result['fee_paid']:,} sats "
+                      f"({result['fee_ppm']:.0f} ppm) [{p.get('budget_tier','?')}]")
+            else:
+                print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
+                      f"{result['failure_reason']}")
     else:
         print(f"  {reason}")
 
-    # Step 3: Monitor
-    print("\n── Step 3: Health Check ──")
-    engine.sync_forwarding_history(hours=1)
+    # Step 3: Sync routing history from LND
+    print("\n── Step 3: Sync Routing ──")
+    num_events = engine.sync_forwarding_history()
+    print(f"  {num_events} new routing event(s) synced")
+
+    # Step 4: Health check + alerts
+    print("\n── Step 4: Health Check ──")
     report = engine.get_channel_health_report()
+    print(f"  {report['active_channels']} active, {report['inactive_channels']} inactive — "
+          f"overall local {report['overall_local_ratio']:.0%}")
     if report["alerts"]:
         for a in report["alerts"]:
-            print(f"  ⚠️  {a['message']}")
+            print(f"  ⚠️  [{a['type']}] {a['message']}")
     else:
-        print("  ✅ All healthy.")
+        print("  ✅ All channels healthy.")
 
-    # Step 4: Telegram summary
+    elapsed = time.time() - started
+    log_main.info("pipeline complete in %.1fs — fees:%d rebalances:%d events:%d alerts:%d",
+                  elapsed, len(fee_updates), len(rebalance_results),
+                  num_events, len(report["alerts"]))
+    print(f"\n✅ Pipeline complete in {elapsed:.1f}s")
+
+    # Telegram summary
     if not args.dry_run and not args.no_telegram:
-        lines = [f"⚡ *Cron Run — {datetime.now().strftime('%Y-%m-%d %H:%M')}*", ""]
+        lines = [f"⚡ *Pipeline — {datetime.now().strftime('%Y-%m-%d %H:%M')}*", ""]
 
         if fee_updates:
-            lines.append(f"📊 *Fees:* {len(fee_updates)} channel(s) updated")
+            applied = sum(1 for u in fee_updates if u.get("applied") is True)
+            lines.append(f"📊 *Fees:* {applied} updated")
+            for u in fee_updates:
+                d = "↑" if u["new_ppm"] > u["old_ppm"] else "↓"
+                lines.append(f"  {d} {u['alias']} {u['old_ppm']}→{u['new_ppm']} ppm")
         else:
-            lines.append("📊 *Fees:* no changes")
+            lines.append("📊 *Fees:* no changes needed")
 
         if rebalance_results:
             ok = sum(1 for r in rebalance_results if r["success"])
-            lines.append(f"🔄 *Rebalance:* {ok}/{len(rebalance_results)} successful")
+            lines.append(f"🔄 *Rebalance:* {ok}/{len(rebalance_results)} succeeded")
         else:
-            lines.append("🔄 *Rebalance:* all balanced")
+            lines.append(f"🔄 *Rebalance:* {reason}")
+
+        lines.append(f"🔗 *Sync:* {num_events} new event(s)")
 
         if report["alerts"]:
-            lines.append(f"⚠️ *Alerts:* {len(report['alerts'])}")
+            lines.append(f"⚠️ *Alerts: {len(report['alerts'])}*")
             for a in report["alerts"][:5]:
-                lines.append(f"  • {a['message']}")
+                lines.append(f"  • [{a['type']}] {a['message']}")
         else:
             lines.append("✅ *Health:* all channels OK")
 
         telegram_bot.send_message("\n".join(lines))
-
-    print(f"\n✅ Cron run complete.")
 
 
 def cmd_status(args):
@@ -379,33 +408,46 @@ def main():
     parser.add_argument("--no-telegram", action="store_true",
                         help="Skip Telegram notifications")
 
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    subparsers = parser.add_subparsers(dest="command",
+        metavar="command",
+        help="See 'main.py <command> --help' for details")
 
-    # invest
-    p_invest = subparsers.add_parser("invest", help="Investment advisor")
-    p_invest.add_argument("amount", type=int, help="Amount in sats to invest")
+    # ── AUTOMATED — full pipeline, designed for crontab ──────────
+    p_pipeline = subparsers.add_parser("pipeline",
+        help="[automated] Run full pipeline: adjust_fees → rebalance_channels → sync_routing → healthcheck")
+    p_pipeline.add_argument("--dry-run", action="store_true",
+        help="Preview all changes without applying")
 
-    # fees
-    p_fees = subparsers.add_parser("fees", help="Update channel fees")
-    p_fees.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+    # ── FEATURES — interactive tools for the operator ────────────
+    p_invest = subparsers.add_parser("invest",
+        help="[feature]   Investment advisor — given X sats, what channels to open?")
+    p_invest.add_argument("amount", type=int,
+        help="Amount in sats you want to deploy")
 
-    # rebalance
-    p_rebal = subparsers.add_parser("rebalance", help="Run rebalancing")
-    p_rebal.add_argument("--dry-run", action="store_true", help="Show plan without executing")
+    p_status = subparsers.add_parser("status",
+        help="[feature]   Quick node overview with channel balance bars")
 
-    # monitor
-    p_monitor = subparsers.add_parser("monitor", help="Health check + alerts")
+    p_hist = subparsers.add_parser("history",
+        help="[feature]   Show fee revenue, rebalance stats, and alerts from database")
+    p_hist.add_argument("days", type=int, nargs="?", default=30,
+        help="Number of days to look back (default: 30)")
 
-    # cron
-    p_cron = subparsers.add_parser("cron", help="Combined cron run (fees + rebalance + monitor)")
-    p_cron.add_argument("--dry-run", action="store_true", help="Dry run all operations")
+    # ── DEBUG — run individual pipeline steps in isolation ────────
+    p_fees = subparsers.add_parser("adjust_fees",
+        help="[debug]     Adjust channel fee rates based on current balance ratios")
+    p_fees.add_argument("--dry-run", action="store_true",
+        help="Show what would change without applying")
 
-    # status
-    p_status = subparsers.add_parser("status", help="Quick node status")
+    p_rebal = subparsers.add_parser("rebalance_channels",
+        help="[debug]     Move sats from overfull to depleted channels")
+    p_rebal.add_argument("--dry-run", action="store_true",
+        help="Show plan without executing payments")
 
-    # history
-    p_hist = subparsers.add_parser("history", help="Recent activity from database")
-    p_hist.add_argument("days", type=int, nargs="?", default=30, help="Number of days (default: 30)")
+    p_sync = subparsers.add_parser("sync_routing",
+        help="[debug]     Sync routing events from LND into the local database")
+
+    p_health = subparsers.add_parser("healthcheck",
+        help="[debug]     Snapshot channel states, check for problems, fire alerts")
 
     args = parser.parse_args()
 
@@ -419,14 +461,16 @@ def main():
 
     if args.command == "invest":
         cmd_invest(args)
-    elif args.command == "fees":
-        cmd_fees(args)
-    elif args.command == "rebalance":
-        cmd_rebalance(args)
-    elif args.command == "monitor":
-        cmd_monitor(args)
-    elif args.command == "cron":
-        cmd_cron(args)
+    elif args.command == "adjust_fees":
+        cmd_adjust_fees(args)
+    elif args.command == "rebalance_channels":
+        cmd_rebalance_channels(args)
+    elif args.command == "sync_routing":
+        cmd_sync_routing(args)
+    elif args.command == "healthcheck":
+        cmd_healthcheck(args)
+    elif args.command == "pipeline":
+        cmd_run(args)
     elif args.command == "status":
         cmd_status(args)
     elif args.command == "history":

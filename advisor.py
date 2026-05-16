@@ -1,7 +1,23 @@
 """
 LN Operator — Investment Advisor (60% deterministic layer)
-Given X sats, produces a structured investment plan.
-Pulls LND state + external data, scores peers, allocates budget.
+
+Given "I have X sats to deploy", this module produces a full investment plan:
+
+1. Gathers current node state from LND (channels, balances, graph)
+2. Calculates a treasury reserve (max of 10% or 3 months of rebalancing costs)
+3. Checks on-chain fee environment via mempool.space (is it cheap to open channels?)
+4. Analyses existing channels for problems (undersized, inactive, unprofitable)
+5. Fetches candidate peers from 1ML API + local graph analysis
+6. Scores candidates on capacity, channels, uptime, centrality, diversity
+7. Allocates the deployable budget: upsize undersized channels first, then open new ones
+
+The output is a structured dict that can be:
+- Displayed in the terminal (main.py)
+- Sent to the Claude API agent for a plain-English summary (agent.py)
+- Saved to SQLite for historical reference (db.py)
+
+This module does NOT execute any channel opens — it only recommends.
+The operator reviews the plan and acts on it manually.
 """
 
 import time

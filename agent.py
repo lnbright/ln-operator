@@ -1,7 +1,25 @@
 """
 LN Operator — Agent Layer (10%)
-Uses Claude API for judgement calls that pure Python can't handle well.
-Receives pre-digested data, returns plain-English analysis.
+
+Uses the Anthropic Claude API for the judgement calls that pure Python
+formulas can't handle well — like "is this peer actually a good choice?"
+or "should I worry about concentrating in one corridor?"
+
+How it works:
+- The Python engine (advisor.py) builds the full investment plan as a structured dict
+- This module sends a COMPACT summary of that plan to Claude (not raw API dumps)
+- Claude returns a few sentences of plain-English advice
+- If the API key is missing or the call fails, a fallback summary is generated
+  locally in Python — the tool works fine without the API, just less nuanced
+
+Token efficiency:
+- The prompt is built as a compact key-value summary, not a full JSON dump
+- Max tokens is capped at 1000 — we want a short paragraph, not an essay
+- The system prompt is minimal and focused on Lightning Network context
+
+Also supports follow-up questions: after seeing the plan, the operator can
+ask "why this peer?" or "what if I split across two?" and the agent answers
+with the full plan as context.
 """
 
 import json

@@ -1,6 +1,19 @@
 """
 LN Operator — Telegram Notifications
-Send alerts and investment plans to Telegram.
+
+Sends cron run summaries and alerts to a Telegram chat. Used by the automated
+cron job only — the interactive investment advisor does NOT send to Telegram
+(you're already looking at the terminal when you run it).
+
+What gets sent:
+- Fee update summaries (which channels changed, old→new ppm)
+- Rebalance reports (success/failure, fees paid)
+- Health alerts (depleted channels, offline peers)
+- Cron run summaries (combined overview of all three)
+
+Handles Telegram's 4096 character limit by splitting long messages.
+If formatting fails (Markdown issues), retries without formatting.
+If no bot token or chat ID is configured, silently skips — nothing breaks.
 """
 
 import requests

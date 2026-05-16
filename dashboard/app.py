@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 """
 LND Node Health Dashboard
-Accessible only via Tailscale network — bound to operator-host's Tailscale IP.
-Enriched with historical data from ln_operator.db.
-Run: python3 app.py
+
+A single-page Flask app showing your LND node's health at a glance. Combines
+live data from LND's REST API with historical data from ln_operator.db.
+
+Data sources:
+- LIVE from LND (on every page load): node status, channel balances, sync state,
+  on-chain balance, recent payments and invoices
+- FROM SQLITE (populated by cron): routing fee revenue, rebalance history,
+  fee update log, per-channel profitability, alerts, channel maturity/tier
+
+The dashboard is read-only — it never modifies LND state or the database.
+Designed to be accessed via Tailscale only (bound to Tailscale IP, not 0.0.0.0).
+
+Run: python3 dashboard/app.py
+Or install as systemd service — see lnd-dashboard.service.
 """
 
 import os
@@ -144,9 +156,6 @@ def get_dashboard_data():
         channels_enriched.append(ch)
     data["channels"] = channels_enriched
 
-    peers, _     = lnd_get("/v1/peers")
-    data["peers"] = peers.get("peers", []) if peers else []
-
     invoices, _     = lnd_get("/v1/invoices?reversed=true&num_max_invoices=10")
     data["invoices"] = list(reversed(invoices.get("invoices", []))) if invoices else []
 
@@ -161,21 +170,20 @@ def get_dashboard_data():
 
     data["bitcoin_online"] = info.get("synced_to_chain", False)
 
-    try:
-        r = requests.post(f"{LND_REST_URL}/v1/switch", headers=get_macaroon_header(),
-                          verify=LND_CERT, json={"num_max_events": 20, "index_offset": 0}, timeout=5)
-        fwd = r.json()
-        data["forwarding"] = list(reversed(fwd.get("forwarding_events", [])))
-        data["last_offset_index"] = fwd.get("last_offset_index", 0)
-    except:
-        data["forwarding"] = []
-
     # ── Operator DB sections ──────────────────────────────────────
     data["daily_revenue"] = db_all("""
         SELECT date(ts,'unixepoch') as day, SUM(fee_earned_sats) as fees
         FROM forwarding_log WHERE ts > ?
         GROUP BY day ORDER BY day
     """, (days30,))
+
+    data["forwarding"] = db_all("""
+        SELECT ts as timestamp, chan_in, chan_out,
+               amount_in_sats as amt_in, amount_out_sats as amt_out,
+               fee_earned_sats as fee
+        FROM forwarding_log
+        ORDER BY ts DESC LIMIT 20
+    """)
 
     data["rebalances"] = db_all("""
         SELECT ts, source_alias, target_alias, amount_sats,
@@ -242,7 +250,8 @@ TEMPLATE = """
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   .grid-1 { margin-bottom: 16px; }
-  @media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 600px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
 
   .card { background: var(--card); border: 1px solid var(--border); padding: 20px; }
   .card-title { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
@@ -255,7 +264,7 @@ TEMPLATE = """
   .stat-value.green { color: var(--green); }
   .stat-value.red   { color: var(--red); }
 
-  .balance-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 10px; margin-bottom: 12px; }
+  .balance-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 10px; margin-bottom: 12px; overflow-x: auto; }
   @media (max-width: 768px) { .balance-grid { grid-template-columns: 1fr 1fr; } }
   .balance-box { text-align: center; padding: 10px 6px; }
   .b-lbl { font-size: 9px; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 5px; }
@@ -263,7 +272,8 @@ TEMPLATE = """
   .b-unit { font-size: 9px; color: var(--muted); margin-top: 2px; }
 
   /* Channel table */
-  .chan-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .chan-table { width: 100%; border-collapse: collapse; font-size: 11px; min-width: 700px; }
   .chan-table th { text-align: left; font-size: 10px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; padding: 0 10px 10px; border-bottom: 1px solid var(--border); }
   .chan-table td { padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; }
   .chan-table tr:last-child td { border-bottom: none; }
@@ -276,7 +286,7 @@ TEMPLATE = """
   .bar-healthy   { background: linear-gradient(90deg, var(--accent), var(--accent2)); }
 
   /* Generic data table */
-  .data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 11px; min-width: 400px; }
   .data-table th { text-align: left; padding: 8px 12px; color: var(--muted); font-weight: 400; border-bottom: 1px solid var(--border); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
   .data-table td { padding: 10px 12px; border-bottom: 1px solid rgba(30,30,46,0.5); vertical-align: middle; }
   .data-table tr:last-child td { border-bottom: none; }
@@ -423,6 +433,32 @@ TEMPLATE = """
         Unsettled HTLCs: <span style="color:var(--yellow)">{{ "{:,}".format(unsettled) }} sats</span>
       </div>
       {% endif %}
+
+      <!-- Channel liquidity split (sendable vs receivable) -->
+      {% set remote_chan = cb.remote_balance.sat | int if cb.remote_balance is defined else 0 %}
+      {% set total_channel = local_chan + remote_chan %}
+      {% set local_pct = (local_chan / total_channel * 100) | round(1) if total_channel > 0 else 0 %}
+      {% set remote_pct = (100 - local_pct) | round(1) %}
+      {% if total_channel > 0 %}
+      <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:6px;">
+          <span>Channel Liquidity — Sendable vs Receivable</span>
+          <span>
+            <span style="color:var(--accent)">Sendable {{ local_pct }}%</span>
+            &nbsp;/&nbsp;
+            <span style="color:var(--accent2)">Receivable {{ remote_pct }}%</span>
+          </span>
+        </div>
+        <div style="height:8px;background:var(--border);overflow:hidden;position:relative;">
+          <div style="position:absolute;left:0;top:0;height:100%;width:{{ local_pct }}%;background:var(--accent);"></div>
+          <div style="position:absolute;right:0;top:0;height:100%;width:{{ remote_pct }}%;background:var(--accent2);"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:4px;">
+          <span>{{ "{:,}".format(local_chan) }} sats sendable</span>
+          <span>{{ "{:,}".format(remote_chan) }} sats receivable</span>
+        </div>
+      </div>
+      {% endif %}
     </div>
   </div>
 
@@ -431,7 +467,7 @@ TEMPLATE = """
   <div class="grid-1">
     <div class="card">
       <div class="card-title">Channel Details</div>
-      <table class="chan-table">
+      <div class="table-wrap"><table class="chan-table">
         <thead>
           <tr>
             <th style="width:16%">Peer</th>
@@ -498,37 +534,12 @@ TEMPLATE = """
   </div>
   {% endif %}
 
-  <!-- Peers -->
-  <div class="grid-1">
-    <div class="card">
-      <div class="card-title">Connected Peers</div>
-      {% if data.peers %}
-      <table class="data-table">
-        <thead><tr><th>Pubkey</th><th>Address</th><th>Sent (sats)</th><th>Received (sats)</th><th>Direction</th></tr></thead>
-        <tbody>
-          {% for peer in data.peers %}
-          <tr>
-            <td class="truncate" style="max-width:180px;">{{ peer.pub_key }}</td>
-            <td>{{ peer.address }}</td>
-            <td class="amount-negative">{{ "{:,}".format(peer.sat_sent | int) }}</td>
-            <td class="amount-positive">{{ "{:,}".format(peer.sat_recv | int) }}</td>
-            <td>{% if peer.inbound %}<span class="badge badge-blue">Inbound</span>{% else %}<span class="badge badge-green">Outbound</span>{% endif %}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="empty-state">No peers connected</div>
-      {% endif %}
-    </div>
-  </div>
-
   <!-- Payments & Invoices -->
   <div class="grid-2">
     <div class="card">
       <div class="card-title">Recent Payments</div>
       {% if data.payments %}
-      <table class="data-table">
+      <div class="table-wrap"><table class="data-table">
         <thead><tr><th>Date</th><th>Amount</th><th>Fee</th><th>Status</th></tr></thead>
         <tbody>
           {% for p in data.payments %}
@@ -540,7 +551,7 @@ TEMPLATE = """
           </tr>
           {% endfor %}
         </tbody>
-      </table>
+      </table></div>
       {% else %}
       <div class="empty-state">No payments found</div>
       {% endif %}
@@ -548,7 +559,7 @@ TEMPLATE = """
     <div class="card">
       <div class="card-title">Recent Invoices</div>
       {% if data.invoices %}
-      <table class="data-table">
+      <div class="table-wrap"><table class="data-table">
         <thead><tr><th>Date</th><th>Amount</th><th>Memo</th><th>Status</th></tr></thead>
         <tbody>
           {% for inv in data.invoices %}
@@ -561,6 +572,8 @@ TEMPLATE = """
           {% endfor %}
         </tbody>
       </table>
+      {% else %}
+      </table></div>
       {% else %}
       <div class="empty-state">No invoices found</div>
       {% endif %}
@@ -586,7 +599,7 @@ TEMPLATE = """
         </tbody>
       </table>
       {% else %}
-      <div class="empty-state">No routing events — payments forwarded through your node for other users will appear here</div>
+      <div class="empty-state">No routing events yet — run <code>main.py monitor</code> to sync from LND</div>
       {% endif %}
     </div>
   </div>

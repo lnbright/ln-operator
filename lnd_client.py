@@ -1,6 +1,22 @@
 """
 LN Operator — LND REST API Client
-Handles all communication with the LND node.
+
+All communication with the LND node goes through this module. Every function
+maps to one LND REST endpoint. The rest of the codebase never calls LND directly.
+
+Authentication: LND uses macaroon-based auth. The macaroon file (a binary token)
+is read from disk, hex-encoded, and sent as an HTTP header on every request.
+
+TLS: LND uses a self-signed TLS cert. We pass the cert path to requests for
+verification rather than disabling TLS entirely (verify=LND_CERT, not verify=False).
+
+Key endpoints used:
+- /v1/getinfo: node identity, sync status, channel counts
+- /v1/channels: all open channels with balances
+- /v1/fees + /v1/chanpolicy: read and update fee policies
+- /v1/switch: forwarding history (routing events through your node)
+- /v2/router/send: circular rebalance payments (SendPaymentV2 with forced routing)
+- /v1/balance/*: on-chain and channel balances
 """
 
 import json
@@ -144,8 +160,13 @@ def get_channel_balance():
 
 # ─── Forwarding (routing) history ────────────────────────────────
 
-def get_forwarding_history(start_time=0, end_time=None, max_events=1000):
-    """Get forwarding (routing) events."""
+def get_forwarding_history(start_time=0, end_time=None, max_events=1000,
+                              index_offset=0):
+    """Get forwarding (routing) events.
+    
+    index_offset: fetch only events with index > this value (0 = all).
+    Returns (events, last_offset_index) tuple.
+    """
     if end_time is None:
         import time
         end_time = int(time.time())
@@ -153,9 +174,11 @@ def get_forwarding_history(start_time=0, end_time=None, max_events=1000):
         "start_time": str(start_time),
         "end_time": str(end_time),
         "num_max_events": max_events,
+        "index_offset": index_offset,
     }
     result = _post("/v1/switch", data)
     events = result.get("forwarding_events", [])
+    last_offset = int(result.get("last_offset_index", 0))
     parsed = []
     for ev in events:
         parsed.append({
@@ -166,8 +189,9 @@ def get_forwarding_history(start_time=0, end_time=None, max_events=1000):
             "amount_out": int(ev.get("amt_out", 0)),
             "fee_earned": int(ev.get("fee", 0)),
             "fee_msat": int(ev.get("fee_msat", 0)),
+
         })
-    return parsed
+    return parsed, last_offset
 
 
 # ─── Peers ───────────────────────────────────────────────────────
