@@ -1,7 +1,7 @@
 # ⚡ LN Operator
 
 Automated Lightning Network node management for LND. Handles channel fee optimisation,
-rebalancing, investment planning, and monitoring — with a web dashboard for visibility.
+rebalancing, channel planning, and monitoring — with a web dashboard for visibility.
 
 Built for home node operators running LND on a Raspberry Pi or similar.
 
@@ -19,60 +19,38 @@ Full channels get low fees to attract routing traffic.
 
 **2. rebalance_channels** — Moves sats from overfull channels (>80% local) to depleted
 ones (<20% local) via circular payments using Router SendPaymentV2. Each channel has its
-own rebalance budget based on its earnings history — new channels get a discovery budget,
-proven channels get a budget proportional to what they earn, deadweight channels get minimal
-spend. See *Rebalance Budget* section below.
+own rebalance budget based on its earnings history (see *Rebalance Budget* below).
 
-**3. sync_routing** — Syncs new forwarding events from LND into the local SQLite database
-using offset-based pagination. Never fetches the same event twice. The database is the
-single source of truth for all routing revenue data shown in the dashboard and CLI.
+**3. sync_routing** — Syncs new forwarding events from LND into SQLite using offset-based
+pagination. Never fetches the same event twice. Single source of truth for all routing
+revenue data shown in the dashboard and CLI.
 
 **4. healthcheck** — Snapshots all channel states, updates the channel maturity tracker,
 fires alerts for depleted channels, offline peers, or repeated failures.
 
-### Investment Advisor (on-demand)
+### Channel Plan (on-demand)
 
-When you have sats to deploy, run `main.py invest <amount>` and get a
-research-backed recommendation:
+Run `main.py plan` when you want to open new channels. The tool:
 
-**Python engine (60%):**
-- Calculates treasury reserve from historical rebalancing costs
-- Checks on-chain fee environment via mempool.space
-- Pulls the full network graph from your LND node
-- Classifies existing channels as hubs (500+ channels) or mid-tier
-- Applies portfolio strategy: no hubs → recommend hub first; 1 hub → mix;
-  2+ hubs → mid-tier only for diversification
-- Scores candidates by channel count, diversity, and centrality
-- Shortlists top 10 candidates for the agent to evaluate
+1. Reads your on-chain wallet balance directly from LND
+2. Deducts existing anchor reserve (already locked by LND)
+3. Calculates treasury reserve (configurable %, default 2.5%)
+4. Deducts new anchor reserve for the channels being opened (10,000 sats each, max 100,000)
+5. Deducts on-chain channel open fees (real fee rate from LND × 250 vBytes per channel)
+6. Determines how many channels fit at the minimum channel size, maximising deployment
+7. Shows the top 10 candidate peers from your local LND graph, scored by topology
 
-**Claude agent (10%):**
-- Searches Amboss and 1ML for each of the 10 shortlisted candidates
-- Finds real total capacity and average channel size (local graph data is
-  unreliable for capacity — your graph view improves as you add more channels)
-- Triangulates between sources — if Amboss and 1ML agree, use it; if they
-  differ, use the conservative figure
-- Disqualifies candidates that don't accept external channel opens (e.g. Binance)
-- Recommends top 3 with reasoning, suggests final allocation respecting min channel size
-- Interactive follow-up Q&A: "find me alternatives", "why this peer?", etc.
-
-**SQLite database (30%):**
-- Stores all historical data: forwarding events, rebalances, fee changes, snapshots
-- Powers the rebalance budget tiers (proven vs discovery vs deadweight)
-- Powers the treasury reserve calculation (avg monthly rebalancing costs × 3)
-- Powers the dashboard charts and per-channel performance metrics
+All data comes from your own LND node — no external API dependencies.
+You then research the candidates yourself (Amboss, 1ML) and open manually.
 
 ### Web Dashboard
 
 Single-page Flask app combining live LND data with historical SQLite data:
-
-- Node status, sync state, block height, uptime
-- Channel health table with balance bars, 30d revenue, rebalancing costs,
-  net profit, and tier badges (proven / discovery / deadweight)
-- Channel liquidity split — sendable vs receivable as a two-tone bar
-- Daily fee revenue chart (30 days, from forwarding_log)
-- Rebalance history with fees paid and success/failure
-- Recent fee updates with direction (↑/↓) and local ratio at time of change
-- Recent alerts (depleted channels, offline peers, failures)
+- Node status, sync state, balances
+- Channel health table with balance bars, 30d revenue, rebalancing costs, net profit, tier
+- Channel liquidity split (sendable vs receivable)
+- Daily fee revenue chart (30 days)
+- Rebalance history, fee update log, recent alerts
 - Recent payments and invoices
 
 ---
@@ -81,10 +59,10 @@ Single-page Flask app combining live LND data with historical SQLite data:
 
 ```
 60% Deterministic Python
-    Fee calculation using linear formula based on balance ratio.
-    Rebalance budget per channel based on earnings history.
-    Peer scoring using local LND graph (channel count, diversity, centrality).
-    Portfolio-aware allocation (hub vs mid-tier strategy).
+    Fee calculation (linear formula by balance ratio).
+    Rebalance budget per channel (based on earnings history).
+    Peer scoring from local LND graph (channel count, diversity, centrality).
+    Portfolio-aware candidate selection (hub vs mid-tier strategy).
     All decisions are formula-driven with configurable thresholds in config.py.
 
 30% SQLite Database
@@ -94,12 +72,9 @@ Single-page Flask app combining live LND data with historical SQLite data:
     Sync state (offset cursor for LND forwarding history — no duplicates).
     Powers rebalance budget tiers and treasury reserve calculation.
 
-10% Claude API (optional)
-    Researches shortlisted peers via web search (Amboss, 1ML).
-    Finds real capacity and average channel size that local graph can't reliably provide.
-    Disqualifies peers that don't accept external channels.
-    Suggests final allocation respecting minimum channel size.
-    Falls back gracefully to a local summary if no API key is configured.
+10% External data (optional)
+    mempool.space: fallback fee rate if LND estimate unavailable.
+    1ML: alias enrichment for candidate display (best-effort, fails silently).
 ```
 
 ---
@@ -108,12 +83,11 @@ Single-page Flask app combining live LND data with historical SQLite data:
 
 ```
 ln-operator/
-├── main.py              CLI entry point — all commands, argument parsing
+├── main.py              CLI entry point — all commands
 ├── config.py            All tuneable settings in one place
 ├── engine.py            Fee management, rebalancing, monitoring, forwarding sync
-├── advisor.py           Investment advisor — graph analysis, peer scoring, allocation
-├── agent.py             Claude API — web search for peer research, allocation suggestion
-├── lnd_client.py        LND REST API client (all LND communication goes here)
+├── advisor.py           Peer scoring, graph analysis, treasury calculation
+├── lnd_client.py        LND REST API client (all LND communication)
 ├── db.py                SQLite schema, sync state, query helpers
 ├── telegram_bot.py      Telegram notification formatting and sending
 ├── logging_config.py    Rotating log file + console output setup
@@ -132,7 +106,6 @@ ln-operator/
 
 - **LND** running and synced (REST API enabled, default port 9000)
 - **Python 3.9+**
-- **Anthropic API key** (optional — for AI investment research)
 - **Telegram bot** (optional — for pipeline notifications)
 
 ---
@@ -162,10 +135,6 @@ LND_REST_URL=https://127.0.0.1:9000
 LND_CERT=/home/lnd/tls.cert
 LND_MACAROON=/home/lnd/data/chain/bitcoin/mainnet/admin.macaroon
 
-# Optional — Claude API for investment advisor research
-# Get a key at https://console.anthropic.com
-ANTHROPIC_API_KEY=
-
 # Optional — Telegram notifications for pipeline runs and alerts
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
@@ -188,8 +157,8 @@ venv/bin/python3 db.py
 venv/bin/python3 main.py sync_routing
 ```
 
-This fetches all historical forwarding events from LND into the database.
-Run it once after install — subsequent runs only fetch new events.
+Fetches all historical forwarding events from LND into the database.
+Subsequent runs only fetch new events using the offset cursor.
 
 ### 6. Test
 
@@ -198,9 +167,6 @@ venv/bin/python3 main.py status
 ```
 
 ### 7. LND file permissions
-
-The tool needs to read LND's macaroon and TLS cert. If running as a
-different user than LND:
 
 ```bash
 sudo usermod -aG lnd YOUR_USER
@@ -222,11 +188,14 @@ venv/bin/python3 main.py pipeline              # run all steps in sequence
 venv/bin/python3 main.py pipeline --dry-run    # preview without executing
 
 # ── FEATURES — interactive tools ───────────────────────────
-venv/bin/python3 main.py invest 5000000              # investment advisor
-venv/bin/python3 main.py invest 5000000 --min-channel 2000000  # override min size
-venv/bin/python3 main.py status                      # quick node overview
-venv/bin/python3 main.py history                     # last 30 days of activity
-venv/bin/python3 main.py history 7                   # last 7 days
+venv/bin/python3 main.py plan                              # channel plan (reads wallet from LND)
+venv/bin/python3 main.py plan --min-channel 3000000        # override min channel size
+venv/bin/python3 main.py plan --treasury 0.01              # override treasury ratio (1%)
+venv/bin/python3 main.py plan --min-channel 3000000 --treasury 0.01  # both overrides
+
+venv/bin/python3 main.py status                # quick node overview with balance bars
+venv/bin/python3 main.py history               # last 30 days of activity
+venv/bin/python3 main.py history 7             # last 7 days
 
 # ── DEBUG — run individual pipeline steps ──────────────────
 venv/bin/python3 main.py adjust_fees              # adjust fee rates
@@ -254,21 +223,57 @@ Add:
 
 Runs every 2 hours: adjust_fees → rebalance_channels → sync_routing → healthcheck.
 
+### Channel Plan
+
+```bash
+venv/bin/python3 main.py plan --min-channel 3000000 --treasury 0.01
+```
+
+Example output:
+
+```
+⚡ LN Operator — Channel Plan
+═══════════════════════════════════════════
+
+  Wallet balance:           3,451,948 sats
+  Existing anchor reserve:    -20,000 sats  (already locked by LND)
+
+  ────────────────────────────────────────
+  Treasury (1.0%):              34,519 sats
+  New anchor reserve:           10,000 sats  (1 × 10,000)
+  Channel open fees:               500 sats  (1 × 2 sat/vB × 250 vB)
+  ────────────────────────────────────────
+  Deployable:               3,386,929 sats
+
+  → 1 channel(s) at 3,386,929 sats each
+
+  ────────────────────────────────────────
+  Top 10 candidates from LND graph:
+
+   1. Kraken                         | score 0.787 | rank   3 | 1866 ch | hub
+   2. WalletOfSatoshi.com            | score 0.774 | rank   1 | 2452 ch | hub
+   3. LNBiG [Hub-2]                  | score 0.722 | rank  51 |  350 ch | mid-tier
+   ...
+```
+
+Then research the candidates yourself on Amboss or 1ML and open channels manually:
+
+```bash
+lncli --lnddir=/home/lnd connect PUBKEY@IP:PORT
+lncli --lnddir=/home/lnd openchannel --node_key PUBKEY --local_amt 3386929
+```
+
 ### Dashboard
 
-Install as a systemd service (see `dashboard/lnd-dashboard.service`), or run directly:
+Install as systemd service (see `dashboard/lnd-dashboard.service`), or run directly:
 
 ```bash
 venv/bin/python3 dashboard/app.py
 ```
 
-Access at `http://YOUR_TAILSCALE_IP:4000`.
-
 ---
 
 ## How the Fee Formula Works
-
-Each channel's fee rate is set dynamically based on local balance ratio:
 
 ```
 ppm = FEE_MIN_PPM + (FEE_MAX_PPM - FEE_MIN_PPM) × (1 - local_ratio)
@@ -276,84 +281,70 @@ ppm = FEE_MIN_PPM + (FEE_MAX_PPM - FEE_MIN_PPM) × (1 - local_ratio)
 
 | Local balance | Fee rate | Purpose |
 |---------------|----------|---------|
-| 80-100% (full) | 50-140 ppm | Low fees attract routing, earn while naturally draining |
+| 80-100% (full) | 50-140 ppm | Low fees attract routing |
 | 40-60% (balanced) | 225-275 ppm | Mid fees, healthy state |
-| 0-20% (depleted) | 410-500 ppm | High fees protect remaining liquidity and reputation |
+| 0-20% (depleted) | 410-500 ppm | High fees protect liquidity and reputation |
 
-Fees only update if the change is >5 ppm (avoids gossip network spam).
-Base fee is always 0 — modern best practice, most pathfinding penalises non-zero base fees.
+Fees only update if change >5 ppm (avoids gossip spam).
+Base fee is always 0 (modern best practice).
 
-When you open a new channel, just use LND's default fees. The next pipeline run
-will set fees automatically based on the channel's balance ratio.
+When you open a new channel, use LND's defaults. The next pipeline run sets fees automatically.
 
 ---
 
 ## How the Rebalance Budget Works
 
-Each channel gets its own rebalance fee budget based on its track record.
-The budget system prevents the most common home-node failure mode: paying more
-to rebalance a channel than the channel ever earns in routing fees.
+Each channel gets its own fee budget based on its track record:
 
-### Discovery (new channels, < 30 balanced days)
+### Discovery (< 30 balanced days)
+Budget: **150 ppm**. New channel gets 30 days balanced to prove it routes.
+Balanced time only counts when local ratio is 30-70%.
 
-Budget: **150 ppm**. The channel starts at 100% local (you funded it), gets
-rebalanced to 50%, and has 30 days in a balanced state to prove it can route.
-The clock only ticks when the local ratio is between 30-70% — time spent
-depleted doesn't count.
-
-### Proven (30+ balanced days, earns routing fees)
-
-Budget: **50% of average earned ppm**. A channel earning 300 ppm gets a
-150 ppm rebalance budget. You never spend more rebalancing than you earn.
-Floor: 50 ppm. Ceiling: 500 ppm (hard cap).
+### Proven (30+ balanced days, earns fees)
+Budget: **50% of average earned ppm**. Never spend more rebalancing than you earn.
+Floor: 50 ppm. Ceiling: 500 ppm.
 
 ### Deadweight (30+ balanced days, zero revenue)
-
-Budget: **50 ppm**. The channel had a fair chance while balanced and
-earned nothing. The investment advisor will flag it as a close candidate.
+Budget: **50 ppm**. Had its chance. Flag as close candidate.
 
 ---
 
-## How the Investment Advisor Works
+## How the Channel Plan Works
 
-### Step 1 — Portfolio classification
+```
+1. Read wallet balance from LND (/v1/balance/blockchain)
+2. Read existing anchor reserve (reserved_balance_anchor_chan)
+3. Get current fee rate from LND (/v2/wallet/estimatefee/2)
+   → fallback to mempool.space if LND estimate unavailable
+4. For N = 1, 2, 3... channels:
+     deployable = total - existing_anchor - treasury% - new_anchor(N) - open_fees(N)
+     channel_size = deployable / N
+     if channel_size >= min_channel_size → this N works, keep trying higher
+     else → stop, use previous N
+5. Show top 10 candidates from local LND graph scored by:
+   - Channel count (topology reach)
+   - Diversity (% of their peers new to you)
+   - Centrality (proxy from channel count)
+   - Capacity (local graph — improves accuracy as you add channels)
+```
 
-The advisor reads your existing channels and calls LND's graph API to get
-the channel count for each current peer. Nodes with 500+ channels are classified
-as hubs; others as mid-tier.
+### Portfolio Strategy for Candidates
 
-### Step 2 — Graph traversal
+The candidate list applies a portfolio-aware strategy based on your existing channels:
+- **0 hub connections** → show top 10 hubs (need routing backbone first)
+- **1 hub connection** → show 2 hubs + 8 mid-tier
+- **2+ hub connections** → show top 10 mid-tier (diversify away from hubs)
 
-Calls `describe_graph()` on your local LND node to get the full network graph.
-Builds a candidate list of up to 250 nodes you're not already connected to,
-ranked by channel count. Assigns tiers: rank 1-50 = hub, rank 51-250 = mid-tier.
+Hub = node with 500+ channels. Mid-tier = 20-499 channels.
 
-Note: local graph capacity numbers can be unreliable for distant nodes since
-your gossip view depends on your channel connections. As you add more channels
-your graph becomes more complete. Channel count and topology data are reliable.
+### On Anchor Reserve
 
-### Step 3 — Portfolio strategy
+LND reserves 10,000 sats per anchor channel for emergency force-close fee bumping,
+capped at 100,000 sats total regardless of channel count. This is a hard LND requirement
+and is separate from the treasury percentage.
 
-Based on how many hubs you already have:
-- **0 hubs** → shortlist top 10 hubs. You need a routing backbone first.
-- **1 hub** → shortlist 2 top hubs + 8 mid-tier. Mix of reliability and diversity.
-- **2+ hubs** → shortlist top 10 mid-tier. Diversify away from hub competition.
-
-### Step 4 — Graph enrichment
-
-For the shortlisted 10 candidates, calls `get_node_info()` to get their peer
-list and fee policies. Computes diversity score (what fraction of their peers
-you're not already connected to) and average fee rate.
-
-### Step 5 — Agent research (Claude API)
-
-Sends the shortlist to Claude with web search enabled. The agent:
-1. Searches Amboss and 1ML for each candidate to find real capacity and avg channel size
-   (the quality metric the local graph can't reliably provide)
-2. Cross-checks both sources — uses the more conservative figure if they differ
-3. Disqualifies nodes that don't accept external channel connections (e.g. some exchanges)
-4. Recommends top 3 by combining engine score (topology) with real avg channel size (quality)
-5. Suggests final allocation respecting the minimum channel size setting
+The plan automatically reads your current anchor reserve from LND and only
+calculates the additional reserve needed for new channels.
 
 ---
 
@@ -369,87 +360,77 @@ LND node (/v1/switch)
        │  offset cursor stored in sync_state table
        └─ forwarding_log (SQLite)
             │
-            ├─ Dashboard: Recent Routing Events table
-            ├─ Dashboard: Daily Fee Revenue chart (30d)
+            ├─ Dashboard: Recent Routing Events
+            ├─ Dashboard: Daily Fee Revenue chart
             ├─ Dashboard: Revenue 30d / Net 30d per channel
             ├─ CLI: main.py history
-            ├─ Rebalance budget: get_channel_earned_ppm()
-            └─ Treasury reserve: get_avg_monthly_fee_revenue()
+            └─ Rebalance budget: get_channel_earned_ppm()
 ```
-
-The sync uses `last_offset_index` from LND's API as a pagination cursor.
-Running `sync_routing` manually or via cron always picks up from where it left off.
-No duplicates possible — LND's offset guarantees each event is fetched at most once.
 
 ---
 
 ## Configuration
-
-All settings are in `config.py`. Key values:
 
 | Setting | Default | What it does |
 |---------|---------|--------------|
 | `FEE_MIN_PPM` | 50 | Floor fee when channel is full |
 | `FEE_MAX_PPM` | 500 | Ceiling fee when channel is depleted |
 | `FEE_BASE_MSAT` | 0 | Base fee (0 is best practice) |
-| `REBALANCE_LOW_THRESHOLD` | 0.20 | Rebalance when local drops below 20% |
-| `REBALANCE_HIGH_THRESHOLD` | 0.80 | Rebalance when local exceeds 80% |
-| `REBALANCE_DISCOVERY_PPM` | 150 | Budget for new/unproven channels |
-| `REBALANCE_REVENUE_RATIO` | 0.50 | Proven channels: budget = earned_ppm × this |
-| `REBALANCE_DEADWEIGHT_PPM` | 50 | Budget for channels that had their chance |
-| `REBALANCE_DISCOVERY_DAYS` | 30 | Days balanced before judging a channel |
-| `TREASURY_MIN_RATIO` | 0.10 | Keep at least 10% of investment as reserve |
+| `REBALANCE_LOW_THRESHOLD` | 0.20 | Rebalance when local < 20% |
+| `REBALANCE_HIGH_THRESHOLD` | 0.80 | Rebalance when local > 80% |
+| `REBALANCE_DISCOVERY_PPM` | 150 | Budget for new channels |
+| `REBALANCE_REVENUE_RATIO` | 0.50 | Proven: budget = earned_ppm × this |
+| `REBALANCE_DEADWEIGHT_PPM` | 50 | Budget for zero-revenue channels |
+| `REBALANCE_DISCOVERY_DAYS` | 30 | Days balanced before judging |
+| `TREASURY_MIN_RATIO` | 0.025 | Default treasury reserve (2.5%) |
+| `ANCHOR_RESERVE_PER_CHANNEL` | 10,000 | Sats reserved per new anchor channel |
+| `ANCHOR_RESERVE_MAX` | 100,000 | LND's hard cap on anchor reserve |
 | `MIN_CHANNEL_SIZE_SATS` | 1,000,000 | Absolute minimum channel size |
-| `PREFERRED_CHANNEL_SIZE_SATS` | 3,000,000 | Default minimum (overridable via CLI) |
+| `PREFERRED_CHANNEL_SIZE_SATS` | 3,000,000 | Default minimum (overridable via --min-channel) |
 
 ---
 
 ## Known Limitations
 
-**Local graph capacity is unreliable for distant nodes.** Your LND node's graph view
-depends on gossip propagation from your channel peers. With few channels, you may see
-a fraction of a large node's real capacity. This improves significantly as you open
-more channels. The investment advisor accounts for this by having the Claude agent
-look up real capacity from Amboss/1ML rather than trusting local numbers.
+**Local graph capacity** — your LND node's graph view depends on gossip propagation.
+With few channels you may see incomplete capacity data for distant nodes. This improves
+significantly as you open more channels. Channel count and topology data are reliable.
 
-**Rebalancing requires Router SendPaymentV2** with `outgoing_chan_id` to force the
-circular route. This requires LND 0.15+.
+**Rebalancing requires LND 0.15+** — uses Router SendPaymentV2 with `outgoing_chan_id`.
 
-**Dashboard shows empty routing sections** until `sync_routing` has run at least once.
-Run `venv/bin/python3 main.py sync_routing` after install.
+**Dashboard requires sync_routing** to have run at least once for routing data sections.
 
 ---
 
 ## Logging
 
-All log output goes to `logs/ln_operator.log` (rotating, 5MB × 5 backups).
-Terminal shows only warnings and errors. Full INFO/DEBUG detail in the log file.
+Logs go to `logs/ln_operator.log` (rotating, 5MB × 5 backups).
+Terminal shows warnings and errors only. Full detail in the file.
 
 ```bash
-# Watch logs in real time
 tail -f logs/ln_operator.log
 ```
 
-A typical pipeline run produces log entries like:
-
+Typical pipeline run:
 ```
 INFO  [main] pipeline starting
 INFO  [engine] fees: ACINQ ↑ 120→480 ppm (local 2%)
-INFO  [engine] rebalance: 1 depleted, 0 overfull — no overfull channel to pair with
-INFO  [engine] sync_routing: 3 new event(s) saved (offset 50)
+INFO  [engine] rebalance: 1 depleted, 0 overfull — no overfull channel to pair
+INFO  [engine] sync_routing: 3 new event(s) (offset 50)
 INFO  [engine] healthcheck: 1 active, 0 inactive — overall local 2%
-WARNING [engine] healthcheck alert [channel_depleted]: ACINQ at 2% local
+WARNING [engine] alert [channel_depleted]: ACINQ at 2% local
 INFO  [main] pipeline complete in 2.3s — fees:1 rebalances:0 events:3 alerts:1
+WARNING [main] alert [channel_depleted]: ACINQ at 2% local
 ```
 
 ---
 
 ## Roadmap
 
-- Flask dashboard investment approval flow — Telegram link to approve/reject channel open recommendations
-- Backup automation — auto-backup `channel.backup` on every channel change
-- On-chain fee watcher — alert when fees drop below threshold (good time to open)
-- Tests — pytest suite for core logic functions
+- Dashboard investment approval flow — approve/reject channel open recommendations
+- Backup automation — auto-backup `channel.backup` on channel changes
+- On-chain fee watcher — alert when fees drop below threshold
+- Tests — pytest suite for core logic
 
 ---
 

@@ -9,7 +9,7 @@ Usage:
     python main.py rebalance_channels [--dry-run]  — rebalance depleted/overfull channels
     python main.py sync_routing                    — sync routing events from LND
     python main.py healthcheck                     — check channel health + fire alerts
-    python main.py invest <amount_sats>            — investment advisor
+    python main.py plan [--min-channel SATS] [--treasury RATIO] — channel plan
     python main.py status                          — quick node overview
     python main.py history [days]                  — recent activity from database
 """
@@ -22,84 +22,132 @@ from datetime import datetime
 
 import db
 import engine
-from config import ANTHROPIC_API_KEY
 from logging_config import setup_logging, get_logger
 import advisor
-import agent
 import telegram_bot
 import lnd_client
 
 
-def cmd_invest(args):
-    """Investment advisor: given X sats, produce a full plan."""
-    log = get_logger("main")
-    amount = args.amount
-    log.info("invest: %s sats requested", f"{amount:,}")
-    if amount < 100_000:
-        print(f"Error: {amount:,} sats is too small. Minimum useful investment is ~100,000 sats.")
-        sys.exit(1)
-
-    print(f"\n⚡ LN Operator — Investment Plan for {amount:,} sats")
-    print("=" * 55)
-
-    # Override config values if specified
+def cmd_plan(args):
+    """Channel investment planner — reads wallet balance from LND, proposes channel allocation."""
     import config as _cfg
-    log_main = get_logger("main")
+    log = get_logger("main")
+
+    # Apply CLI overrides
     if args.min_channel:
         _cfg.PREFERRED_CHANNEL_SIZE_SATS = args.min_channel
-        log_main.info("min channel size overridden to %s sats", f"{args.min_channel:,}")
+        log.info("min channel size overridden to %s sats", f"{args.min_channel:,}")
     if args.treasury is not None:
         if not 0.0 <= args.treasury <= 1.0:
             print(f"Error: --treasury must be between 0.0 and 1.0 (got {args.treasury})")
-            import sys; sys.exit(1)
+            sys.exit(1)
         _cfg.TREASURY_MIN_RATIO = args.treasury
-        log_main.info("treasury ratio overridden to %.1f%%", args.treasury * 100)
+        log.info("treasury ratio overridden to %.1f%%", args.treasury * 100)
 
-    # 60% — Python engine builds the plan
-    plan = advisor.build_investment_plan(amount)
+    min_channel = _cfg.PREFERRED_CHANNEL_SIZE_SATS
+    treasury_ratio = _cfg.TREASURY_MIN_RATIO
 
-    # 10% — Agent adds judgement
-    log_main = get_logger("main")
-    log_main.info("requesting agent analysis")
-    print("\n[agent] Getting Claude's analysis...")
-    summary = agent.get_investment_summary(plan)
-    plan["agent_summary"] = summary
+    print(f"\n⚡ LN Operator — Channel Plan")
+    print("=" * 55)
 
-    # Display
-    _display_plan(plan)
+    # ── Step 1: Read wallet balance from LND ─────────────────────
+    onchain = lnd_client.get_onchain_balance()
+    total_balance     = int(onchain.get("confirmed_balance", 0))
+    anchor_reserved   = int(onchain.get("reserved_balance_anchor_chan", 0))
 
-    # Save updated plan with agent summary
+    print(f"\n  Wallet balance:           {total_balance:>12,} sats")
+    print(f"  Existing anchor reserve:  {anchor_reserved:>12,} sats  (already locked by LND)")
+
+    # ── Step 2: Get fee rate from LND ────────────────────────────
+    fee_rate = lnd_client.estimate_fee(conf_target=2) or 3
+    log.info("fee rate: %d sat/vB", fee_rate)
+
+    # ── Step 3: Calculate how many channels we can open ──────────
+    # First pass: estimate 2 channels to get treasury + anchor costs
+    # Then refine based on what actually fits
+    max_channels = 10  # never suggest more than 10 at once
+
+    best_num = 0
+    best_channel_size = 0
+    best_deployable = 0
+    best_breakdown = {}
+
+    for num_ch in range(1, max_channels + 1):
+        # Costs for this number of channels
+        new_anchor = min(
+            num_ch * _cfg.ANCHOR_RESERVE_PER_CHANNEL,
+            max(0, _cfg.ANCHOR_RESERVE_MAX - anchor_reserved)
+        )
+        open_fees = num_ch * fee_rate * 250  # 250 vBytes per channel open tx
+        treasury  = int(total_balance * treasury_ratio)
+
+        deployable = total_balance - anchor_reserved - new_anchor - open_fees - treasury
+        channel_size = deployable // num_ch if num_ch > 0 else 0
+
+        if channel_size >= min_channel:
+            best_num         = num_ch
+            best_channel_size = channel_size
+            best_deployable  = deployable
+            best_breakdown   = {
+                "treasury":    treasury,
+                "new_anchor":  new_anchor,
+                "open_fees":   open_fees,
+                "deployable":  deployable,
+                "num_channels": num_ch,
+                "channel_size": channel_size,
+            }
+        else:
+            break  # adding more channels makes each one too small — stop here
+
+    if best_num == 0:
+        # Can't even afford one minimum-size channel
+        treasury  = int(total_balance * treasury_ratio)
+        new_anchor = min(_cfg.ANCHOR_RESERVE_PER_CHANNEL,
+                         max(0, _cfg.ANCHOR_RESERVE_MAX - anchor_reserved))
+        open_fees  = fee_rate * 250
+        deployable = total_balance - anchor_reserved - new_anchor - open_fees - treasury
+        print(f"\n  ⚠️  Insufficient balance for even one {min_channel:,} sat channel.")
+        print(f"  Deployable after costs: {deployable:,} sats")
+        print(f"  Need at least {min_channel + treasury + new_anchor + open_fees + anchor_reserved:,} sats in wallet.")
+        return
+
+    bd = best_breakdown
+    print(f"\n  {'─'*40}")
+    print(f"  Treasury ({treasury_ratio:.1%}):           {bd['treasury']:>12,} sats")
+    print(f"  New anchor reserve:       {bd['new_anchor']:>12,} sats  ({best_num} × {_cfg.ANCHOR_RESERVE_PER_CHANNEL:,})")
+    print(f"  Channel open fees:        {bd['open_fees']:>12,} sats  ({best_num} × {fee_rate} sat/vB × 250 vB)")
+    print(f"  {'─'*40}")
+    print(f"  Deployable:               {bd['deployable']:>12,} sats")
+    print(f"\n  → {best_num} channel(s) at {best_channel_size:,} sats each")
+
+    log.info("plan: %d channel(s) at %s sats each (deployable %s)",
+             best_num, f"{best_channel_size:,}", f"{bd['deployable']:,}")
+
+    # ── Step 4: Score and show top 10 candidates from local graph ─
+    print(f"\n  {'─'*40}")
+    print(f"  Top 10 candidates from LND graph:\n")
+
+    try:
+        state = advisor._gather_node_state()
+        candidates = advisor._fetch_candidates_from_graph(state)
+        scored = advisor._score_candidates(candidates, state)[:10]
+
+        for i, c in enumerate(scored, 1):
+            tier = c.get("tier_hint", "?")
+            print(f"  {i:2}. {c['alias'][:30]:<30} | score {c['score']:.3f} "
+                  f"| rank {c.get('network_rank','?'):>3} "
+                  f"| {c['channel_count']:>4} ch "
+                  f"| {tier}")
+    except Exception as e:
+        log.error("could not fetch candidates: %s", e)
+        print(f"  Error fetching candidates: {e}")
+
+    # ── Step 5: Save to DB ────────────────────────────────────────
     db.save_investment_plan(
-        plan["total_sats"], plan["treasury_reserve"],
-        plan["deployable_sats"], plan, summary
+        total_balance, bd["treasury"], bd["deployable"],
+        {"num_channels": best_num, "channel_size": best_channel_size,
+         "breakdown": bd, "fee_rate": fee_rate}, ""
     )
-
-    # Interactive follow-up loop
-    if ANTHROPIC_API_KEY:
-        _followup_loop(plan)
-
-    return plan
-
-
-def _followup_loop(plan):
-    """Interactive Q&A loop after an investment plan is displayed."""
-    print("\n" + "─" * 55)
-    print("💬 Ask a follow-up question or press Enter to exit.")
-    print("─" * 55)
-
-    while True:
-        try:
-            question = input("\nYou: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        if not question:
-            break
-
-        print("\n🤖 Agent: ", end="", flush=True)
-        answer = agent.get_followup_answer(plan, question)
-        print(answer)
 
 
 def cmd_adjust_fees(args):
@@ -281,6 +329,8 @@ def cmd_run(args):
     log_main.info("pipeline complete in %.1fs — fees:%d rebalances:%d events:%d alerts:%d",
                   elapsed, len(fee_updates), len(rebalance_results),
                   num_events, len(report["alerts"]))
+    for a in report["alerts"]:
+        log_main.warning("alert [%s]: %s", a["type"], a["message"])
     print(f"\n✅ Pipeline complete in {elapsed:.1f}s")
 
     # Telegram summary
@@ -412,7 +462,7 @@ def _display_plan(plan):
                     print(f"       {a['reason']}")
 
         if shortlist:
-            print(f"\n  Candidates shortlisted for agent evaluation ({len(shortlist)}):")
+            print(f"\n  Candidates shortlisted ({len(shortlist)}):")
             for i, a in enumerate(shortlist, 1):
                 gd = a.get("graph_data") or {}
                 diversity = f" — diversity {gd['diversity_score']:.0%}" if gd.get("diversity_score") is not None else ""
@@ -431,9 +481,6 @@ def _display_plan(plan):
         for note in nrec:
             print(f"    • {note}")
 
-    if plan.get("agent_summary"):
-        print(f"\n  🤖 Agent says:")
-        print(f"    {plan['agent_summary']}")
 
 
 def _balance_bar(ratio, width=20):
@@ -462,16 +509,14 @@ def main():
         help="Preview all changes without applying")
 
     # ── FEATURES — interactive tools for the operator ────────────
-    p_invest = subparsers.add_parser("invest",
-        help="[feature]   Investment advisor — given X sats, what channels to open?")
-    p_invest.add_argument("amount", type=int,
-        help="Amount in sats you want to deploy")
-    p_invest.add_argument("--min-channel", type=int, default=None,
+    p_plan = subparsers.add_parser("plan",
+        help="[feature]   Channel investment plan — reads wallet balance, proposes allocation")
+    p_plan.add_argument("--min-channel", type=int, default=None,
         metavar="SATS",
         help="Minimum channel size in sats (default: PREFERRED_CHANNEL_SIZE_SATS from config)")
-    p_invest.add_argument("--treasury", type=float, default=None,
+    p_plan.add_argument("--treasury", type=float, default=None,
         metavar="RATIO",
-        help="Treasury reserve ratio 0.0-1.0, e.g. 0.025 for 2.5%% (default: TREASURY_MIN_RATIO from config)")
+        help="Treasury reserve ratio 0.0-1.0, e.g. 0.01 for 1%% (default: TREASURY_MIN_RATIO from config)")
 
     p_status = subparsers.add_parser("status",
         help="[feature]   Quick node overview with channel balance bars")
@@ -508,8 +553,8 @@ def main():
     # Initialise database
     db.init_db()
 
-    if args.command == "invest":
-        cmd_invest(args)
+    if args.command == "plan":
+        cmd_plan(args)
     elif args.command == "adjust_fees":
         cmd_adjust_fees(args)
     elif args.command == "rebalance_channels":

@@ -1,23 +1,24 @@
 """
-LN Operator — Investment Advisor (60% deterministic layer)
+LN Operator — Advisor (peer scoring and graph analysis)
 
-Given "I have X sats to deploy", this module produces a full investment plan:
+Provides the scoring and candidate discovery logic used by the `plan` command.
+All data comes from the local LND graph — no external API dependencies.
 
-1. Gathers current node state from LND (channels, balances, graph)
-2. Calculates a treasury reserve (max of 10% or 3 months of rebalancing costs)
-3. Checks on-chain fee environment via mempool.space (is it cheap to open channels?)
-4. Analyses existing channels for problems (undersized, inactive, unprofitable)
-5. Fetches candidate peers from 1ML API + local graph analysis
-6. Scores candidates on capacity, channels, uptime, centrality, diversity
-7. Allocates the deployable budget: upsize undersized channels first, then open new ones
+Key functions used by main.py plan command:
+- _gather_node_state(): pulls live data from LND (channels, balances, graph)
+- _fetch_candidates_from_graph(): builds candidate list from local LND graph
+- _score_candidates(): scores by channel count, diversity, centrality
+- _classify_existing_portfolio(): classifies existing channels as hub or mid-tier
+- _calculate_treasury(): calculates reserve (treasury % + anchor reserve + open fees)
+- _check_fee_environment(): gets fee rate from LND, falls back to mempool.space
 
-The output is a structured dict that can be:
-- Displayed in the terminal (main.py)
-- Sent to the Claude API agent for a plain-English summary (agent.py)
-- Saved to SQLite for historical reference (db.py)
+The build_investment_plan() function is kept for legacy/DB logging purposes
+but the main CLI entry point is now cmd_plan() in main.py which calls
+these functions directly for a cleaner flow.
 
-This module does NOT execute any channel opens — it only recommends.
-The operator reviews the plan and acts on it manually.
+NOTE: The Claude API agent layer (agent.py) has been removed from the plan
+workflow. Peer research is now done by the user using the top 10 candidates
+output from the local graph.
 """
 
 import time
@@ -800,7 +801,7 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
         if hub_count == 0:
             # No hubs yet — shortlist top 10 hubs for agent to evaluate
             pool = hubs[:10] if hubs else candidates[:10]
-            strategy = "no hub connections yet — shortlisting top 10 hubs for agent evaluation"
+            strategy = "no hub connections yet — shortlisting top 10 hubs"
             log.info("allocation strategy: %s", strategy)
             not_recommended.append(
                 f"Strategy: {strategy}. "
@@ -809,7 +810,7 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
         elif hub_count >= 2:
             # Well connected to hubs — shortlist top 10 mid-tier for agent
             pool = mid_tier[:10] if mid_tier else candidates[:10]
-            strategy = f"already have {hub_count} hub connections — shortlisting top 10 mid-tier nodes for agent evaluation"
+            strategy = f"already have {hub_count} hub connections — shortlisting top 10 mid-tier nodes"
             log.info("allocation strategy: %s", strategy)
             not_recommended.append(
                 f"Strategy: {strategy}. "
@@ -820,7 +821,7 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
             hub_picks = hubs[:2] if hubs else []
             mid_picks = mid_tier[:8] if mid_tier else []
             pool = hub_picks + mid_picks if (hub_picks or mid_picks) else candidates
-            strategy = f"1 hub already — shortlisting {len(hub_picks)} hub(s) + {len(mid_picks)} mid-tier for agent to evaluate"
+            strategy = f"1 hub already — shortlisting {len(hub_picks)} hub(s) + {len(mid_picks)} mid-tier"
             log.info("allocation strategy: %s", strategy)
 
         # ── Step 4: Shortlist top 10 from pool for agent evaluation ─
@@ -828,7 +829,7 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
         # The agent picks the best 1-3 from this list based on Amboss/1ML data.
         # Budget allocation happens based on how many the agent recommends.
         shortlist = pool[:10]
-        log.info("shortlisting %d candidates for agent evaluation", len(shortlist))
+        log.info("shortlisting %d candidates", len(shortlist))
 
         for candidate in shortlist:
             gd = candidate.get("graph_data") or {}
