@@ -102,7 +102,7 @@ def _run_agentic_call(system_prompt, user_message, max_tokens=2000, max_turns=5)
                 ],
                 "messages": messages,
             },
-            timeout=60,
+            timeout=180,
         )
         if not response.ok:
             log.error("Claude API error %d: %s", response.status_code, response.text[:500])
