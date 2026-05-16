@@ -104,6 +104,8 @@ def _run_agentic_call(system_prompt, user_message, max_tokens=2000, max_turns=5)
             },
             timeout=60,
         )
+        if not response.ok:
+            log.error("Claude API error %d: %s", response.status_code, response.text[:500])
         response.raise_for_status()
         data = response.json()
 
