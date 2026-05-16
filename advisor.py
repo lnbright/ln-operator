@@ -277,80 +277,138 @@ def _analyse_existing_channels(channels):
     return analysis
 
 
-def _fetch_external_candidates(state):
-    """Fetch candidate peers from external sources."""
+def _fetch_candidates_from_graph(state):
+    """Build candidate list from LND's local graph — the primary data source.
+
+    Traverses the full network graph to:
+    1. Build a map of every node with their channel count and total capacity
+    2. Rank them by channel count to determine hub vs mid-tier
+    3. Filter out nodes we're already connected to and ourselves
+    4. Assign network_rank and tier_hint based on channel count rank
+
+    Returns a list of candidate dicts sorted by channel count descending.
+    The graph is already stored locally by LND — no external API needed.
+    """
+    log.info("fetching candidates from local LND graph...")
     candidates = []
 
-    # 1. Try 1ML top nodes
+    try:
+        graph = lnd_client.describe_graph()
+        nodes_raw = graph.get("nodes", [])
+        edges_raw = graph.get("edges", [])
+
+        # Build node map — exclude existing peers and ourselves
+        node_map = {}
+        for node in nodes_raw:
+            pk = node.get("pub_key", "")
+            if pk and pk not in state["existing_peers"] and pk != state["pubkey"]:
+                node_map[pk] = {
+                    "pubkey": pk,
+                    "alias": node.get("alias", pk[:12]),
+                    "capacity": 0,
+                    "channel_count": 0,
+                    "source": "graph",
+                    "last_update": node.get("last_update", 0),
+                }
+
+        # Count channels and sum capacity from edges
+        for edge in edges_raw:
+            cap = int(edge.get("capacity", 0))
+            for pk_field in ["node1_pub", "node2_pub"]:
+                pk = edge.get(pk_field, "")
+                if pk in node_map:
+                    node_map[pk]["capacity"] += cap
+                    node_map[pk]["channel_count"] += 1
+
+        # Filter out nodes with zero channels (likely inactive/phantom nodes)
+        active_nodes = [n for n in node_map.values() if n["channel_count"] > 0]
+
+        # Sort by channel count descending to establish network rank
+        active_nodes.sort(key=lambda n: n["channel_count"], reverse=True)
+
+        log.info("graph: %d total nodes, %d active (have channels), %d excluded (existing peers)",
+                 len(nodes_raw), len(active_nodes), len(state["existing_peers"]))
+
+        # Assign network rank and tier based on channel count rank
+        # Top 50 by channels = hubs, 51-250 = mid-tier, rest excluded
+        for i, node in enumerate(active_nodes[:250]):
+            rank = i + 1
+            tier = "hub" if rank <= 50 else "mid-tier"
+            node["network_rank"] = rank
+            node["tier_hint"] = tier
+            candidates.append(node)
+
+        log.info("graph candidates: %d hubs (rank 1-50), %d mid-tier (rank 51-250)",
+                 sum(1 for c in candidates if c["tier_hint"] == "hub"),
+                 sum(1 for c in candidates if c["tier_hint"] == "mid-tier"))
+
+    except Exception as e:
+        log.warning("graph candidate fetch failed: %s", e)
+
+    return candidates
+
+
+def _enrich_with_1ml_aliases(candidates):
+    """Optionally enrich candidate aliases from 1ML.
+
+    1ML is no longer the primary source — it's used only to cross-reference
+    aliases and confirm node names for the top candidates.
+    Fails silently if 1ML is down.
+    """
     try:
         r = requests.get(
             f"{ONEML_API}/node?order=capacity&json=true",
-            timeout=15,
+            timeout=10,
             headers={"Accept": "application/json"},
         )
-        if r.ok:
-            nodes = r.json()
-            if isinstance(nodes, list):
-                for node in nodes[:50]:  # top 50 by capacity
-                    pubkey = node.get("pub_key", node.get("pubkey", ""))
-                    if pubkey and pubkey not in state["existing_peers"]:
-                        candidates.append({
-                            "pubkey": pubkey,
-                            "alias": node.get("alias", pubkey[:12]),
-                            "capacity": int(node.get("capacity", 0)),
-                            "channel_count": int(node.get("channelcount", node.get("channel_count", 0))),
-                            "source": "1ml",
-                        })
-    except Exception as e:
-        log.warning("1ML fetch failed: %s", e)
+        if not r.ok:
+            return candidates
 
-    # 2. Use LND's local graph to find well-connected nodes we're not connected to
-    try:
-        net_info = lnd_client.get_network_info()
-        # Get graph (this can be large — only do if we have few external candidates)
-        if len(candidates) < 10:
-            graph = lnd_client.describe_graph()
-            node_map = {}
-            for node in graph.get("nodes", []):
-                pk = node.get("pub_key", "")
-                if pk and pk not in state["existing_peers"] and pk != state["pubkey"]:
-                    node_map[pk] = {
-                        "pubkey": pk,
-                        "alias": node.get("alias", pk[:12]),
-                        "capacity": 0,
-                        "channel_count": 0,
-                        "source": "graph",
-                    }
+        nodes = r.json()
+        if not isinstance(nodes, list):
+            return candidates
 
-            # Count channels per node from edges
-            for edge in graph.get("edges", []):
-                cap = int(edge.get("capacity", 0))
-                for pk_field in ["node1_pub", "node2_pub"]:
-                    pk = edge.get(pk_field, "")
-                    if pk in node_map:
-                        node_map[pk]["capacity"] += cap
-                        node_map[pk]["channel_count"] += 1
+        # Build alias lookup from 1ML
+        alias_lookup = {}
+        for node in nodes[:200]:
+            pk = node.get("pub_key", node.get("pubkey", ""))
+            alias = node.get("alias", "")
+            if pk and alias:
+                alias_lookup[pk] = alias
 
-            # Take top nodes by channel count that we're not connected to
-            graph_candidates = sorted(
-                node_map.values(),
-                key=lambda n: n["channel_count"],
-                reverse=True,
-            )[:30]
-            candidates.extend(graph_candidates)
+        # Update aliases where 1ML has a better/confirmed name
+        enriched = 0
+        for c in candidates:
+            if c["pubkey"] in alias_lookup:
+                c["alias"] = alias_lookup[c["pubkey"]]
+                c["alias_confirmed"] = True
+                enriched += 1
+
+        log.debug("1ML enriched %d candidate aliases", enriched)
 
     except Exception as e:
-        log.warning("graph analysis failed: %s", e)
+        log.debug("1ML alias enrichment skipped: %s", e)
 
-    # Deduplicate by pubkey
-    seen = set()
-    unique = []
-    for c in candidates:
-        if c["pubkey"] not in seen:
-            seen.add(c["pubkey"])
-            unique.append(c)
+    return candidates
 
-    return unique
+
+def _fetch_external_candidates(state):
+    """Build candidate peer list for scoring.
+
+    Primary source: local LND graph (always available, always fresh).
+    Secondary enrichment: 1ML for alias confirmation (optional, fails silently).
+    """
+    # Step 1: Get all candidates from local graph
+    candidates = _fetch_candidates_from_graph(state)
+
+    if not candidates:
+        log.warning("no candidates found from graph — something may be wrong with graph sync")
+        return []
+
+    # Step 2: Enrich aliases from 1ML (best-effort)
+    candidates = _enrich_with_1ml_aliases(candidates)
+
+    return candidates
 
 
 def _enrich_candidates_with_graph_data(candidates, state):
@@ -562,23 +620,35 @@ def _classify_existing_portfolio(channels, candidates):
 
 
 def _split_candidates_by_tier(candidates):
-    """Split candidates into hub (top 50 by channels) and mid-tier (50-200).
+    """Split candidates into hub (network rank 1-50) and mid-tier (rank 51-200).
 
+    Uses network_rank from 1ML if available (rank by capacity on the network).
+    Falls back to sorting by channel count if rank not set (e.g. graph-sourced nodes).
     Returns (hubs, mid_tier) lists, each sorted by score descending.
-    Candidates are sorted by channel count descending so rank is stable.
     """
-    sorted_by_channels = sorted(
-        candidates, key=lambda c: c.get("channel_count", 0), reverse=True
-    )
-    hub_pubkeys = {c["pubkey"] for c in sorted_by_channels[:50]}
+    hubs = []
+    mid_tier = []
 
-    hubs = [c for c in candidates if c["pubkey"] in hub_pubkeys]
-    mid_tier = [c for c in candidates if c["pubkey"] not in hub_pubkeys]
+    for c in candidates:
+        rank = c.get("network_rank")
+        tier_hint = c.get("tier_hint")
+
+        if tier_hint == "hub" or (rank is not None and rank <= 50):
+            hubs.append(c)
+        elif tier_hint == "mid-tier" or (rank is not None and rank > 50):
+            mid_tier.append(c)
+        else:
+            # No rank info — classify by channel count
+            if c.get("channel_count", 0) >= HUB_CHANNEL_THRESHOLD:
+                hubs.append(c)
+            else:
+                mid_tier.append(c)
 
     # Within each tier, sort by score
     hubs.sort(key=lambda c: c["score"], reverse=True)
     mid_tier.sort(key=lambda c: c["score"], reverse=True)
 
+    log.debug("tier split: %d hubs, %d mid-tier candidates", len(hubs), len(mid_tier))
     return hubs, mid_tier
 
 
