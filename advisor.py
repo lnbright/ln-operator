@@ -751,8 +751,9 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
             log.info("allocation strategy: %s", strategy)
 
         # ── Step 4: Shortlist top 10 from pool for agent evaluation ─
-        # We pass all 10 to the agent — it picks the best based on
-        # Amboss research (real capacity, avg channel size, reputation).
+        # These are candidates for the agent to research — NOT final allocation.
+        # The agent picks the best 1-3 from this list based on Amboss/1ML data.
+        # Budget allocation happens based on how many the agent recommends.
         shortlist = pool[:10]
         log.info("shortlisting %d candidates for agent evaluation", len(shortlist))
 
@@ -769,9 +770,10 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
             if gd.get("diversity_score") is not None:
                 reason_parts.append(f"diversity {gd['diversity_score']:.0%}")
 
+            # Amount is 0 here — agent decides which to open, budget allocated after
             actions.append(_make_open_action(
                 candidate,
-                min(remaining // max(len(shortlist), 1), MAX_CHANNEL_SIZE_SATS),
+                0,  # no allocation yet — agent picks from shortlist
                 " — ".join(reason_parts),
                 priority=2
             ))

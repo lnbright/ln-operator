@@ -40,6 +40,13 @@ def cmd_invest(args):
     print(f"\n⚡ LN Operator — Investment Plan for {amount:,} sats")
     print("=" * 55)
 
+    # Override channel size if specified
+    if args.min_channel:
+        import config as _cfg
+        _cfg.PREFERRED_CHANNEL_SIZE_SATS = args.min_channel
+        log_main = get_logger("main")
+        log_main.info("min channel size overridden to %s sats", f"{args.min_channel:,}")
+
     # 60% — Python engine builds the plan
     plan = advisor.build_investment_plan(amount)
 
@@ -423,6 +430,9 @@ def main():
         help="[feature]   Investment advisor — given X sats, what channels to open?")
     p_invest.add_argument("amount", type=int,
         help="Amount in sats you want to deploy")
+    p_invest.add_argument("--min-channel", type=int, default=None,
+        metavar="SATS",
+        help=f"Minimum channel size in sats (default: PREFERRED_CHANNEL_SIZE_SATS from config)")
 
     p_status = subparsers.add_parser("status",
         help="[feature]   Quick node overview with channel balance bars")

@@ -26,6 +26,7 @@ ask "why this peer?" or "find me alternatives" and the agent searches + answers.
 import json
 import requests
 from config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+import config as _config
 from logging_config import get_logger
 
 log = get_logger("agent")
@@ -35,27 +36,28 @@ log = get_logger("agent")
 
 AGENT_SYSTEM_PROMPT = """You are a Lightning Network node advisor. Be concise and direct.
 
-You receive a shortlist of 10 candidate nodes scored by the Python engine using local
-LND graph data (channel count, diversity, topology). The engine cannot reliably compute
-real capacity or average channel size — your job is to fill that gap.
+You receive a shortlist of 10 candidate nodes from the Python engine. Your job:
 
-FOR EACH CANDIDATE: search both amboss.space ("{alias} amboss") and 1ml.com
-("{alias} 1ml lightning") to find real capacity and average channel size.
-Use both sources to cross-check — if they agree, use that number; if they
-differ significantly, note it and use the more conservative figure.
+1. Search Amboss and 1ML to find real avg channel size for each candidate.
+   Use ONE search per candidate: search "{alias} site:amboss.space OR site:1ml.com"
+   or search all 10 aliases in 2-3 batched searches to be efficient.
 
-Metrics to find per node:
-- Real total capacity (sats) — from Amboss and/or 1ML
-- Average channel size (sats) — the quality metric, from Amboss and/or 1ML
+2. Cross-check: if Amboss and 1ML agree on capacity → use it. If they differ → use lower.
 
-Then recommend the top 3 from the shortlist by combining:
-- Engine score (topology, diversity, channel count)
-- Real avg channel size from Amboss/1ML (quality)
+3. Recommend the top 3 by combining engine score (topology/diversity) with
+   real avg channel size (quality). Higher avg channel size = better routing partner.
 
-Output in plain prose, no markdown, no bullets, no headers:
-"Recommend [name] (avg channel size X sats per Amboss/1ML, Y total capacity) because [reason]."
-One sentence per recommended node. Then one sentence on fee environment timing.
-Max 150 words total. Use sats not BTC."""
+4. Also suggest the final budget allocation: given the deployable sats and
+   minimum channel size shown in the plan below, how many channels and at what size?
+
+Output format — plain prose only, no markdown, no bullets:
+"Recommend opening channels to [name1], [name2], [name3].
+[Name1]: avg channel size X sats (Amboss/1ML), [one reason].
+[Name2]: avg channel size X sats, [one reason].
+[Name3]: avg channel size X sats, [one reason].
+Suggested allocation: [X] sats per channel across [N] channels.
+Fee environment: [one sentence]."
+Max 200 words. Use sats not BTC."""
 
 
 # ─── Agentic call with web search ────────────────────────────────
@@ -160,7 +162,7 @@ def get_investment_summary(plan):
     try:
         log.info("agent: researching %d candidate(s) via web search",
                  len(plan.get("actions", [])))
-        text = _run_agentic_call(AGENT_SYSTEM_PROMPT, compact, max_tokens=800)
+        text = _run_agentic_call(AGENT_SYSTEM_PROMPT, compact, max_tokens=2000, max_turns=10)
 
         if text:
             log.info("agent summary received (%d chars)", len(text))
@@ -206,6 +208,7 @@ def _build_compact_prompt(plan):
     """
     lines = []
     lines.append(f"Investment: {plan['total_sats']:,} sats")
+    lines.append(f"Min channel size: {_config.MIN_CHANNEL_SIZE_SATS:,} sats | Preferred: {_config.PREFERRED_CHANNEL_SIZE_SATS:,} sats")
     lines.append(f"Treasury: {plan['treasury_reserve']:,} sats ({plan['treasury_pct']:.0%})")
     lines.append(f"Deployable: {plan['deployable_sats']:,} sats")
     lines.append("")
