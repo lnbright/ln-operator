@@ -148,6 +148,30 @@ def update_channel_policy(channel_point, base_fee_msat, fee_rate_ppm, time_lock_
 
 # ─── Balances ────────────────────────────────────────────────────
 
+def estimate_fee(conf_target=2):
+    """Get on-chain fee estimate from LND (uses Bitcoin Core's estimatesmartfee).
+
+    conf_target: number of blocks to confirm in (1=fastest, 6=economy)
+    Returns fee rate in sat/vB, or None if unavailable.
+
+    This is preferred over external APIs (mempool.space) since it uses
+    your own Bitcoin Core node — no external dependency.
+    """
+    try:
+        # LND's fee estimate endpoint returns sat/kw (satoshis per kilo-weight)
+        # 1 vByte = 4 weight units, so sat/vB = sat/kw × 4 / 1000
+        result = _get(f"/v1/fees/estimate?conf_target={conf_target}")
+        sat_per_kw = int(result.get("sat_per_kw", 0))
+        if sat_per_kw > 0:
+            sat_per_vb = max(1, round(sat_per_kw * 4 / 1000))
+            log.debug("fee estimate: %d sat/kw → %d sat/vB (conf_target=%d)",
+                      sat_per_kw, sat_per_vb, conf_target)
+            return sat_per_vb
+    except Exception as e:
+        log.debug("fee estimate from LND failed: %s", e)
+    return None
+
+
 def get_onchain_balance():
     """Get on-chain wallet balance."""
     return _get("/v1/balance/blockchain")

@@ -52,16 +52,19 @@ def build_investment_plan(total_sats):
     # 1. Gather current node state
     state = _gather_node_state()
 
-    # 2. Calculate treasury reserve
+    # 2. Check on-chain fee environment first — needed for accurate treasury calc
+    fee_env = _check_fee_environment()
+
+    # 3. Calculate treasury reserve (uses real fee rate from mempool.space)
     # Estimate number of new channels based on deployable budget
-    # Use preferred channel size as estimate — will be refined by agent
     estimated_channels = min(max(1, (total_sats * (1 - TREASURY_MIN_RATIO)) // PREFERRED_CHANNEL_SIZE_SATS), 10)
-    treasury = _calculate_treasury(total_sats, state, num_new_channels=int(estimated_channels))
+    treasury = _calculate_treasury(
+        total_sats, state,
+        num_new_channels=int(estimated_channels),
+        fee_rate_sat_vb=fee_env.get("fastest_fee", 3)
+    )
 
     deployable = total_sats - treasury["reserve_sats"]
-
-    # 3. Check on-chain fee environment
-    fee_env = _check_fee_environment()
 
     # 4. Analyse existing channels — find underperformers and upsize candidates
     channel_analysis = _analyse_existing_channels(state["channels"])
@@ -146,16 +149,17 @@ def _gather_node_state():
     }
 
 
-def _calculate_treasury(total_sats, state, num_new_channels=2):
+def _calculate_treasury(total_sats, state, num_new_channels=2, fee_rate_sat_vb=3):
     """Determine how much to keep in reserve.
 
     Accounts for:
     - Treasury minimum ratio (2.5% default)
     - Historical rebalancing costs (3 months average)
     - Anchor reserve for new channels being opened (10,000 sats each, capped at 100,000)
-    - On-chain fees for opening channels (~750 sats per channel at low fees)
+    - On-chain fees for opening channels (real fee rate from mempool.space × ~250 vBytes)
 
     num_new_channels: how many new channels we plan to open (affects anchor reserve calc)
+    fee_rate_sat_vb: current on-chain fee rate in sat/vB from mempool.space
     """
     # Minimum percentage-based reserve
     min_reserve = int(total_sats * TREASURY_MIN_RATIO)
@@ -169,8 +173,14 @@ def _calculate_treasury(total_sats, state, num_new_channels=2):
         max(0, ANCHOR_RESERVE_MAX - existing_reserve)
     )
 
-    # On-chain opening fees (~750 sats per channel at low fees)
-    onchain_open_fees = num_new_channels * 750
+    # On-chain opening fees: real fee rate × ~250 vBytes per channel open tx
+    # 250 vBytes is approximate for a standard channel open (1 input, 2 outputs, P2WSH)
+    channel_open_tx_vbytes = 250
+    onchain_open_fees = num_new_channels * fee_rate_sat_vb * channel_open_tx_vbytes
+    reasoning_parts.append(
+        f"est. open fees: {onchain_open_fees:,} sats "
+        f"({num_new_channels} × {fee_rate_sat_vb} sat/vB × {channel_open_tx_vbytes} vB)"
+    )
 
     # Cost-based reserve from historical data
     avg_monthly_cost = db.get_avg_monthly_rebalance_cost(months=3)
@@ -196,7 +206,6 @@ def _calculate_treasury(total_sats, state, num_new_channels=2):
     reasoning_parts.append(
         f"anchor reserve for {num_new_channels} new channel(s): {new_anchor_needed:,} sats"
     )
-    reasoning_parts.append(f"est. on-chain open fees: {onchain_open_fees:,} sats")
 
     # Don't reserve more than 30% of the total — that defeats the purpose
     max_reserve = int(total_sats * 0.30)
@@ -213,45 +222,64 @@ def _calculate_treasury(total_sats, state, num_new_channels=2):
 
 
 def _check_fee_environment():
-    """Check current on-chain fee environment via mempool.space."""
+    """Check current on-chain fee environment.
+
+    Primary source: LND's fee estimator (uses your Bitcoin Core node — no external call).
+    Fallback: mempool.space if LND estimate is unavailable.
+    """
+    def _assess(fastest):
+        if fastest > 100:
+            return "very_high", f"On-chain fees very high ({fastest} sat/vB). Consider waiting unless urgent."
+        elif fastest > 50:
+            return "high", f"On-chain fees elevated ({fastest} sat/vB). Batch opens if possible."
+        elif fastest > 20:
+            return "moderate", f"On-chain fees moderate ({fastest} sat/vB). Reasonable time to open."
+        else:
+            return "low", f"On-chain fees low ({fastest} sat/vB). Good time to open channels."
+
+    # ── Step 1: Try LND (primary) ─────────────────────────────────
+    lnd_fee = lnd_client.estimate_fee(conf_target=2)
+    if lnd_fee:
+        log.info("on-chain fees: %d sat/vB (from LND)", lnd_fee)
+        assessment, note = _assess(lnd_fee)
+        return {
+            "fastest_fee": lnd_fee,
+            "half_hour_fee": lnd_client.estimate_fee(conf_target=6) or lnd_fee,
+            "hour_fee": lnd_client.estimate_fee(conf_target=12) or lnd_fee,
+            "economy_fee": lnd_client.estimate_fee(conf_target=144) or lnd_fee,
+            "assessment": assessment,
+            "note": note,
+            "source": "lnd",
+        }
+
+    # ── Step 2: Fall back to mempool.space ────────────────────────
+    log.debug("LND fee estimate unavailable — falling back to mempool.space")
     try:
         r = requests.get(f"{MEMPOOL_API}/v1/fees/recommended", timeout=10)
         r.raise_for_status()
         fees = r.json()
-        fastest = fees.get("fastestFee", 0)
-        half_hour = fees.get("halfHourFee", 0)
-        hour = fees.get("hourFee", 0)
-        economy = fees.get("economyFee", 0)
-
-        # Determine if it's a good time to open channels
-        if fastest > 100:
-            assessment = "very_high"
-            note = f"On-chain fees very high ({fastest} sat/vB). Consider waiting unless urgent."
-        elif fastest > 50:
-            assessment = "high"
-            note = f"On-chain fees elevated ({fastest} sat/vB). Batch opens if possible."
-        elif fastest > 20:
-            assessment = "moderate"
-            note = f"On-chain fees moderate ({fastest} sat/vB). Reasonable time to open."
-        else:
-            assessment = "low"
-            note = f"On-chain fees low ({fastest} sat/vB). Good time to open channels."
-
-        log.info("on-chain fees: %d sat/vB (%s)", fastest, assessment)
+        fastest = fees.get("fastestFee", 3)
+        assessment, note = _assess(fastest)
+        log.info("on-chain fees: %d sat/vB (from mempool.space)", fastest)
         return {
             "fastest_fee": fastest,
-            "half_hour_fee": half_hour,
-            "hour_fee": hour,
-            "economy_fee": economy,
+            "half_hour_fee": fees.get("halfHourFee", fastest),
+            "hour_fee": fees.get("hourFee", fastest),
+            "economy_fee": fees.get("economyFee", fastest),
             "assessment": assessment,
             "note": note,
+            "source": "mempool.space",
         }
     except Exception as e:
-        log.warning("could not fetch on-chain fees: %s", e)
+        log.warning("mempool.space also unavailable: %s — using safe default", e)
         return {
-            "fastest_fee": 0,
+            "fastest_fee": 3,
+            "half_hour_fee": 3,
+            "hour_fee": 2,
+            "economy_fee": 1,
             "assessment": "unknown",
-            "note": f"Could not fetch fee data: {e}",
+            "note": "Could not fetch fee data — using 3 sat/vB as safe default.",
+            "source": "default",
         }
 
 
