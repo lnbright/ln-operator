@@ -41,11 +41,11 @@ FEE_MIN_PPM = 50                 # floor fee rate when channel is full (local hi
 FEE_MAX_PPM = 500                # ceiling fee rate when channel is depleted (local low)
 
 # Rebalancing cost limits (per-channel, adaptive)
-REBALANCE_MAX_AMOUNT_RATIO = 0.5      # never rebalance more than 50% of capacity in one go
-REBALANCE_HARD_CAP_PPM = 500          # absolute ceiling — never pay more than this, ever
+REBALANCE_MAX_AMOUNT_RATIO = 0.3      # never rebalance more than 30% of capacity in one go
+REBALANCE_HARD_CAP_PPM = 1000          # absolute ceiling — never pay more than this, ever
 REBALANCE_REVENUE_RATIO = 0.5         # for proven channels: max fee = earned_ppm × this ratio
-REBALANCE_DISCOVERY_PPM = 150         # for new/unproven channels: budget to discover if they route
-REBALANCE_DEADWEIGHT_PPM = 50         # for channels that had a chance and earned nothing
+REBALANCE_DISCOVERY_PPM = 1000         # for new/unproven channels: budget to discover if they route
+REBALANCE_DEADWEIGHT_PPM = 150         # for channels that had a chance and earned nothing
 REBALANCE_DISCOVERY_DAYS = 30         # how many days of balanced time before judging a channel
 REBALANCE_BALANCED_RATIO = 0.30       # channel counts as "balanced" when local ratio is above this
 REBALANCE_BALANCED_RATIO_HIGH = 0.70  # ... and below this

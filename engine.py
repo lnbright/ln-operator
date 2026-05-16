@@ -288,7 +288,9 @@ def plan_rebalances(channels=None):
         # Per-channel budget for the TARGET (the depleted channel we're restoring)
         budget = get_channel_rebalance_budget(target_ch["chan_id"])
         max_fee_ppm = budget["max_fee_ppm"]
-        max_fee = int(amount * max_fee_ppm / 1_000_000)
+        # Add 10% headroom to avoid off-by-one failures where the route
+        # costs exactly the ppm limit — rounding can cause rejection.
+        max_fee = int(amount * max_fee_ppm / 1_000_000 * 1.1)
 
         log.info("rebalance plan: %s→%s %s sats [%s, %d ppm cap]",
                  source_ch["peer_alias"], target_ch["peer_alias"],
@@ -353,6 +355,9 @@ def execute_rebalance(plan, dry_run=False):
 
     try:
         # Step 1: Create invoice on our own node
+        # POST /v1/invoices — creates a BOLT11 invoice payable to ourselves
+        log.info("rebalance step 1/2: creating invoice for %s sats (POST /v1/invoices)",
+                 f"{plan['amount_sats']:,}")
         invoice = lnd_client.add_invoice(
             plan["amount_sats"],
             memo=f"rebal:{plan['source_alias'][:10]}→{plan['target_alias'][:10]}"
@@ -364,10 +369,18 @@ def execute_rebalance(plan, dry_run=False):
             log.error("rebalance aborted: could not create invoice")
             return result
 
+        log.info("rebalance step 1/2: invoice created OK")
+
         # Step 2: Pay via Router SendPaymentV2
-        # - outgoing_chan_id forces the first hop out through the source (overfull) channel
-        # - last_hop_pubkey forces the last hop back in through the target peer
-        # - allow_self_payment=True is required for circular payments
+        # POST /v2/router/send with:
+        #   outgoing_chan_id = source channel (overfull) — forces first hop out this channel
+        #   last_hop_pubkey  = target peer (depleted)   — forces last hop in through this peer
+        #   fee_limit_sat    = max fee based on budget tier
+        #   allow_self_payment = true (required for circular payments)
+        log.info("rebalance step 2/2: sending circular payment "
+                 "(POST /v2/router/send, outgoing=%s, last_hop=%s, fee_limit=%d sats)",
+                 plan["source_chan_id"], plan["target_peer_pubkey"][:12] + "...",
+                 plan["max_fee_sats"])
         pay_result = lnd_client.send_payment_v2(
             payment_request=payment_request,
             outgoing_chan_id=plan["source_chan_id"],
@@ -375,6 +388,7 @@ def execute_rebalance(plan, dry_run=False):
             fee_limit_sat=plan["max_fee_sats"],
             timeout_seconds=120,
         )
+        log.info("rebalance step 2/2: payment returned status=%s", pay_result.get("status","?"))
 
         if pay_result["status"] == "SUCCEEDED":
             result["success"] = True
