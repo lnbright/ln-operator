@@ -41,11 +41,11 @@ FEE_MIN_PPM = 50                 # floor fee rate when channel is full (local hi
 FEE_MAX_PPM = 500                # ceiling fee rate when channel is depleted (local low)
 
 # Rebalancing cost limits (per-channel, adaptive)
-REBALANCE_MAX_AMOUNT_RATIO = 0.3      # never rebalance more than 30% of capacity in one go
-REBALANCE_HARD_CAP_PPM = 1000          # absolute ceiling — never pay more than this, ever
+REBALANCE_MAX_AMOUNT_RATIO = 0.5      # never rebalance more than 50% of capacity in one go
+REBALANCE_HARD_CAP_PPM = 500          # absolute ceiling — never pay more than this, ever
 REBALANCE_REVENUE_RATIO = 0.5         # for proven channels: max fee = earned_ppm × this ratio
-REBALANCE_DISCOVERY_PPM = 1000         # for new/unproven channels: budget to discover if they route
-REBALANCE_DEADWEIGHT_PPM = 150         # for channels that had a chance and earned nothing
+REBALANCE_DISCOVERY_PPM = 150         # for new/unproven channels: budget to discover if they route
+REBALANCE_DEADWEIGHT_PPM = 50         # for channels that had a chance and earned nothing
 REBALANCE_DISCOVERY_DAYS = 30         # how many days of balanced time before judging a channel
 REBALANCE_BALANCED_RATIO = 0.30       # channel counts as "balanced" when local ratio is above this
 REBALANCE_BALANCED_RATIO_HIGH = 0.70  # ... and below this
@@ -69,11 +69,12 @@ MAX_CHANNEL_SIZE_SATS = 16_777_215       # LND wumbo channel max without additio
 
 # Peer scoring weights (must sum to 1.0)
 PEER_SCORE_WEIGHTS = {
-    "capacity": 0.20,       # total node capacity
-    "channels": 0.15,       # number of channels
-    "uptime": 0.20,         # node uptime / availability
-    "centrality": 0.25,     # betweenness centrality (how many paths go through them)
-    "diversity": 0.20,      # how much they improve YOUR graph diversity
+    "channels":        0.20,  # number of channels (topology reach, reliable from graph)
+    "avg_chan_size":    0.30,  # avg channel size in sats (quality metric — larger = better routing partner)
+    "centrality":      0.20,  # betweenness proxy: (channels + capacity) normalised
+    "diversity":       0.30,  # % of their peers new to you (improves your graph reach)
+    # Note: uptime removed (always 0.5 placeholder — not useful)
+    # Note: raw capacity removed (unreliable from local graph — use avg_chan_size instead)
 }
 
 # ─── External data sources ───────────────────────────────────────

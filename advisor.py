@@ -394,6 +394,13 @@ def _fetch_candidates_from_graph(state):
             tier = "hub" if rank <= 50 else "mid-tier"
             node["network_rank"] = rank
             node["tier_hint"] = tier
+            # avg_channel_size is a quality metric — larger avg = more serious routing partner
+            # Note: local graph capacity may be incomplete for distant nodes;
+            # this improves as you open more channels.
+            node["avg_channel_size"] = (
+                node["capacity"] // node["channel_count"]
+                if node["channel_count"] > 0 else 0
+            )
             candidates.append(node)
 
         log.info("graph candidates: %d hubs (rank 1-50), %d mid-tier (rank 51-250)",
@@ -572,55 +579,51 @@ def _score_candidates(candidates, state):
     max_capacity = max(c["capacity"] for c in candidates) if candidates else 1
     max_channels = max(c["channel_count"] for c in candidates) if candidates else 1
 
+    # Normalisation maximums
+    max_channels     = max(c.get("channel_count", 0) for c in candidates) or 1
+    max_avg_chan_size = max(c.get("avg_channel_size", 0) for c in candidates) or 1
+    max_capacity     = max(c.get("capacity", 0) for c in candidates) or 1
+
     for c in candidates:
         scores = {}
 
-        # Capacity score (0-1, log scale)
-        if c["capacity"] > 0 and max_capacity > 0:
-            scores["capacity"] = math.log(1 + c["capacity"]) / math.log(1 + max_capacity)
-        else:
-            scores["capacity"] = 0
+        # Channel count score (0-1, log scale — reliable from gossip)
+        ch = c.get("channel_count", 0)
+        scores["channels"] = math.log(1 + ch) / math.log(1 + max_channels) if ch > 0 else 0
 
-        # Channel count score (0-1, log scale)
-        if c["channel_count"] > 0 and max_channels > 0:
-            scores["channels"] = math.log(1 + c["channel_count"]) / math.log(1 + max_channels)
-        else:
-            scores["channels"] = 0
+        # Average channel size score (0-1, log scale — quality metric)
+        # Larger avg size = more serious routing partner, handles bigger payments
+        avg = c.get("avg_channel_size", 0)
+        scores["avg_chan_size"] = (
+            math.log(1 + avg) / math.log(1 + max_avg_chan_size) if avg > 0 else 0
+        )
 
-        # Uptime score — we don't have this from basic graph data
-        # Default to 0.5 (unknown), could be enriched from 1ML or Terminal
-        scores["uptime"] = 0.5
+        # Centrality proxy — combination of channels and capacity normalised
+        cap = c.get("capacity", 0)
+        cap_score = math.log(1 + cap) / math.log(1 + max_capacity) if cap > 0 else 0
+        scores["centrality"] = (scores["channels"] + cap_score) / 2
 
-        # Centrality — approximate from channel count * capacity
-        # Real betweenness centrality would require full graph traversal
-        if max_capacity > 0 and max_channels > 0:
-            scores["centrality"] = (scores["capacity"] + scores["channels"]) / 2
-        else:
-            scores["centrality"] = 0
-
-        # Diversity — use computed score from graph data if available, else placeholder
+        # Diversity — use computed score from graph enrichment if available
         if c.get("diversity_score_computed") is not None:
             scores["diversity"] = c["diversity_score_computed"]
         else:
-            scores["diversity"] = 0.5  # placeholder
+            scores["diversity"] = 0.5  # placeholder until graph enrichment runs
 
-        # Check historical data
+        # Penalise previously unreliable peers from DB history
         peer_hist = db.get_peer_history(c["pubkey"])
         if peer_hist:
-            # We've interacted with this peer before
             for record in peer_hist:
                 if record["action"] == "closed" and "unreliable" in (record["reason"] or ""):
-                    scores["uptime"] = 0.1  # penalise previously bad peers
+                    scores["avg_chan_size"] *= 0.5  # penalise quality score
                     c["history_note"] = f"Previously closed: {record['reason']}"
 
         # Weighted final score
         w = PEER_SCORE_WEIGHTS
         c["score"] = round(
-            scores["capacity"] * w["capacity"] +
-            scores["channels"] * w["channels"] +
-            scores["uptime"] * w["uptime"] +
-            scores["centrality"] * w["centrality"] +
-            scores["diversity"] * w["diversity"],
+            scores["channels"]     * w["channels"] +
+            scores["avg_chan_size"] * w["avg_chan_size"] +
+            scores["centrality"]   * w["centrality"] +
+            scores["diversity"]    * w["diversity"],
             4
         )
         c["score_breakdown"] = scores

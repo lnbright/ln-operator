@@ -179,29 +179,37 @@ def get_channel_rebalance_budget(chan_id):
         }
 
 
-def find_rebalance_candidates(channels=None):
+def find_rebalance_candidates(channels=None, force=False):
     """Identify channels that need rebalancing.
 
     Returns two lists:
     - needs_inbound: channels with local_ratio < LOW threshold (depleted, need sats back)
     - needs_outbound: channels with local_ratio > HIGH threshold (overfull, can donate sats)
+
+    force=True: ignore thresholds — any channel below 50% is inbound, above 50% is outbound.
     """
     if channels is None:
         channels = lnd_client.get_channels()
         channels = lnd_client.resolve_aliases(channels)
 
-    needs_inbound = []   # depleted — need to push sats IN
-    needs_outbound = []  # overfull — can push sats OUT
+    needs_inbound = []
+    needs_outbound = []
 
     for ch in channels:
         if not ch["active"]:
             continue
-        if ch["local_ratio"] < REBALANCE_LOW_THRESHOLD:
-            needs_inbound.append(ch)
-        elif ch["local_ratio"] > REBALANCE_HIGH_THRESHOLD:
-            needs_outbound.append(ch)
+        if force:
+            # Ignore thresholds — target 50% on everything
+            if ch["local_ratio"] < REBALANCE_TARGET:
+                needs_inbound.append(ch)
+            elif ch["local_ratio"] > REBALANCE_TARGET:
+                needs_outbound.append(ch)
+        else:
+            if ch["local_ratio"] < REBALANCE_LOW_THRESHOLD:
+                needs_inbound.append(ch)
+            elif ch["local_ratio"] > REBALANCE_HIGH_THRESHOLD:
+                needs_outbound.append(ch)
 
-    # Sort: most depleted first for inbound, most overfull first for outbound
     needs_inbound.sort(key=lambda c: c["local_ratio"])
     needs_outbound.sort(key=lambda c: c["local_ratio"], reverse=True)
 
@@ -234,18 +242,19 @@ def calculate_rebalance_amount(channel, direction="inbound"):
     return amount
 
 
-def plan_rebalances(channels=None):
+def plan_rebalances(channels=None, force=False):
     """Create a rebalancing plan: which channels to rebalance and how.
 
     Pairs depleted channels with overfull ones for circular rebalancing.
     Uses per-channel budget based on historical performance.
-    Returns a list of planned rebalance operations.
+    force=True: ignores 20/80 thresholds, targets 50% on all channels.
+    Returns a (plans, reason) tuple.
     """
     if channels is None:
         channels = lnd_client.get_channels()
         channels = lnd_client.resolve_aliases(channels)
 
-    needs_inbound, needs_outbound = find_rebalance_candidates(channels)
+    needs_inbound, needs_outbound = find_rebalance_candidates(channels, force=force)
 
     log.info("rebalance: %d depleted, %d overfull channel(s) found",
              len(needs_inbound), len(needs_outbound))

@@ -182,7 +182,7 @@ def get_dashboard_data():
                amount_in_sats as amt_in, amount_out_sats as amt_out,
                fee_earned_sats as fee
         FROM forwarding_log
-        ORDER BY ts DESC LIMIT 20
+        ORDER BY ts DESC LIMIT 10
     """)
 
     data["rebalances"] = db_all("""

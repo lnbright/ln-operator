@@ -123,20 +123,42 @@ def cmd_plan(args):
     log.info("plan: %d channel(s) at %s sats each (deployable %s)",
              best_num, f"{best_channel_size:,}", f"{bd['deployable']:,}")
 
-    # ── Step 4: Score and show top 10 candidates from local graph ─
+    # ── Step 4: Score and show top 10 candidates (portfolio-aware) ─
     print(f"\n  {'─'*40}")
-    print(f"  Top 10 candidates from LND graph:\n")
 
     try:
         state = advisor._gather_node_state()
         candidates = advisor._fetch_candidates_from_graph(state)
-        scored = advisor._score_candidates(candidates, state)[:10]
+        candidates = advisor._enrich_with_1ml_aliases(candidates)
+        scored = advisor._score_candidates(candidates, state)
 
-        for i, c in enumerate(scored, 1):
+        # Apply portfolio strategy — same logic as allocate_budget
+        portfolio = advisor._classify_existing_portfolio(state["channels"], scored)
+        hub_count = portfolio["hub_count"]
+        hubs, mid_tier = advisor._split_candidates_by_tier(scored)
+
+        if hub_count == 0:
+            pool = hubs[:10]
+            strategy = "no hub connections yet — showing top hubs"
+        elif hub_count >= 2:
+            pool = mid_tier[:10]
+            strategy = f"{hub_count} hubs already — showing mid-tier nodes for diversification"
+        else:
+            # 1 hub — show 2 hubs + 8 mid-tier
+            pool = (hubs[:2] + mid_tier[:8])[:10]
+            strategy = f"1 hub already — showing 2 hubs + mid-tier nodes"
+
+        log.info("plan candidates: %s", strategy)
+        print(f"  Top 10 candidates ({strategy}):\n")
+
+        for i, c in enumerate(pool, 1):
             tier = c.get("tier_hint", "?")
-            print(f"  {i:2}. {c['alias'][:30]:<30} | score {c['score']:.3f} "
+            avg = c.get("avg_channel_size", 0)
+            avg_str = f"{avg//1_000_000}M" if avg >= 1_000_000 else f"{avg//1_000}k" if avg >= 1_000 else str(avg)
+            print(f"  {i:2}. {c['alias'][:28]:<28} | score {c['score']:.3f} "
                   f"| rank {c.get('network_rank','?'):>3} "
                   f"| {c['channel_count']:>4} ch "
+                  f"| avg {avg_str:>5} "
                   f"| {tier}")
     except Exception as e:
         log.error("could not fetch candidates: %s", e)
@@ -190,7 +212,10 @@ def cmd_rebalance_channels(args):
     print("\n⚡ LN Operator — Rebalance Check")
     print("=" * 40)
 
-    plans, reason = engine.plan_rebalances()
+    force = getattr(args, "force", False)
+    if force:
+        log.info("rebalance_channels: force mode — ignoring thresholds, targeting 50%% on all channels")
+    plans, reason = engine.plan_rebalances(force=force)
 
     if not plans:
         log.info("rebalance_channels: %s", reason)
@@ -537,6 +562,8 @@ def main():
         help="[debug]     Move sats from overfull to depleted channels")
     p_rebal.add_argument("--dry-run", action="store_true",
         help="Show plan without executing payments")
+    p_rebal.add_argument("--force", action="store_true",
+        help="Ignore 20/80 thresholds — target 50%% on all channels regardless of current ratio")
 
     p_sync = subparsers.add_parser("sync_routing",
         help="[debug]     Sync routing events from LND into the local database")
