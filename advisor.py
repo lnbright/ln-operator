@@ -425,7 +425,7 @@ def _enrich_candidates_with_graph_data(candidates, state):
     our_peers = state["existing_peers"]
     enriched = []
 
-    for c in candidates[:15]:  # only enrich top 15 — graph calls are slow
+    for c in candidates[:10]:  # enrich shortlisted 10 — graph calls are slow
         try:
             node_info = lnd_client.get_node_info(c["pubkey"], include_channels=True)
             node = node_info.get("node", {})
@@ -722,66 +722,59 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
 
     elif remaining >= PREFERRED_CHANNEL_SIZE_SATS:
         # ── Step 3: Decide which tier to target ──────────────────
-        max_new = min(remaining // PREFERRED_CHANNEL_SIZE_SATS, 3)
+        max_new = min(remaining // PREFERRED_CHANNEL_SIZE_SATS, 10)
 
         if hub_count == 0:
-            # No hubs yet — need at least one routing backbone connection
-            pool = hubs if hubs else candidates
-            strategy = "no hub connections yet — opening one large hub first"
+            # No hubs yet — shortlist top 10 hubs for agent to evaluate
+            pool = hubs[:10] if hubs else candidates[:10]
+            strategy = "no hub connections yet — shortlisting top 10 hubs for agent evaluation"
             log.info("allocation strategy: %s", strategy)
             not_recommended.append(
                 f"Strategy: {strategy}. "
                 f"Once you have 1-2 hubs, future opens will target mid-tier nodes."
             )
         elif hub_count >= 2:
-            # Well connected to hubs — diversify into mid-tier
-            pool = mid_tier if mid_tier else candidates
-            strategy = f"already have {hub_count} hub connections — targeting mid-tier nodes (rank 50-200) for diversity"
+            # Well connected to hubs — shortlist top 10 mid-tier for agent
+            pool = mid_tier[:10] if mid_tier else candidates[:10]
+            strategy = f"already have {hub_count} hub connections — shortlisting top 10 mid-tier nodes for agent evaluation"
             log.info("allocation strategy: %s", strategy)
             not_recommended.append(
                 f"Strategy: {strategy}. "
                 f"Mid-tier nodes offer better diversity and less fee competition."
             )
         else:
-            # 1 hub — one more hub OR start mid-tier depending on budget
-            if remaining >= PREFERRED_CHANNEL_SIZE_SATS * 2 and mid_tier:
-                # Enough for both — split: one hub, one mid-tier
-                pool = [hubs[0]] + [mid_tier[0]] if hubs and mid_tier else candidates
-                max_new = min(2, max_new)
-                strategy = "1 hub already — adding one more hub + one mid-tier node"
-            else:
-                pool = mid_tier if mid_tier else candidates
-                strategy = "1 hub already — moving to mid-tier nodes for diversification"
+            # 1 hub — mix of one more hub + mid-tier nodes
+            hub_picks = hubs[:2] if hubs else []
+            mid_picks = mid_tier[:8] if mid_tier else []
+            pool = hub_picks + mid_picks if (hub_picks or mid_picks) else candidates
+            strategy = f"1 hub already — shortlisting {len(hub_picks)} hub(s) + {len(mid_picks)} mid-tier for agent to evaluate"
             log.info("allocation strategy: %s", strategy)
 
-        # ── Step 4: Allocate to chosen pool ──────────────────────
-        num_to_open = min(max_new, len(pool))
-        if num_to_open > 0:
-            channel_size = min(remaining // num_to_open, MAX_CHANNEL_SIZE_SATS)
-            channel_size = max(channel_size, PREFERRED_CHANNEL_SIZE_SATS)
+        # ── Step 4: Shortlist top 10 from pool for agent evaluation ─
+        # We pass all 10 to the agent — it picks the best based on
+        # Amboss research (real capacity, avg channel size, reputation).
+        shortlist = pool[:10]
+        log.info("shortlisting %d candidates for agent evaluation", len(shortlist))
 
-            for i in range(num_to_open):
-                if remaining < PREFERRED_CHANNEL_SIZE_SATS or i >= len(pool):
-                    break
-                candidate = pool[i]
-                size = min(channel_size, remaining)
-                gd = candidate.get("graph_data") or {}
+        for candidate in shortlist:
+            gd = candidate.get("graph_data") or {}
+            reason_parts = [
+                f"Score {candidate['score']:.2f}",
+                f"rank {candidate.get('network_rank','?')}",
+                f"{candidate['channel_count']} channels",
+                f"{candidate['capacity']:,} sats capacity (local graph)",
+            ]
+            if gd.get("avg_fee_ppm"):
+                reason_parts.append(f"local avg fee {gd['avg_fee_ppm']} ppm")
+            if gd.get("diversity_score") is not None:
+                reason_parts.append(f"diversity {gd['diversity_score']:.0%}")
 
-                reason_parts = [
-                    f"Score {candidate['score']:.2f}",
-                    f"{candidate['channel_count']} channels",
-                    f"{candidate['capacity']:,} sats capacity",
-                ]
-                if gd.get("avg_fee_ppm"):
-                    reason_parts.append(f"avg fee {gd['avg_fee_ppm']} ppm")
-                if gd.get("diversity_score") is not None:
-                    reason_parts.append(f"diversity {gd['diversity_score']:.0%}")
-                reason_parts.append(f"source: {candidate['source']}")
-
-                actions.append(_make_open_action(
-                    candidate, size, " — ".join(reason_parts), priority=2
-                ))
-                remaining -= size
+            actions.append(_make_open_action(
+                candidate,
+                min(remaining // max(len(shortlist), 1), MAX_CHANNEL_SIZE_SATS),
+                " — ".join(reason_parts),
+                priority=2
+            ))
 
     elif remaining >= MIN_CHANNEL_SIZE_SATS:
         # Only enough for one small channel

@@ -35,16 +35,27 @@ log = get_logger("agent")
 
 AGENT_SYSTEM_PROMPT = """You are a Lightning Network node advisor. Be concise and direct.
 
-For each recommended peer, research it on amboss.space, 1ml.com and via web search,
-then give ONE sentence per peer in plain prose (no markdown, no bullets, no headers):
+You receive a shortlist of 10 candidate nodes scored by the Python engine using local
+LND graph data (channel count, diversity, topology). The engine cannot reliably compute
+real capacity or average channel size — your job is to fill that gap.
 
-"Recommend [node name] because [score reason] and [reputation finding from research]."
+FOR EACH CANDIDATE: search both amboss.space ("{alias} amboss") and 1ml.com
+("{alias} 1ml lightning") to find real capacity and average channel size.
+Use both sources to cross-check — if they agree, use that number; if they
+differ significantly, note it and use the more conservative figure.
 
-Follow with one sentence on timing (on-chain fees) and one sentence if a better
-alternative exists from the candidate list.
+Metrics to find per node:
+- Real total capacity (sats) — from Amboss and/or 1ML
+- Average channel size (sats) — the quality metric, from Amboss and/or 1ML
 
-No markdown formatting. No bullet points. No headers. No generic advice.
-Plain prose only. Max 100 words total. Use sats not BTC."""
+Then recommend the top 3 from the shortlist by combining:
+- Engine score (topology, diversity, channel count)
+- Real avg channel size from Amboss/1ML (quality)
+
+Output in plain prose, no markdown, no bullets, no headers:
+"Recommend [name] (avg channel size X sats per Amboss/1ML, Y total capacity) because [reason]."
+One sentence per recommended node. Then one sentence on fee environment timing.
+Max 150 words total. Use sats not BTC."""
 
 
 # ─── Agentic call with web search ────────────────────────────────
@@ -149,7 +160,7 @@ def get_investment_summary(plan):
     try:
         log.info("agent: researching %d candidate(s) via web search",
                  len(plan.get("actions", [])))
-        text = _run_agentic_call(AGENT_SYSTEM_PROMPT, compact, max_tokens=500)
+        text = _run_agentic_call(AGENT_SYSTEM_PROMPT, compact, max_tokens=800)
 
         if text:
             log.info("agent summary received (%d chars)", len(text))
@@ -231,47 +242,29 @@ def _build_compact_prompt(plan):
         for ch in analysis["unprofitable"][:3]:
             lines.append(f"  - {ch['peer_alias']}: {ch.get('reason', '')}")
 
-    # Recommended actions — include pubkeys and graph data so agent can research
+    # Shortlisted candidates — all 10 for agent to research and rank
     lines.append("")
-    lines.append("Recommended actions (please research each peer before advising):")
-    for a in plan.get("actions", []):
+    lines.append("Shortlisted candidates (research each on Amboss for real capacity + avg channel size):")
+    lines.append("NOTE: capacity shown is from local LND graph — may be incomplete. Use Amboss for real numbers.")
+    lines.append("")
+    for i, a in enumerate(plan.get("actions", []), 1):
+        gd = a.get("graph_data") or {}
         lines.append(
-            f"  {a['type'].upper()}: {a['peer_alias']} "
+            f"  {i}. {a['peer_alias']} "
             f"(pubkey: {a.get('peer_pubkey', 'unknown')}) "
-            f"— {a['amount_sats']:,} sats — score {a.get('score', '?')}"
+            f"rank {a.get('network_rank', '?')} | "
+            f"score {a.get('score', '?')} | "
+            f"{a.get('channel_count', 0)} channels | "
+            f"{a.get('capacity', 0):,} sats local capacity"
         )
-        # Include graph data if available
-        gd = a.get("graph_data")
         if gd:
             lines.append(
-                f"    Graph: {a.get('channel_count',0)} channels, "
-                f"{a.get('capacity',0):,} sats capacity, "
-                f"avg fee {gd.get('avg_fee_ppm', '?')} ppm, "
-                f"diversity {gd.get('diversity_score', '?'):.0%} new peers, "
+                f"     local avg fee: {gd.get('avg_fee_ppm', '?')} ppm | "
+                f"diversity: {gd.get('diversity_score', 0):.0%} new peers | "
                 f"clearnet: {gd.get('has_clearnet', '?')}"
             )
-        lines.append(f"    Engine reason: {a.get('reason', '')}")
     lines.append("")
-
-    # Top scored candidates not in actions (for alternatives)
-    candidates = plan.get("peer_candidates", [])
-    if candidates:
-        lines.append("Other top-scored candidates (for alternatives if needed):")
-        for c in candidates[:5]:
-            gd = c.get("graph_data")
-            line = (
-                f"  - {c.get('alias', '?')} "
-                f"(pubkey: {c.get('pubkey', '')}) "
-                f"score {c.get('score', '?')}, "
-                f"{c.get('channel_count', 0)} channels, "
-                f"{c.get('capacity', 0):,} sats"
-            )
-            if gd:
-                line += (
-                    f", avg fee {gd.get('avg_fee_ppm','?')} ppm, "
-                    f"diversity {gd.get('diversity_score',0):.0%}"
-                )
-            lines.append(line)
+    lines.append("Search Amboss for each to find real capacity and avg channel size, then recommend top 3.")
     lines.append("")
 
     if plan.get("not_recommended"):
