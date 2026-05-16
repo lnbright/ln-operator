@@ -160,7 +160,7 @@ def estimate_fee(conf_target=2):
     try:
         # LND's fee estimate endpoint returns sat/kw (satoshis per kilo-weight)
         # 1 vByte = 4 weight units, so sat/vB = sat/kw × 4 / 1000
-        result = _get(f"/v1/fees/estimate?conf_target={conf_target}")
+        result = _get(f"/v2/wallet/estimatefee/{conf_target}")
         sat_per_kw = int(result.get("sat_per_kw", 0))
         if sat_per_kw > 0:
             sat_per_vb = max(1, round(sat_per_kw * 4 / 1000))
