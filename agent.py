@@ -50,11 +50,12 @@ You receive a shortlist of 10 candidate nodes from the Python engine. Your job:
 4. Also suggest the final budget allocation: given the deployable sats and
    minimum channel size shown in the plan below, how many channels and at what size?
 
-Output — plain prose, zero markdown, no asterisks, no dashes, no headers.
+Output — plain prose only, zero markdown, no asterisks, no bold, no dashes, no headers.
 Three lines maximum:
 Line 1: "Open [name1] (avg X sats/ch, [one reason]) and [name2] (avg X sats/ch, [one reason])."
-Line 2: "[X] sats each. [Disqualify any unsuitable candidates in one clause.]"
+Line 2: "[X] sats each from the [Y] sats deployable. [Disqualify unsuitable candidates in one clause if needed.]"
 Line 3: "Fees at X sat/vB — [good/bad] timing."
+Note: the treasury and anchor reserves are already deducted — do not mention them again.
 Max 60 words total. Use sats not BTC."""
 
 
@@ -95,7 +96,7 @@ def _run_agentic_call(system_prompt, user_message, max_tokens=2000, max_turns=5)
                 "system": system_prompt,
                 "tools": [
                     {
-                        "type": "web_search_20250305",
+                        "type": "web_search_20260209",
                         "name": "web_search",
                     }
                 ],
@@ -115,32 +116,31 @@ def _run_agentic_call(system_prompt, user_message, max_tokens=2000, max_turns=5)
         # Append assistant response to message history
         messages.append({"role": "assistant", "content": content_blocks})
 
-        # If Claude is done (no more tool calls), extract the final text
+        # If Claude is done (no more tool calls), extract the final text.
+        # Use only the LAST text block — intermediate thinking text appears in
+        # earlier blocks before tool calls; the final answer is the last one.
         if stop_reason == "end_turn":
-            text = ""
+            last_text = ""
             for block in content_blocks:
-                if block.get("type") == "text":
-                    text += block.get("text", "")
-            return text.strip() if text else None
+                if block.get("type") == "text" and block.get("text", "").strip():
+                    last_text = block.get("text", "")
+            return last_text.strip() if last_text else None
 
-        # If Claude wants to use tools, collect the tool_use blocks and send results
-        if stop_reason == "tool_use":
-            tool_results = []
+        # Web search is server-side — Anthropic handles it automatically.
+        # server_tool_use and web_search_tool_result blocks appear in the response
+        # but we don't need to send anything back. Just loop and call again
+        # with the updated message history until we get end_turn.
+        if stop_reason == "tool_use" or stop_reason == "end_turn":
+            # Log any search queries for debugging
             for block in content_blocks:
-                if block.get("type") == "tool_use":
-                    tool_id = block.get("id", "")
-                    tool_name = block.get("name", "")
-                    # Web search results are returned directly in the next turn
-                    # We send back a placeholder — the API handles the actual search
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": f"[Search results for: {block.get('input', {}).get('query', '')}]"
-                    })
-                    log.debug("agent web search: %s", block.get("input", {}).get("query", ""))
-
-            if tool_results:
-                messages.append({"role": "user", "content": tool_results})
+                if block.get("type") == "server_tool_use":
+                    q = block.get("input", {}).get("query", "")
+                    if q:
+                        log.debug("agent web search: %s", q)
+            if stop_reason == "end_turn":
+                # Already handled above — shouldn't reach here
+                break
+            # Continue the loop — next iteration will send the updated history
             continue
 
         # Unexpected stop reason
