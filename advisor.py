@@ -539,8 +539,11 @@ def _classify_existing_portfolio(channels, candidates):
         try:
             node_info = lnd_client.get_node_info(pk, include_channels=False)
             channel_count = int(node_info.get("num_channels", 0))
-        except Exception:
-            pass
+            log.debug("existing peer %s has %d channels in graph",
+                      ch.get("peer_alias", pk[:12]), channel_count)
+        except Exception as e:
+            log.warning("could not get graph info for existing peer %s: %s",
+                        ch.get("peer_alias", pk[:12]), e)
 
         if channel_count >= HUB_CHANNEL_THRESHOLD:
             hub_pubkeys.add(pk)

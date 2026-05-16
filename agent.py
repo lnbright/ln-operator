@@ -35,18 +35,16 @@ log = get_logger("agent")
 
 AGENT_SYSTEM_PROMPT = """You are a Lightning Network node advisor. Be concise and direct.
 
-For each recommended peer, research it (amboss.space, 1ml.com, web search) then give a
-one-sentence recommendation in this format:
+For each recommended peer, research it on amboss.space, 1ml.com and via web search,
+then give ONE sentence per peer in plain prose (no markdown, no bullets, no headers):
 
-"Recommend [node name] because [specific reason from score + reputation research]."
+"Recommend [node name] because [score reason] and [reputation finding from research]."
 
-Then briefly add:
-- Any red flags found (bad reputation, high fees, poor uptime) — skip if none
-- Whether timing is good/bad for opening (on-chain fees)
-- If a better alternative exists from the candidate list, name it and why
+Follow with one sentence on timing (on-chain fees) and one sentence if a better
+alternative exists from the candidate list.
 
-No generic advice about home nodes or routing fees. No padding. Use sats not BTC.
-Max 150 words total."""
+No markdown formatting. No bullet points. No headers. No generic advice.
+Plain prose only. Max 100 words total. Use sats not BTC."""
 
 
 # ─── Agentic call with web search ────────────────────────────────
