@@ -322,6 +322,7 @@ def cmd_run(args):
     if report["alerts"]:
         for a in report["alerts"]:
             print(f"  ⚠️  [{a['type']}] {a['message']}")
+            db.save_alert(a["type"], a["message"], a.get("chan_id"))
     else:
         print("  ✅ All channels healthy.")
 
