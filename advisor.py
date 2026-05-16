@@ -191,6 +191,13 @@ def _calculate_treasury(total_sats, state, num_new_channels=2, fee_rate_sat_vb=3
     close_buffer = 50_000 * max(1, state["num_channels"] // 5)
 
     reasoning_parts = []
+    reasoning_parts.append(
+        f"anchor reserve for {num_new_channels} new channel(s): {new_anchor_needed:,} sats"
+    )
+    reasoning_parts.append(
+        f"est. open fees: {onchain_open_fees:,} sats "
+        f"({num_new_channels} x {fee_rate_sat_vb} sat/vB x {channel_open_tx_vbytes} vB)"
+    )
 
     if cost_reserve > 0:
         reasoning_parts.append(
