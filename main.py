@@ -32,7 +32,9 @@ import lnd_client
 
 def cmd_invest(args):
     """Investment advisor: given X sats, produce a full plan."""
+    log = get_logger("main")
     amount = args.amount
+    log.info("invest: %s sats requested", f"{amount:,}")
     if amount < 100_000:
         print(f"Error: {amount:,} sats is too small. Minimum useful investment is ~100,000 sats.")
         sys.exit(1)
@@ -96,14 +98,18 @@ def _followup_loop(plan):
 
 def cmd_adjust_fees(args):
     """Update fee policies on all channels."""
+    log = get_logger("main")
+    log.info("adjust_fees: starting%s", " [dry-run]" if args.dry_run else "")
     print("\n⚡ LN Operator — Fee Policy Update")
     print("=" * 40)
 
     updates = engine.update_all_fees(dry_run=args.dry_run)
 
     if not updates:
+        log.info("adjust_fees: no changes needed")
         print("All fees are up to date — no changes needed.")
     else:
+        log.info("adjust_fees: %d change(s)%s", len(updates), " (dry-run)" if args.dry_run else "")
         prefix = "[DRY RUN] " if args.dry_run else ""
         for u in updates:
             direction = "↑" if u["new_ppm"] > u["old_ppm"] else "↓"
@@ -125,12 +131,15 @@ def cmd_adjust_fees(args):
 
 def cmd_rebalance_channels(args):
     """Check for and execute rebalancing."""
+    log = get_logger("main")
+    log.info("rebalance_channels: starting%s", " [dry-run]" if args.dry_run else "")
     print("\n⚡ LN Operator — Rebalance Check")
     print("=" * 40)
 
     plans, reason = engine.plan_rebalances()
 
     if not plans:
+        log.info("rebalance_channels: %s", reason)
         print(f"  {reason}")
         return []
 
@@ -168,6 +177,8 @@ def cmd_rebalance_channels(args):
 
 def cmd_sync_routing(args):
     """Sync routing events from LND into the local database."""
+    log = get_logger("main")
+    log.info("sync_routing: starting")
     print("\n⚡ LN Operator — Sync Routing History")
     print("=" * 40)
 
@@ -178,6 +189,8 @@ def cmd_sync_routing(args):
 
 def cmd_healthcheck(args):
     """Snapshot channel states, check for problems, fire alerts."""
+    log = get_logger("main")
+    log.info("healthcheck: starting")
     print("\n⚡ LN Operator — Health Check")
     print("=" * 40)
 
@@ -381,11 +394,28 @@ def _display_plan(plan):
 
     actions = plan.get("actions", [])
     if actions:
-        print(f"\n  Recommended actions:")
-        for i, a in enumerate(actions, 1):
-            print(f"    {i}. {a['type'].upper()} → {a['peer_alias']}: {a['amount_sats']:,} sats")
-            if a.get("reason"):
-                print(f"       {a['reason']}")
+        # Separate shortlisted candidates (amount=0) from actual allocations
+        shortlist = [a for a in actions if a.get("amount_sats", 0) == 0]
+        allocated = [a for a in actions if a.get("amount_sats", 0) > 0]
+
+        if allocated:
+            print(f"\n  Recommended actions:")
+            for i, a in enumerate(allocated, 1):
+                print(f"    {i}. {a['type'].upper()} → {a['peer_alias']}: {a['amount_sats']:,} sats")
+                if a.get("reason"):
+                    print(f"       {a['reason']}")
+
+        if shortlist:
+            print(f"\n  Candidates shortlisted for agent evaluation ({len(shortlist)}):")
+            for i, a in enumerate(shortlist, 1):
+                gd = a.get("graph_data") or {}
+                diversity = f" — diversity {gd['diversity_score']:.0%}" if gd.get("diversity_score") is not None else ""
+                avg_fee = f" — avg fee {gd['avg_fee_ppm']} ppm" if gd.get("avg_fee_ppm") else ""
+                print(f"    {i}. {a['peer_alias']}"
+                      f" | score {a.get('score','?')}"
+                      f" | rank {a.get('network_rank','?')}"
+                      f" | {a.get('channel_count',0)} channels"
+                      f"{avg_fee}{diversity}")
     else:
         print("\n  No actions recommended at this time.")
 
