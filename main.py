@@ -42,12 +42,18 @@ def cmd_invest(args):
     print(f"\n⚡ LN Operator — Investment Plan for {amount:,} sats")
     print("=" * 55)
 
-    # Override channel size if specified
+    # Override config values if specified
+    import config as _cfg
+    log_main = get_logger("main")
     if args.min_channel:
-        import config as _cfg
         _cfg.PREFERRED_CHANNEL_SIZE_SATS = args.min_channel
-        log_main = get_logger("main")
         log_main.info("min channel size overridden to %s sats", f"{args.min_channel:,}")
+    if args.treasury is not None:
+        if not 0.0 <= args.treasury <= 1.0:
+            print(f"Error: --treasury must be between 0.0 and 1.0 (got {args.treasury})")
+            import sys; sys.exit(1)
+        _cfg.TREASURY_MIN_RATIO = args.treasury
+        log_main.info("treasury ratio overridden to %.1f%%", args.treasury * 100)
 
     # 60% — Python engine builds the plan
     plan = advisor.build_investment_plan(amount)
@@ -462,7 +468,10 @@ def main():
         help="Amount in sats you want to deploy")
     p_invest.add_argument("--min-channel", type=int, default=None,
         metavar="SATS",
-        help=f"Minimum channel size in sats (default: PREFERRED_CHANNEL_SIZE_SATS from config)")
+        help="Minimum channel size in sats (default: PREFERRED_CHANNEL_SIZE_SATS from config)")
+    p_invest.add_argument("--treasury", type=float, default=None,
+        metavar="RATIO",
+        help="Treasury reserve ratio 0.0-1.0, e.g. 0.025 for 2.5%% (default: TREASURY_MIN_RATIO from config)")
 
     p_status = subparsers.add_parser("status",
         help="[feature]   Quick node overview with channel balance bars")
