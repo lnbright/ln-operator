@@ -27,6 +27,7 @@ from config import (
     TREASURY_MIN_RATIO, TREASURY_MONTHS_RESERVE,
     MIN_CHANNEL_SIZE_SATS, PREFERRED_CHANNEL_SIZE_SATS, MAX_CHANNEL_SIZE_SATS,
     PEER_SCORE_WEIGHTS, MEMPOOL_API, ONEML_API,
+    ANCHOR_RESERVE_PER_CHANNEL, ANCHOR_RESERVE_MAX,
 )
 import lnd_client
 import db
@@ -52,7 +53,10 @@ def build_investment_plan(total_sats):
     state = _gather_node_state()
 
     # 2. Calculate treasury reserve
-    treasury = _calculate_treasury(total_sats, state)
+    # Estimate number of new channels based on deployable budget
+    # Use preferred channel size as estimate — will be refined by agent
+    estimated_channels = min(max(1, (total_sats * (1 - TREASURY_MIN_RATIO)) // PREFERRED_CHANNEL_SIZE_SATS), 10)
+    treasury = _calculate_treasury(total_sats, state, num_new_channels=int(estimated_channels))
 
     deployable = total_sats - treasury["reserve_sats"]
 
@@ -119,6 +123,9 @@ def _gather_node_state():
     total_cap = sum(c["capacity"] for c in channels)
     total_local = sum(c["local_balance"] for c in channels)
 
+    # Current anchor reserve already locked by LND
+    current_anchor_reserve = int(onchain.get("reserved_balance_anchor_chan", 0))
+
     return {
         "info": info,
         "pubkey": info.get("identity_pubkey", ""),
@@ -133,20 +140,37 @@ def _gather_node_state():
         "overall_ratio": total_local / total_cap if total_cap > 0 else 0,
         "onchain_confirmed": int(onchain.get("confirmed_balance", 0)),
         "onchain_unconfirmed": int(onchain.get("unconfirmed_balance", 0)),
+        "current_anchor_reserve": current_anchor_reserve,
         "pending_channels": pending,
         "existing_peers": set(c["peer_pubkey"] for c in channels),
     }
 
 
-def _calculate_treasury(total_sats, state):
+def _calculate_treasury(total_sats, state, num_new_channels=2):
     """Determine how much to keep in reserve.
-    
-    Uses the higher of:
-    - TREASURY_MIN_RATIO of the investment
-    - TREASURY_MONTHS_RESERVE * average monthly rebalancing cost
+
+    Accounts for:
+    - Treasury minimum ratio (2.5% default)
+    - Historical rebalancing costs (3 months average)
+    - Anchor reserve for new channels being opened (10,000 sats each, capped at 100,000)
+    - On-chain fees for opening channels (~750 sats per channel at low fees)
+
+    num_new_channels: how many new channels we plan to open (affects anchor reserve calc)
     """
     # Minimum percentage-based reserve
     min_reserve = int(total_sats * TREASURY_MIN_RATIO)
+
+    # Anchor reserve for new channels
+    # LND already has existing_anchor_reserve locked in wallet.
+    # Each new anchor channel adds 10,000 sats to the reserve, up to the 100,000 cap.
+    existing_reserve = state.get("current_anchor_reserve", 0)
+    new_anchor_needed = min(
+        num_new_channels * ANCHOR_RESERVE_PER_CHANNEL,
+        max(0, ANCHOR_RESERVE_MAX - existing_reserve)
+    )
+
+    # On-chain opening fees (~750 sats per channel at low fees)
+    onchain_open_fees = num_new_channels * 750
 
     # Cost-based reserve from historical data
     avg_monthly_cost = db.get_avg_monthly_rebalance_cost(months=3)
@@ -165,7 +189,14 @@ def _calculate_treasury(total_sats, state):
     else:
         reasoning_parts.append("no rebalancing history yet — using minimum ratio")
 
+    # Total reserve = max of minimum ratio OR historical costs,
+    # PLUS anchor reserve for new channels PLUS estimated on-chain fees
     total_reserve = max(min_reserve, cost_reserve + close_buffer)
+    total_reserve += new_anchor_needed + onchain_open_fees
+    reasoning_parts.append(
+        f"anchor reserve for {num_new_channels} new channel(s): {new_anchor_needed:,} sats"
+    )
+    reasoning_parts.append(f"est. on-chain open fees: {onchain_open_fees:,} sats")
 
     # Don't reserve more than 30% of the total — that defeats the purpose
     max_reserve = int(total_sats * 0.30)

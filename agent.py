@@ -50,13 +50,12 @@ You receive a shortlist of 10 candidate nodes from the Python engine. Your job:
 4. Also suggest the final budget allocation: given the deployable sats and
    minimum channel size shown in the plan below, how many channels and at what size?
 
-Output — plain prose only. Zero markdown. No asterisks, no dashes, no headers.
-Start directly with: "Recommend opening channels to [name1], [name2], [name3]."
-Then one sentence per node: "[Name]: avg channel size X sats (source), [reason]."
-Then one sentence on allocation respecting the minimum channel size shown in the plan.
-Then one sentence on fee environment.
-If a candidate is disqualified (e.g. does not accept external channels), say so in one sentence.
-Max 200 words. Use sats not BTC."""
+Output — plain prose, zero markdown, no asterisks, no dashes, no headers.
+Three lines maximum:
+Line 1: "Open [name1] (avg X sats/ch, [one reason]) and [name2] (avg X sats/ch, [one reason])."
+Line 2: "[X] sats each. [Disqualify any unsuitable candidates in one clause.]"
+Line 3: "Fees at X sat/vB — [good/bad] timing."
+Max 60 words total. Use sats not BTC."""
 
 
 # ─── Agentic call with web search ────────────────────────────────
@@ -218,6 +217,7 @@ def _build_compact_prompt(plan):
     lines = []
     lines.append(f"Investment: {plan['total_sats']:,} sats")
     lines.append(f"Min channel size: {_config.MIN_CHANNEL_SIZE_SATS:,} sats | Preferred: {_config.PREFERRED_CHANNEL_SIZE_SATS:,} sats")
+    lines.append(f"Anchor reserve: {_config.ANCHOR_RESERVE_PER_CHANNEL:,} sats per new anchor channel (max {_config.ANCHOR_RESERVE_MAX:,} sats total) — already deducted from treasury")
     lines.append(f"Treasury: {plan['treasury_reserve']:,} sats ({plan['treasury_pct']:.0%})")
     lines.append(f"Deployable: {plan['deployable_sats']:,} sats")
     lines.append("")

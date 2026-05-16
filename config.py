@@ -52,7 +52,7 @@ REBALANCE_BALANCED_RATIO_HIGH = 0.70  # ... and below this
 
 # ─── Investment advisor settings ─────────────────────────────────
 # Treasury reserve
-TREASURY_MIN_RATIO = 0.10        # always keep at least 10% of investment as reserve
+TREASURY_MIN_RATIO = 0.025       # always keep at least 2.5% of investment as reserve
 TREASURY_MONTHS_RESERVE = 3      # or 3 months of avg rebalancing costs, whichever is higher
 
 # Channel sizing
