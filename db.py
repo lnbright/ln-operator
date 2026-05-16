@@ -439,6 +439,29 @@ def get_channel_earned_ppm(chan_id, days=30):
     return row["total_fees"] / row["total_routed"] * 1_000_000
 
 
+def get_repeated_rebalance_failures(chan_id, min_failures=3):
+    """Check if a channel has failed to rebalance N+ times in a row.
+
+    Returns the count of consecutive failures if >= min_failures, else 0.
+    Looks at the most recent N rebalance attempts for this channel
+    and checks if they are all failures.
+    """
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT success FROM rebalance_log
+            WHERE (source_chan_id = ? OR target_chan_id = ?)
+            ORDER BY ts DESC LIMIT ?
+        """, (chan_id, chan_id, min_failures)).fetchall()
+
+    if len(rows) < min_failures:
+        return 0  # not enough history yet
+
+    # Check if all recent attempts failed
+    if all(not row["success"] for row in rows):
+        return len(rows)
+    return 0
+
+
 def get_sync_state(key, default=None):
     """Get a value from sync_state table."""
     with get_conn() as conn:

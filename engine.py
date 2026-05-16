@@ -520,6 +520,25 @@ def get_channel_health_report(channels=None):
                 "message": f"{ch['peer_alias']} saturated at {ch['local_ratio']:.0%} local",
             })
 
+        # Check for repeated rebalance failures regardless of health status
+        try:
+            failure_count = db.get_repeated_rebalance_failures(ch["chan_id"], min_failures=3)
+            if failure_count >= 3:
+                report["alerts"].append({
+                    "type": "rebalance_failing",
+                    "chan_id": ch["chan_id"],
+                    "alias": ch["peer_alias"],
+                    "message": (
+                        f"{ch['peer_alias']} has failed to rebalance {failure_count} times in a row "
+                        f"— check route availability or raise fee budget"
+                    ),
+                })
+                ch_report["rebalance_failing"] = True
+                log.warning("repeated rebalance failures for %s: %d consecutive failures",
+                            ch["peer_alias"], failure_count)
+        except Exception:
+            pass
+
         report["channels"].append(ch_report)
 
     # Save snapshot to database

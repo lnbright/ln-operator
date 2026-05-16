@@ -698,6 +698,7 @@ TEMPLATE = """
               {% if 'offline' in a.alert_type %}<span class="badge badge-red">offline</span>
               {% elif 'depleted' in a.alert_type %}<span class="badge badge-yellow">depleted</span>
               {% elif 'saturated' in a.alert_type %}<span class="badge badge-blue">saturated</span>
+              {% elif 'rebalance_failing' in a.alert_type %}<span class="badge badge-red">rebal failing</span>
               {% else %}<span class="badge badge-muted">{{ a.alert_type }}</span>{% endif %}
             </td>
             <td style="color:var(--muted);">{{ a.message }}</td>
