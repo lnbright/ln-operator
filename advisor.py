@@ -510,30 +510,111 @@ def _score_candidates(candidates, state):
     return candidates
 
 
+# Hub classification threshold — nodes in the top N by channel count are "hubs"
+HUB_CHANNEL_THRESHOLD = 100   # nodes with 100+ channels are considered hubs
+
+
+def _classify_existing_portfolio(channels, candidates):
+    """Classify existing channels as hub or mid-tier connections.
+
+    A hub is a node with 100+ channels (well-connected, high-traffic corridor).
+    Mid-tier nodes have fewer channels but may offer good diversity.
+
+    Returns a dict with hub_count, mid_tier_count, and the hub pubkeys.
+    """
+    hub_pubkeys = set()
+    mid_tier_pubkeys = set()
+
+    # Build a lookup of candidate channel counts by pubkey
+    candidate_channel_counts = {c["pubkey"]: c["channel_count"] for c in candidates}
+
+    for ch in channels:
+        pk = ch.get("peer_pubkey", ch.get("remote_pubkey", ""))
+        channel_count = candidate_channel_counts.get(pk, 0)
+        if channel_count >= HUB_CHANNEL_THRESHOLD:
+            hub_pubkeys.add(pk)
+        else:
+            mid_tier_pubkeys.add(pk)
+
+    return {
+        "hub_count": len(hub_pubkeys),
+        "mid_tier_count": len(mid_tier_pubkeys),
+        "hub_pubkeys": hub_pubkeys,
+    }
+
+
+def _split_candidates_by_tier(candidates):
+    """Split candidates into hub (top 50 by channels) and mid-tier (50-200).
+
+    Returns (hubs, mid_tier) lists, each sorted by score descending.
+    Candidates are sorted by channel count descending so rank is stable.
+    """
+    sorted_by_channels = sorted(
+        candidates, key=lambda c: c.get("channel_count", 0), reverse=True
+    )
+    hub_pubkeys = {c["pubkey"] for c in sorted_by_channels[:50]}
+
+    hubs = [c for c in candidates if c["pubkey"] in hub_pubkeys]
+    mid_tier = [c for c in candidates if c["pubkey"] not in hub_pubkeys]
+
+    # Within each tier, sort by score
+    hubs.sort(key=lambda c: c["score"], reverse=True)
+    mid_tier.sort(key=lambda c: c["score"], reverse=True)
+
+    return hubs, mid_tier
+
+
+def _make_open_action(candidate, size, reason, priority=2):
+    """Build a channel open action dict."""
+    gd = candidate.get("graph_data") or {}
+    return {
+        "type": "open",
+        "peer_alias": candidate["alias"],
+        "peer_pubkey": candidate["pubkey"],
+        "amount_sats": size,
+        "score": candidate["score"],
+        "channel_count": candidate.get("channel_count", 0),
+        "capacity": candidate.get("capacity", 0),
+        "graph_data": gd,
+        "reason": reason,
+        "priority": priority,
+    }
+
+
 def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
     """Decide how to spend the deployable sats.
-    
-    Priority order:
-    1. Upsize undersized existing channels (if they're performing)
-    2. Open new channels to top-scored candidates
-    3. Note anything not recommended
+
+    Portfolio-aware allocation:
+    1. Upsize undersized existing channels first
+    2. Classify existing portfolio — how many hubs vs mid-tier nodes?
+    3. If no hubs yet → recommend one hub to establish routing backbone
+    4. If 1-2 hubs already → recommend mid-tier nodes (top 50-200) for diversity
+    5. If well diversified → use overall score ranking
     """
     actions = []
     not_recommended = []
     remaining = deployable
 
-    # ── Priority 1: Upsize undersized channels ───────────────────
+    # ── Step 1: Classify existing portfolio ──────────────────────
+    all_channels = state.get("channels", [])
+    portfolio = _classify_existing_portfolio(all_channels, candidates)
+    hub_count = portfolio["hub_count"]
+    hubs, mid_tier = _split_candidates_by_tier(candidates)
+
+    log.info("portfolio: %d hub connection(s), %d mid-tier connection(s)",
+             hub_count, portfolio["mid_tier_count"])
+    log.info("candidates: %d hub(s), %d mid-tier available",
+             len(hubs), len(mid_tier))
+
+    # ── Step 2: Upsize undersized channels ────────────────────────
     for ch in channel_analysis["undersized"]:
         if remaining < PREFERRED_CHANNEL_SIZE_SATS:
             break
-
         current_cap = ch["capacity"]
         upsize_to = PREFERRED_CHANNEL_SIZE_SATS
         additional = upsize_to - current_cap
-
         if additional > remaining:
             continue
-
         actions.append({
             "type": "upsize",
             "peer_alias": ch["peer_alias"],
@@ -541,73 +622,96 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
             "current_capacity": current_cap,
             "amount_sats": additional,
             "new_total": upsize_to,
-            "reason": f"Current size {current_cap:,} is below minimum. "
+            "reason": f"Current size {current_cap:,} sats is below minimum. "
                       f"Upsizing to {upsize_to:,} for better routing.",
             "priority": 1,
         })
         remaining -= additional
 
-    # ── Priority 2: Open new channels ────────────────────────────
-    # Determine optimal channel size given remaining budget
-    if remaining >= PREFERRED_CHANNEL_SIZE_SATS:
-        # How many channels can we afford at preferred size?
-        max_new_channels = remaining // PREFERRED_CHANNEL_SIZE_SATS
-        # Don't open too many at once — 2-3 is reasonable
-        num_to_open = min(max_new_channels, 3, len(candidates))
+    if remaining < MIN_CHANNEL_SIZE_SATS:
+        # Budget exhausted on upsizing
+        pass
 
-        if num_to_open > 0:
-            channel_size = min(
-                remaining // num_to_open,
-                MAX_CHANNEL_SIZE_SATS,
+    elif remaining >= PREFERRED_CHANNEL_SIZE_SATS:
+        # ── Step 3: Decide which tier to target ──────────────────
+        max_new = min(remaining // PREFERRED_CHANNEL_SIZE_SATS, 3)
+
+        if hub_count == 0:
+            # No hubs yet — need at least one routing backbone connection
+            pool = hubs if hubs else candidates
+            strategy = "no hub connections yet — opening one large hub first"
+            log.info("allocation strategy: %s", strategy)
+            not_recommended.append(
+                f"Strategy: {strategy}. "
+                f"Once you have 1-2 hubs, future opens will target mid-tier nodes."
             )
+        elif hub_count >= 2:
+            # Well connected to hubs — diversify into mid-tier
+            pool = mid_tier if mid_tier else candidates
+            strategy = f"already have {hub_count} hub connections — targeting mid-tier nodes (rank 50-200) for diversity"
+            log.info("allocation strategy: %s", strategy)
+            not_recommended.append(
+                f"Strategy: {strategy}. "
+                f"Mid-tier nodes offer better diversity and less fee competition."
+            )
+        else:
+            # 1 hub — one more hub OR start mid-tier depending on budget
+            if remaining >= PREFERRED_CHANNEL_SIZE_SATS * 2 and mid_tier:
+                # Enough for both — split: one hub, one mid-tier
+                pool = [hubs[0]] + [mid_tier[0]] if hubs and mid_tier else candidates
+                max_new = min(2, max_new)
+                strategy = "1 hub already — adding one more hub + one mid-tier node"
+            else:
+                pool = mid_tier if mid_tier else candidates
+                strategy = "1 hub already — moving to mid-tier nodes for diversification"
+            log.info("allocation strategy: %s", strategy)
+
+        # ── Step 4: Allocate to chosen pool ──────────────────────
+        num_to_open = min(max_new, len(pool))
+        if num_to_open > 0:
+            channel_size = min(remaining // num_to_open, MAX_CHANNEL_SIZE_SATS)
             channel_size = max(channel_size, PREFERRED_CHANNEL_SIZE_SATS)
 
             for i in range(num_to_open):
-                if remaining < PREFERRED_CHANNEL_SIZE_SATS:
+                if remaining < PREFERRED_CHANNEL_SIZE_SATS or i >= len(pool):
                     break
-                if i >= len(candidates):
-                    break
-
-                candidate = candidates[i]
+                candidate = pool[i]
                 size = min(channel_size, remaining)
+                gd = candidate.get("graph_data") or {}
 
-                actions.append({
-                    "type": "open",
-                    "peer_alias": candidate["alias"],
-                    "peer_pubkey": candidate["pubkey"],
-                    "amount_sats": size,
-                    "score": candidate["score"],
-                    "reason": (
-                        f"Score {candidate['score']:.2f} — "
-                        f"{candidate['channel_count']} channels, "
-                        f"{candidate['capacity']:,} sats capacity. "
-                        f"Source: {candidate['source']}"
-                    ),
-                    "priority": 2,
-                })
-                remaining += 0  # track it but don't subtract yet (this is a plan)
+                reason_parts = [
+                    f"Score {candidate['score']:.2f}",
+                    f"{candidate['channel_count']} channels",
+                    f"{candidate['capacity']:,} sats capacity",
+                ]
+                if gd.get("avg_fee_ppm"):
+                    reason_parts.append(f"avg fee {gd['avg_fee_ppm']} ppm")
+                if gd.get("diversity_score") is not None:
+                    reason_parts.append(f"diversity {gd['diversity_score']:.0%}")
+                reason_parts.append(f"source: {candidate['source']}")
+
+                actions.append(_make_open_action(
+                    candidate, size, " — ".join(reason_parts), priority=2
+                ))
                 remaining -= size
 
     elif remaining >= MIN_CHANNEL_SIZE_SATS:
-        # Can afford one small channel
-        if candidates:
-            actions.append({
-                "type": "open",
-                "peer_alias": candidates[0]["alias"],
-                "peer_pubkey": candidates[0]["pubkey"],
-                "amount_sats": remaining,
-                "score": candidates[0]["score"],
-                "reason": (
-                    f"Budget only allows one channel at {remaining:,} sats. "
-                    f"Consider saving more for a {PREFERRED_CHANNEL_SIZE_SATS:,} channel."
-                ),
-                "priority": 2,
-            })
+        # Only enough for one small channel
+        best = (mid_tier[0] if hub_count >= 1 and mid_tier else
+                hubs[0] if hubs else
+                candidates[0] if candidates else None)
+        if best:
+            actions.append(_make_open_action(
+                best, remaining,
+                f"Budget only allows one channel at {remaining:,} sats. "
+                f"Consider saving more for a {PREFERRED_CHANNEL_SIZE_SATS:,} sat channel.",
+                priority=2,
+            ))
             remaining = 0
     else:
         not_recommended.append(
             f"Remaining {remaining:,} sats too small for a new channel "
-            f"(minimum {MIN_CHANNEL_SIZE_SATS:,}). Added to treasury."
+            f"(minimum {MIN_CHANNEL_SIZE_SATS:,} sats). Added to treasury."
         )
 
     # ── Close recommendations ────────────────────────────────────

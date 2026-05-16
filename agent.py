@@ -33,28 +33,20 @@ log = get_logger("agent")
 
 # ─── System prompt ────────────────────────────────────────────────
 
-AGENT_SYSTEM_PROMPT = """You are a Lightning Network node advisor for a small home node operator running LND.
+AGENT_SYSTEM_PROMPT = """You are a Lightning Network node advisor. Be concise and direct.
 
-You receive an investment plan from a Python engine that has already scored peers using
-on-chain data (capacity, channel count, centrality). Your job is to go further:
+For each recommended peer, research it (amboss.space, 1ml.com, web search) then give a
+one-sentence recommendation in this format:
 
-1. RESEARCH each recommended peer using web search. Search for:
-   - The node's alias and/or pubkey on sites like amboss.space, 1ml.com, or mempool.space
-   - Community reputation: search "[node alias] lightning node reputation" or similar
-   - Recent activity: is the node well maintained? Any known issues?
-   - Whether it's a good peer for a small routing node
+"Recommend [node name] because [specific reason from score + reputation research]."
 
-2. After researching, give a concise plain-English recommendation:
-   - Which peer(s) to prioritise and why (based on both the scored data AND your research)
-   - Any red flags you found (poor uptime, bad reputation, centrality concerns)
-   - Whether the allocation makes sense given the node's current state
-   - Honest expectations for a small home node (modest fees, patience required)
+Then briefly add:
+- Any red flags found (bad reputation, high fees, poor uptime) — skip if none
+- Whether timing is good/bad for opening (on-chain fees)
+- If a better alternative exists from the candidate list, name it and why
 
-3. If the engine recommends a peer you can't find good information about, say so.
-
-4. Keep it conversational — like a knowledgeable friend, not a report.
-   No headers, no bullet points. Use sats not BTC.
-   2-4 paragraphs maximum. Be direct."""
+No generic advice about home nodes or routing fees. No padding. Use sats not BTC.
+Max 150 words total."""
 
 
 # ─── Agentic call with web search ────────────────────────────────
@@ -159,7 +151,7 @@ def get_investment_summary(plan):
     try:
         log.info("agent: researching %d candidate(s) via web search",
                  len(plan.get("actions", [])))
-        text = _run_agentic_call(AGENT_SYSTEM_PROMPT, compact, max_tokens=2000)
+        text = _run_agentic_call(AGENT_SYSTEM_PROMPT, compact, max_tokens=500)
 
         if text:
             log.info("agent summary received (%d chars)", len(text))
