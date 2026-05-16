@@ -520,21 +520,36 @@ def _classify_existing_portfolio(channels, candidates):
     A hub is a node with 100+ channels (well-connected, high-traffic corridor).
     Mid-tier nodes have fewer channels but may offer good diversity.
 
+    Existing peers are excluded from candidates so we can't use the candidates
+    list to look up their channel counts. Instead we call LND directly for each
+    existing peer to get their channel count from the graph.
+
     Returns a dict with hub_count, mid_tier_count, and the hub pubkeys.
     """
     hub_pubkeys = set()
     mid_tier_pubkeys = set()
 
-    # Build a lookup of candidate channel counts by pubkey
-    candidate_channel_counts = {c["pubkey"]: c["channel_count"] for c in candidates}
-
     for ch in channels:
         pk = ch.get("peer_pubkey", ch.get("remote_pubkey", ""))
-        channel_count = candidate_channel_counts.get(pk, 0)
+        if not pk:
+            continue
+
+        # Look up channel count from LND graph for this existing peer
+        channel_count = 0
+        try:
+            node_info = lnd_client.get_node_info(pk, include_channels=False)
+            channel_count = int(node_info.get("num_channels", 0))
+        except Exception:
+            pass
+
         if channel_count >= HUB_CHANNEL_THRESHOLD:
             hub_pubkeys.add(pk)
+            log.debug("existing peer %s classified as hub (%d channels)",
+                      ch.get("peer_alias", pk[:12]), channel_count)
         else:
             mid_tier_pubkeys.add(pk)
+            log.debug("existing peer %s classified as mid-tier (%d channels)",
+                      ch.get("peer_alias", pk[:12]), channel_count)
 
     return {
         "hub_count": len(hub_pubkeys),
