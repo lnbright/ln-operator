@@ -50,6 +50,13 @@ REBALANCE_DISCOVERY_DAYS = 30         # how many days of balanced time before ju
 REBALANCE_BALANCED_RATIO = 0.30       # channel counts as "balanced" when local ratio is above this
 REBALANCE_BALANCED_RATIO_HIGH = 0.70  # ... and below this
 
+# ─── Anchor reserve settings ─────────────────────────────────────
+# LND reserves 10,000 sats per anchor channel for emergency force-close fee bumping.
+# Capped at 100,000 sats regardless of channel count (LND's built-in cap).
+# This is deducted from deployable sats when calculating investment allocation.
+ANCHOR_RESERVE_PER_CHANNEL = 10_000  # sats reserved per new anchor channel
+ANCHOR_RESERVE_MAX = 100_000         # LND's hard cap on total anchor reserve
+
 # ─── Investment advisor settings ─────────────────────────────────
 # Treasury reserve
 TREASURY_MIN_RATIO = 0.025       # always keep at least 2.5% of investment as reserve
