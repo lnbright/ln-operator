@@ -99,25 +99,34 @@ def cmd_plan(args):
         else:
             break  # adding more channels makes each one too small — stop here
 
+    def _print_breakdown(num_ch, treasury, new_anchor, open_fees, deployable, fee_rate):
+        """Print the full cost breakdown."""
+        print(f"\n  {'─'*45}")
+        print(f"  Wallet balance:           {total_balance:>12,} sats")
+        print(f"  Existing anchor reserve:  {anchor_reserved:>12,} sats  (already locked by LND)")
+        print(f"  {'─'*45}")
+        print(f"  Available:                {total_balance - anchor_reserved:>12,} sats")
+        print()
+        print(f"  Treasury ({treasury_ratio:.1%}):          {treasury:>12,} sats  ({total_balance:,} × {treasury_ratio:.1%})")
+        print(f"  New anchor reserve:       {new_anchor:>12,} sats  ({num_ch} × {_cfg.ANCHOR_RESERVE_PER_CHANNEL:,} per channel)")
+        print(f"  Channel open fees:        {open_fees:>12,} sats  ({num_ch} × {fee_rate} sat/vB × 250 vB)")
+        print(f"  {'─'*45}")
+        print(f"  Deployable:               {deployable:>12,} sats")
+
     if best_num == 0:
-        # Can't even afford one minimum-size channel
+        # Can't even afford one minimum-size channel — show full breakdown anyway
         treasury  = int(total_balance * treasury_ratio)
         new_anchor = min(_cfg.ANCHOR_RESERVE_PER_CHANNEL,
                          max(0, _cfg.ANCHOR_RESERVE_MAX - anchor_reserved))
         open_fees  = fee_rate * 250
         deployable = total_balance - anchor_reserved - new_anchor - open_fees - treasury
+        _print_breakdown(1, treasury, new_anchor, open_fees, deployable, fee_rate)
         print(f"\n  ⚠️  Insufficient balance for even one {min_channel:,} sat channel.")
-        print(f"  Deployable after costs: {deployable:,} sats")
         print(f"  Need at least {min_channel + treasury + new_anchor + open_fees + anchor_reserved:,} sats in wallet.")
         return
 
     bd = best_breakdown
-    print(f"\n  {'─'*40}")
-    print(f"  Treasury ({treasury_ratio:.1%}):           {bd['treasury']:>12,} sats")
-    print(f"  New anchor reserve:       {bd['new_anchor']:>12,} sats  ({best_num} × {_cfg.ANCHOR_RESERVE_PER_CHANNEL:,})")
-    print(f"  Channel open fees:        {bd['open_fees']:>12,} sats  ({best_num} × {fee_rate} sat/vB × 250 vB)")
-    print(f"  {'─'*40}")
-    print(f"  Deployable:               {bd['deployable']:>12,} sats")
+    _print_breakdown(best_num, bd["treasury"], bd["new_anchor"], bd["open_fees"], bd["deployable"], fee_rate)
     print(f"\n  → {best_num} channel(s) at {best_channel_size:,} sats each")
 
     log.info("plan: %d channel(s) at %s sats each (deployable %s)",
