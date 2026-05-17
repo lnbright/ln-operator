@@ -121,14 +121,15 @@ def cmd_plan(args):
         _print_breakdown(1, treasury, new_anchor, open_fees, deployable, fee_rate)
         print(f"\n  ⚠️  Insufficient balance for even one {min_channel:,} sat channel.")
         print(f"  Need at least {min_channel + treasury + new_anchor + open_fees + anchor_reserved:,} sats in wallet.")
-        return
+        # Don't return — still show candidates for future planning
 
-    bd = best_breakdown
-    _print_breakdown(best_num, bd["treasury"], bd["new_anchor"], bd["open_fees"], bd["deployable"], fee_rate)
-    print(f"\n  → {best_num} channel(s) at {best_channel_size:,} sats each")
+    if best_num > 0:
+        bd = best_breakdown
+        _print_breakdown(best_num, bd["treasury"], bd["new_anchor"], bd["open_fees"], bd["deployable"], fee_rate)
+        print(f"\n  → {best_num} channel(s) at {best_channel_size:,} sats each")
 
-    log.info("plan: %d channel(s) at %s sats each (deployable %s)",
-             best_num, f"{best_channel_size:,}", f"{bd['deployable']:,}")
+        log.info("plan: %d channel(s) at %s sats each (deployable %s)",
+                 best_num, f"{best_channel_size:,}", f"{bd['deployable']:,}")
 
     # ── Step 4: Score and show top 10 candidates (portfolio-aware) ─
     print(f"\n  {'─'*40}")
