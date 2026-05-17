@@ -231,8 +231,31 @@ def cmd_rebalance_channels(args):
 
     if args.dry_run:
         # Show full plan breakdown without executing
+
+        # ── Channel status overview ───────────────────────────────────
+        # Show ALL channels with their rebalance status so the operator
+        # understands why certain channels are ignored
+        channels_all = engine.lnd_client.get_channels()
+        channels_all = engine.lnd_client.resolve_aliases(channels_all)
+        print(f"\n  Channel status:")
+        for ch in channels_all:
+            ratio = ch["local_ratio"]
+            alias = ch["peer_alias"]
+            if not ch["active"]:
+                status = "⚫ offline"
+            elif ratio < engine.REBALANCE_LOW_THRESHOLD:
+                status = f"🔴 depleted ({ratio:.0%} local) — rebalance target"
+            elif ratio > engine.REBALANCE_HIGH_THRESHOLD:
+                status = f"🔵 overfull ({ratio:.0%} local) — rebalance source"
+            else:
+                status = f"🟢 healthy ({ratio:.0%} local) — not rebalanced"
+                if force is not None and ratio < force:
+                    status = f"🟡 below target ({ratio:.0%} local) — force target"
+                elif force is not None and ratio > force:
+                    status = f"🟡 above target ({ratio:.0%} local) — force source"
+            print(f"    {alias}: {status}")
+
         # Explain why fallbacks do or don't exist
-        depleted  = [p for p in primaries]
         all_targets  = {p["target_chan_id"]: p["target_alias"] for p in primaries}
         all_sources  = {p["source_chan_id"]: p["source_alias"] for p in primaries}
 
@@ -242,7 +265,16 @@ def cmd_rebalance_channels(args):
 
         if len(all_targets) == 1 and len(all_sources) == 1:
             print(f"\n  Only one possible pair — no fallback available.")
-            print(f"  If this fails, nothing else can be tried this run.")
+            print(f"  A fallback would require either:")
+            print(f"    • A second overfull channel (to try a different source)")
+            print(f"    • A second depleted channel (to try a different target)")
+            print(f"  If this pair fails, nothing else can be tried this run.")
+        elif len(all_targets) == 1 and len(all_sources) > 1:
+            print(f"\n  One depleted channel, {len(all_sources)} overfull sources.")
+            print(f"  {len(fallbacks)} fallback(s) available — will try different source if primary fails.")
+        elif len(all_targets) > 1 and len(all_sources) == 1:
+            print(f"\n  {len(all_targets)} depleted channels, one overfull source.")
+            print(f"  {len(fallbacks)} fallback(s) available — will try different target if primary fails.")
         elif fallbacks:
             print(f"\n  {len(fallbacks)} fallback pair(s) available if primary fails.")
         print()
