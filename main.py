@@ -632,7 +632,7 @@ def cmd_status(args):
         channel_fees = {}
         for ch in channels:
             try:
-                edge = lnd_client._get(f"/v1/graph/edge/{ch['scid']}")
+                edge = lnd_client.get_channel_edge(ch['chan_id'])
                 if edge:
                     if edge.get("node1_pub") == my_pk:
                         my_pol   = edge.get("node1_policy", {})
