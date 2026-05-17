@@ -212,9 +212,12 @@ def cmd_rebalance_channels(args):
     print("\n⚡ LN Operator — Rebalance Check")
     print("=" * 40)
 
-    force = getattr(args, "force", False)
-    if force:
-        log.info("rebalance_channels: force mode — ignoring thresholds, targeting 50%% on all channels")
+    force = getattr(args, "force", None)
+    if force is not None:
+        if not 0.0 < force < 1.0:
+            print(f"Error: --force target must be between 0.0 and 1.0 (got {force})")
+            sys.exit(1)
+        log.info("rebalance_channels: force mode — ignoring thresholds, targeting %.0f%% on all channels", force * 100)
     plans, reason = engine.plan_rebalances(force=force)
 
     if not plans:
@@ -562,8 +565,9 @@ def main():
         help="[debug]     Move sats from overfull to depleted channels")
     p_rebal.add_argument("--dry-run", action="store_true",
         help="Show plan without executing payments")
-    p_rebal.add_argument("--force", action="store_true",
-        help="Ignore 20/80 thresholds — target 50%% on all channels regardless of current ratio")
+    p_rebal.add_argument("--force", type=float, nargs="?", const=0.5, default=None,
+        metavar="RATIO",
+        help="Ignore thresholds — target RATIO on all channels (default: 0.5 if flag set without value)")
 
     p_sync = subparsers.add_parser("sync_routing",
         help="[debug]     Sync routing events from LND into the local database")

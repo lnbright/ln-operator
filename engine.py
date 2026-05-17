@@ -179,14 +179,15 @@ def get_channel_rebalance_budget(chan_id):
         }
 
 
-def find_rebalance_candidates(channels=None, force=False):
+def find_rebalance_candidates(channels=None, force=None):
     """Identify channels that need rebalancing.
 
     Returns two lists:
     - needs_inbound: channels with local_ratio < LOW threshold (depleted, need sats back)
     - needs_outbound: channels with local_ratio > HIGH threshold (overfull, can donate sats)
 
-    force=True: ignore thresholds — any channel below 50% is inbound, above 50% is outbound.
+    force: if set to a float (0.0-1.0), ignore thresholds and use that value as the target.
+           Any channel below force% is inbound, above force% is outbound.
     """
     if channels is None:
         channels = lnd_client.get_channels()
@@ -198,11 +199,11 @@ def find_rebalance_candidates(channels=None, force=False):
     for ch in channels:
         if not ch["active"]:
             continue
-        if force:
-            # Ignore thresholds — target 50% on everything
-            if ch["local_ratio"] < REBALANCE_TARGET:
+        if force is not None:
+            # Ignore thresholds — use the specified target ratio
+            if ch["local_ratio"] < force:
                 needs_inbound.append(ch)
-            elif ch["local_ratio"] > REBALANCE_TARGET:
+            elif ch["local_ratio"] > force:
                 needs_outbound.append(ch)
         else:
             if ch["local_ratio"] < REBALANCE_LOW_THRESHOLD:
@@ -216,15 +217,16 @@ def find_rebalance_candidates(channels=None, force=False):
     return needs_inbound, needs_outbound
 
 
-def calculate_rebalance_amount(channel, direction="inbound"):
+def calculate_rebalance_amount(channel, direction="inbound", target_ratio=None):
     """Calculate how many sats to move for a channel.
 
     direction='inbound':  channel is depleted, we want to push sats to local side
     direction='outbound': channel is overfull, we want to push sats to remote side
+    target_ratio: override the default REBALANCE_TARGET (e.g. from --force 0.4)
     """
     capacity = channel["capacity"]
     local = channel["local_balance"]
-    target_local = int(capacity * REBALANCE_TARGET)
+    target_local = int(capacity * (target_ratio if target_ratio is not None else REBALANCE_TARGET))
     max_amount = int(capacity * REBALANCE_MAX_AMOUNT_RATIO)
 
     if direction == "inbound":
@@ -242,12 +244,18 @@ def calculate_rebalance_amount(channel, direction="inbound"):
     return amount
 
 
-def plan_rebalances(channels=None, force=False):
-    """Create a rebalancing plan: which channels to rebalance and how.
+def plan_rebalances(channels=None, force=None):
+    """Create a rebalancing plan with primary and fallback pairs.
 
-    Pairs depleted channels with overfull ones for circular rebalancing.
-    Uses per-channel budget based on historical performance.
-    force=True: ignores 20/80 thresholds, targets 50% on all channels.
+    Generates ALL possible source→target pairs, ordered by priority.
+    Primary plans: most depleted target paired with most overfull source.
+    Fallback plans: alternative pairings for each target, tried if the
+    primary pair fails at execution time (e.g. no route between those nodes).
+
+    This means if Kraken→LNBiG fails due to no route, the executor will
+    automatically try Kraken→ACINQ before giving up on the run.
+
+    force: if set to a float (0.0-1.0), ignore thresholds and use that ratio as target.
     Returns a (plans, reason) tuple.
     """
     if channels is None:
@@ -255,6 +263,9 @@ def plan_rebalances(channels=None, force=False):
         channels = lnd_client.resolve_aliases(channels)
 
     needs_inbound, needs_outbound = find_rebalance_candidates(channels, force=force)
+
+    # Use force target ratio if specified, otherwise use config default
+    rebalance_target = force if force is not None else REBALANCE_TARGET
 
     log.info("rebalance: %d depleted, %d overfull channel(s) found",
              len(needs_inbound), len(needs_outbound))
@@ -273,69 +284,159 @@ def plan_rebalances(channels=None, force=False):
         return [], (f"{len(needs_inbound)} channel(s) depleted ({depleted}) but no overfull "
                     f"channel to rebalance from — need more channels or top up on-chain")
 
+    # Generate ALL possible source→target pairs, ordered by priority:
+    # most depleted targets first, each paired with all available sources.
+    # The executor tries pairs in order — if one fails, the next pair is tried.
+    # This ensures that if Kraken→LNBiG fails, Kraken→ACINQ is tried next.
     plans = []
-    outbound_idx = 0
+    used_source_sats = {}  # track how much each source has committed
 
     for target_ch in needs_inbound:
-        if outbound_idx >= len(needs_outbound):
-            break
-
-        target_amount = calculate_rebalance_amount(target_ch, "inbound")
+        target_amount = calculate_rebalance_amount(target_ch, "inbound", target_ratio=rebalance_target)
         if target_amount <= 0:
             continue
 
-        source_ch = needs_outbound[outbound_idx]
-        source_available = calculate_rebalance_amount(source_ch, "outbound")
-
-        if source_available <= 0:
-            outbound_idx += 1
-            continue
-
-        # Use the smaller of what target needs and source can give
-        amount = min(target_amount, source_available)
-
-        # Per-channel budget for the TARGET (the depleted channel we're restoring)
         budget = get_channel_rebalance_budget(target_ch["chan_id"])
         max_fee_ppm = budget["max_fee_ppm"]
-        # Add 10% headroom to avoid off-by-one failures where the route
-        # costs exactly the ppm limit — rounding can cause rejection.
-        max_fee = int(amount * max_fee_ppm / 1_000_000 * 1.1)
 
-        log.info("rebalance plan: %s→%s %s sats [%s, %d ppm cap]",
-                 source_ch["peer_alias"], target_ch["peer_alias"],
-                 f"{amount:,}", budget["tier"], max_fee_ppm)
-        plans.append({
-            "source_chan_id": source_ch["chan_id"],
-            "source_alias": source_ch["peer_alias"],
-            "source_channel_point": source_ch["channel_point"],
-            "source_local_ratio": source_ch["local_ratio"],
-            "target_chan_id": target_ch["chan_id"],
-            "target_alias": target_ch["peer_alias"],
-            "target_channel_point": target_ch["channel_point"],
-            "target_peer_pubkey": target_ch["peer_pubkey"],
-            "target_local_ratio": target_ch["local_ratio"],
-            "amount_sats": amount,
-            "max_fee_sats": max_fee,
-            "max_fee_ppm": max_fee_ppm,
-            "budget_tier": budget["tier"],
-            "budget_reason": budget["reason"],
-        })
+        for source_ch in needs_outbound:
+            source_total = calculate_rebalance_amount(source_ch, "outbound", target_ratio=rebalance_target)
+            already_used = used_source_sats.get(source_ch["chan_id"], 0)
+            source_available = source_total - already_used
 
-        # If source still has excess after this plan, keep it for next target
-        if source_available - amount < 50_000:
-            outbound_idx += 1
+            if source_available < 50_000:
+                continue
+
+            amount = min(target_amount, source_available)
+            max_fee = int(amount * max_fee_ppm / 1_000_000 * 1.1)
+
+            log.info("rebalance plan: %s→%s %s sats [%s, %d ppm cap]",
+                     source_ch["peer_alias"], target_ch["peer_alias"],
+                     f"{amount:,}", budget["tier"], max_fee_ppm)
+
+            plans.append({
+                "source_chan_id": source_ch["chan_id"],
+                "source_alias": source_ch["peer_alias"],
+                "source_channel_point": source_ch["channel_point"],
+                "source_local_ratio": source_ch["local_ratio"],
+                "target_chan_id": target_ch["chan_id"],
+                "target_alias": target_ch["peer_alias"],
+                "target_channel_point": target_ch["channel_point"],
+                "target_peer_pubkey": target_ch["peer_pubkey"],
+                "target_local_ratio": target_ch["local_ratio"],
+                "amount_sats": amount,
+                "max_fee_sats": max_fee,
+                "max_fee_ppm": max_fee_ppm,
+                "budget_tier": budget["tier"],
+                "budget_reason": budget["reason"],
+            })
+
+            # Tentatively reserve this source capacity for this plan
+            used_source_sats[source_ch["chan_id"]] = already_used + amount
+            break  # move to next target — but if this plan fails, executor tries next source
+
+    # ── Fallback plans ───────────────────────────────────────────
+    # For each target, add alternative source pairings.
+    # These are only executed if the primary plan for that target fails.
+    # This ensures the engine tries all available routes before giving up.
+    primary_pairs = {(p["source_chan_id"], p["target_chan_id"]) for p in plans}
+    for target_ch in needs_inbound:
+        target_amount = calculate_rebalance_amount(target_ch, "inbound")
+        if target_amount <= 0:
+            continue
+        budget = get_channel_rebalance_budget(target_ch["chan_id"])
+        max_fee_ppm = budget["max_fee_ppm"]
+
+        for source_ch in needs_outbound:
+            pair_key = (source_ch["chan_id"], target_ch["chan_id"])
+            if pair_key in primary_pairs:
+                continue  # already in the primary plan
+
+            source_available = calculate_rebalance_amount(source_ch, "outbound")
+            if source_available < 50_000:
+                continue
+
+            amount = min(target_amount, source_available)
+            max_fee = int(amount * max_fee_ppm / 1_000_000 * 1.1)
+
+            log.info("rebalance fallback: %s→%s %s sats [%s, %d ppm cap]",
+                     source_ch["peer_alias"], target_ch["peer_alias"],
+                     f"{amount:,}", budget["tier"], max_fee_ppm)
+
+            plans.append({
+                "source_chan_id": source_ch["chan_id"],
+                "source_alias": source_ch["peer_alias"],
+                "source_channel_point": source_ch["channel_point"],
+                "source_local_ratio": source_ch["local_ratio"],
+                "target_chan_id": target_ch["chan_id"],
+                "target_alias": target_ch["peer_alias"],
+                "target_channel_point": target_ch["channel_point"],
+                "target_peer_pubkey": target_ch["peer_pubkey"],
+                "target_local_ratio": target_ch["local_ratio"],
+                "amount_sats": amount,
+                "max_fee_sats": max_fee,
+                "max_fee_ppm": max_fee_ppm,
+                "budget_tier": budget["tier"],
+                "budget_reason": budget["reason"],
+                "is_fallback": True,
+            })
 
     return plans, None
 
 
+def _attempt_single_rebalance(plan, amount, max_fee_sats):
+    """Attempt one circular rebalance payment at a specific amount.
+
+    Returns dict with: success, fee_paid, fee_ppm, failure_reason
+    """
+    try:
+        # Create invoice
+        invoice = lnd_client.add_invoice(
+            amount,
+            memo=f"rebal:{plan['source_alias'][:10]}→{plan['target_alias'][:10]}"
+        )
+        payment_request = invoice.get("payment_request", "")
+
+        if not payment_request:
+            return {"success": False, "fee_paid": 0, "fee_ppm": 0,
+                    "failure_reason": "failed to create invoice"}
+
+        log.info("  attempt %s sats (fee limit %d sats) via /v2/router/send",
+                 f"{amount:,}", max_fee_sats)
+
+        pay_result = lnd_client.send_payment_v2(
+            payment_request=payment_request,
+            outgoing_chan_id=plan["source_chan_id"],
+            last_hop_pubkey=plan["target_peer_pubkey"],
+            fee_limit_sat=max_fee_sats,
+            timeout_seconds=120,
+        )
+
+        if pay_result["status"] == "SUCCEEDED":
+            fee = pay_result["fee_sat"]
+            ppm = fee / amount * 1_000_000 if amount > 0 else 0
+            return {"success": True, "fee_paid": fee, "fee_ppm": ppm,
+                    "failure_reason": ""}
+        else:
+            return {"success": False, "fee_paid": 0, "fee_ppm": 0,
+                    "failure_reason": pay_result.get("failure_reason", "unknown")}
+
+    except Exception as e:
+        return {"success": False, "fee_paid": 0, "fee_ppm": 0,
+                "failure_reason": str(e)}
+
+
 def execute_rebalance(plan, dry_run=False):
-    """Execute a single circular rebalance using Router SendPaymentV2.
+    """Execute a circular rebalance using Router SendPaymentV2.
+
+    If the full amount fails (e.g. no route with enough liquidity), automatically
+    splits into smaller chunks and retries. Halves the amount on each failure,
+    down to a minimum of 100,000 sats. Successful chunks accumulate — the goal
+    is to move as much as possible toward the target, not all-or-nothing.
 
     Forces the payment:
     - OUT through plan["source_chan_id"]  (the overfull channel)
     - BACK IN through plan["target_peer_pubkey"] (the depleted channel peer)
-
-    This guarantees liquidity moves exactly where we need it.
     """
     result = {
         "source_chan_id": plan["source_chan_id"],
@@ -362,70 +463,72 @@ def execute_rebalance(plan, dry_run=False):
              f"{plan['amount_sats']:,}", plan["max_fee_ppm"], plan.get("budget_tier","?"))
     start = time.time()
 
-    try:
-        # Step 1: Create invoice on our own node
-        # POST /v1/invoices — creates a BOLT11 invoice payable to ourselves
-        log.info("rebalance step 1/2: creating invoice for %s sats (POST /v1/invoices)",
-                 f"{plan['amount_sats']:,}")
-        invoice = lnd_client.add_invoice(
-            plan["amount_sats"],
-            memo=f"rebal:{plan['source_alias'][:10]}→{plan['target_alias'][:10]}"
-        )
-        payment_request = invoice.get("payment_request", "")
+    total_moved = 0
+    total_fees = 0
+    remaining = plan["amount_sats"]
+    chunk_amount = remaining  # start with full amount
+    min_chunk = 100_000       # never try less than 100k sats
+    max_chunks = 10           # safety limit to prevent infinite splitting
 
-        if not payment_request:
-            result["failure_reason"] = "failed to create invoice"
-            log.error("rebalance aborted: could not create invoice")
-            return result
+    for chunk_num in range(1, max_chunks + 1):
+        if remaining < min_chunk:
+            log.info("remaining %s sats is below minimum chunk %s — stopping",
+                     f"{remaining:,}", f"{min_chunk:,}")
+            break
 
-        log.info("rebalance step 1/2: invoice created OK")
+        # Calculate fee limit for this chunk based on the budget ppm
+        chunk_fee_limit = int(chunk_amount * plan["max_fee_ppm"] / 1_000_000 * 1.1)
 
-        # Step 2: Pay via Router SendPaymentV2
-        # POST /v2/router/send with:
-        #   outgoing_chan_id = source channel (overfull) — forces first hop out this channel
-        #   last_hop_pubkey  = target peer (depleted)   — forces last hop in through this peer
-        #   fee_limit_sat    = max fee based on budget tier
-        #   allow_self_payment = true (required for circular payments)
-        log.info("rebalance step 2/2: sending circular payment "
-                 "(POST /v2/router/send, outgoing=%s, last_hop=%s, fee_limit=%d sats)",
-                 plan["source_chan_id"], plan["target_peer_pubkey"][:12] + "...",
-                 plan["max_fee_sats"])
-        pay_result = lnd_client.send_payment_v2(
-            payment_request=payment_request,
-            outgoing_chan_id=plan["source_chan_id"],
-            last_hop_pubkey=plan["target_peer_pubkey"],
-            fee_limit_sat=plan["max_fee_sats"],
-            timeout_seconds=120,
-        )
-        log.info("rebalance step 2/2: payment returned status=%s", pay_result.get("status","?"))
+        log.info("rebalance chunk %d: trying %s of %s remaining sats",
+                 chunk_num, f"{chunk_amount:,}", f"{remaining:,}")
 
-        if pay_result["status"] == "SUCCEEDED":
-            result["success"] = True
-            result["fee_paid"] = pay_result["fee_sat"]
-            result["fee_ppm"] = (
-                result["fee_paid"] / plan["amount_sats"] * 1_000_000
-                if plan["amount_sats"] > 0 else 0
-            )
-            log.info("rebalance success: %s→%s fee %d sats (%.0f ppm)",
-                     plan["source_alias"], plan["target_alias"],
-                     result["fee_paid"], result["fee_ppm"])
+        attempt = _attempt_single_rebalance(plan, chunk_amount, chunk_fee_limit)
+
+        if attempt["success"]:
+            total_moved += chunk_amount
+            total_fees += attempt["fee_paid"]
+            remaining -= chunk_amount
+            log.info("  chunk %d succeeded: %s sats moved, fee %d sats (%.0f ppm)",
+                     chunk_num, f"{chunk_amount:,}", attempt["fee_paid"], attempt["fee_ppm"])
+
+            # Try another chunk at same size if there's remaining
+            if remaining < min_chunk:
+                break
+            chunk_amount = min(chunk_amount, remaining)
+
         else:
-            result["failure_reason"] = pay_result.get("failure_reason", "unknown")
-            log.warning("rebalance failed: %s→%s: %s",
-                        plan["source_alias"], plan["target_alias"], result["failure_reason"])
-
-    except Exception as e:
-        result["failure_reason"] = str(e)
-        log.error("rebalance exception: %s→%s: %s",
-                  plan["source_alias"], plan["target_alias"], e)
+            log.info("  chunk %d failed: %s — halving amount",
+                     chunk_num, attempt["failure_reason"])
+            # Halve the amount and retry
+            chunk_amount = chunk_amount // 2
+            if chunk_amount < min_chunk:
+                log.info("  chunk size %s below minimum %s — giving up",
+                         f"{chunk_amount:,}", f"{min_chunk:,}")
+                result["failure_reason"] = attempt["failure_reason"]
+                break
 
     duration = time.time() - start
+
+    if total_moved > 0:
+        result["success"] = True
+        result["amount"] = total_moved
+        result["fee_paid"] = total_fees
+        result["fee_ppm"] = total_fees / total_moved * 1_000_000 if total_moved > 0 else 0
+        log.info("rebalance complete: %s→%s moved %s of %s sats in %.1fs, "
+                 "total fee %d sats (%.0f ppm)",
+                 plan["source_alias"], plan["target_alias"],
+                 f"{total_moved:,}", f"{plan['amount_sats']:,}",
+                 duration, total_fees, result["fee_ppm"])
+    else:
+        log.warning("rebalance failed completely: %s→%s — no sats moved after %d attempts in %.1fs",
+                    plan["source_alias"], plan["target_alias"], chunk_num, duration)
 
     # Log to database
     db.save_rebalance_attempt(
         plan["source_chan_id"], plan["target_chan_id"],
         plan["source_alias"], plan["target_alias"],
-        plan["amount_sats"], result["fee_paid"],
+        total_moved if total_moved > 0 else plan["amount_sats"],
+        total_fees,
         result["success"], result["failure_reason"], duration
     )
 
