@@ -171,7 +171,99 @@ def cmd_plan(args):
         log.error("could not fetch candidates: %s", e)
         print(f"  Error fetching candidates: {e}")
 
-    # ── Step 5: Save to DB ────────────────────────────────────────
+    # ── Step 5: Rebalance scenario analysis ──────────────────────
+    # Check if any channel is depleted and suggest force target options
+    channels_for_rebal = lnd_client.get_channels()
+    channels_for_rebal = lnd_client.resolve_aliases(channels_for_rebal)
+
+    depleted = [c for c in channels_for_rebal
+                if c["active"] and c["local_ratio"] < engine.REBALANCE_LOW_THRESHOLD]
+
+    if depleted:
+        print(f"\n  {'─'*45}")
+        print(f"  Rebalance analysis:")
+        print(f"  {'─'*45}")
+        print(f"  {len(depleted)} depleted channel(s) — pipeline cannot auto-rebalance")
+        print(f"  (no channel is above the {engine.REBALANCE_HIGH_THRESHOLD:.0%} overfull threshold)\n")
+        print(f"  Suggested --force targets for manual rebalance:")
+        print(f"  {'─'*45}")
+
+        active = [c for c in channels_for_rebal if c["active"]]
+
+        # Test a range of force targets
+        scenarios = []
+        for target in [0.50, 0.45, 0.40, 0.35, 0.30]:
+            sources = [c for c in active if c["local_ratio"] > target]
+            targets = [c for c in active if c["local_ratio"] < target]
+
+            total_can_give = sum(
+                int(c["capacity"] * (c["local_ratio"] - target))
+                for c in sources
+            )
+            total_needed = sum(
+                int(c["capacity"] * (target - c["local_ratio"]))
+                for c in targets
+            )
+            total_moveable = min(total_can_give, total_needed)
+
+            scenarios.append({
+                "target": target,
+                "sources": len(sources),
+                "targets_list": targets,
+                "total_moveable": total_moveable,
+                "can_fix_depleted": all(
+                    target > engine.REBALANCE_LOW_THRESHOLD
+                    for c in depleted
+                ),
+            })
+
+        for s in scenarios:
+            sources_chs = [c for c in active if c["local_ratio"] > s["target"]]
+            targets_chs = [c for c in active if c["local_ratio"] < s["target"]]
+
+            if not sources_chs:
+                print(f"\n  --force {s['target']:.0%}  No sources available — all channels at or below target")
+                continue
+
+            fixes = "✓ fixes depleted" if s["can_fix_depleted"] and s["total_moveable"] > 100_000 else "⚠ not enough to fix"
+            print(f"\n  --force {s['target']:.0%}  ({fixes})")
+
+            # Show end state per channel
+            # Each channel moves toward target, limited by max amount ratio
+            # and by total available from sources
+            remaining_to_move = s["total_moveable"]
+            for c in active:
+                alias = c["peer_alias"]
+                current = c["local_ratio"]
+                capacity = c["capacity"]
+                target = s["target"]
+
+                if current > target:
+                    # Source channel: will give sats
+                    can_give = int(capacity * (current - target))
+                    capped = int(capacity * min(current - target, engine.REBALANCE_MAX_AMOUNT_RATIO))
+                    actual_give = min(can_give, capped)
+                    end_local = current - (actual_give / capacity)
+                    direction = "↓ source"
+                elif current < target:
+                    # Target channel: will receive sats
+                    needs = int(capacity * (target - current))
+                    actual_recv = min(needs, remaining_to_move)
+                    end_local = current + (actual_recv / capacity)
+                    direction = "↑ target"
+                else:
+                    end_local = current
+                    direction = "— unchanged"
+
+                end_pct = min(end_local, 1.0)
+                delta = end_pct - current
+                delta_str = f"({delta:+.0%})" if abs(delta) > 0.01 else ""
+                print(f"    {alias:<25} {current:.0%} → {end_pct:.0%} {delta_str:<8} {direction}")
+
+        print(f"\n  Run with --dry-run first to preview:")
+        print(f"  venv/bin/python3 main.py rebalance_channels --force 0.40 --dry-run")
+
+    # ── Step 6: Save to DB ────────────────────────────────────────
     db.save_investment_plan(
         total_balance, bd["treasury"], bd["deployable"],
         {"num_channels": best_num, "channel_size": best_channel_size,
