@@ -299,7 +299,14 @@ def plan_rebalances(channels=None, force=None):
         budget = get_channel_rebalance_budget(target_ch["chan_id"])
         max_fee_ppm = budget["max_fee_ppm"]
 
+        # Try ALL sources for this target — a single source may not have
+        # enough capacity to fully restore the target. Multiple sources can
+        # each contribute their share.
+        remaining_target = target_amount
         for source_ch in needs_outbound:
+            if remaining_target < 50_000:
+                break  # target nearly satisfied
+
             source_total = calculate_rebalance_amount(source_ch, "outbound", target_ratio=rebalance_target)
             already_used = used_source_sats.get(source_ch["chan_id"], 0)
             source_available = source_total - already_used
@@ -307,7 +314,7 @@ def plan_rebalances(channels=None, force=None):
             if source_available < 50_000:
                 continue
 
-            amount = min(target_amount, source_available)
+            amount = min(remaining_target, source_available)
             max_fee = int(amount * max_fee_ppm / 1_000_000 * 1.1)
 
             log.info("rebalance plan: %s→%s %s sats [%s, %d ppm cap]",
@@ -331,9 +338,9 @@ def plan_rebalances(channels=None, force=None):
                 "budget_reason": budget["reason"],
             })
 
-            # Tentatively reserve this source capacity for this plan
+            # Reserve this source capacity and reduce target remaining
             used_source_sats[source_ch["chan_id"]] = already_used + amount
-            break  # move to next target — but if this plan fails, executor tries next source
+            remaining_target -= amount
 
     # ── Fallback plans ───────────────────────────────────────────
     # For each target, add alternative source pairings.

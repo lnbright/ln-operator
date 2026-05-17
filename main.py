@@ -304,6 +304,72 @@ def cmd_adjust_fees(args):
     return updates
 
 
+def _show_rebalance_scenarios(current_force=None):
+    """Show what different --force target levels would achieve.
+
+    Helps the operator decide which force level to use when the pipeline
+    can't auto-rebalance (no overfull channels above 80%).
+    Only shows if there are depleted channels that need help.
+    """
+    channels = engine.lnd_client.get_channels()
+    channels = engine.lnd_client.resolve_aliases(channels)
+    active = [c for c in channels if c["active"]]
+    depleted = [c for c in active if c["local_ratio"] < engine.REBALANCE_LOW_THRESHOLD]
+
+    if not depleted:
+        return  # nothing to suggest
+
+    # Don't show if already using force (user already picked a level)
+    if current_force is not None:
+        return
+
+    print(f"\n  {'─'*45}")
+    print(f"  Rebalance scenarios (use --force to enable):")
+    print(f"  {'─'*45}")
+
+    for target in [0.50, 0.45, 0.40, 0.35, 0.30]:
+        sources = [c for c in active if c["local_ratio"] > target]
+        targets = [c for c in active if c["local_ratio"] < target]
+
+        if not sources:
+            print(f"\n  --force {target:.0%}  No sources — all channels at or below target")
+            continue
+
+        total_can_give = sum(int(c["capacity"] * (c["local_ratio"] - target)) for c in sources)
+        total_needed = sum(int(c["capacity"] * (target - c["local_ratio"])) for c in targets)
+        total_moveable = min(total_can_give, total_needed)
+
+        can_fix = total_moveable > 100_000
+        fixes = "✓ fixes depleted" if can_fix else "⚠ not enough"
+        print(f"\n  --force {target:.0%}  ({fixes})")
+
+        for c in active:
+            alias = c["peer_alias"]
+            current = c["local_ratio"]
+            capacity = c["capacity"]
+
+            if current > target:
+                give = min(int(capacity * (current - target)),
+                           int(capacity * engine.REBALANCE_MAX_AMOUNT_RATIO))
+                end = current - (give / capacity)
+                direction = "↓ gives sats"
+            elif current < target:
+                needs = int(capacity * (target - current))
+                recv = min(needs, total_moveable)
+                end = current + (recv / capacity)
+                direction = "↑ receives sats"
+            else:
+                end = current
+                direction = "— unchanged"
+
+            end = min(end, 1.0)
+            delta = end - current
+            delta_str = f"({delta:+.0%})" if abs(delta) > 0.005 else ""
+            print(f"    {alias:<25} {current:.0%} → {end:.0%} {delta_str:<8} {direction}")
+
+    print(f"\n  Preview: venv/bin/python3 main.py rebalance_channels --force 0.40 --dry-run")
+
+
 def cmd_rebalance_channels(args):
     """Check for and execute rebalancing."""
     log = get_logger("main")
@@ -322,6 +388,9 @@ def cmd_rebalance_channels(args):
     if not plans:
         log.info("rebalance_channels: %s", reason)
         print(f"  {reason}")
+
+        # Show scenario analysis when no auto-rebalance is possible
+        _show_rebalance_scenarios(force)
         return []
 
     # Split into primary and fallback for display
@@ -414,6 +483,9 @@ def cmd_rebalance_channels(args):
                       f"[if {fp['source_alias']}→{primary_for} fails]")
                 print(f"      Amount:   {fp['amount_sats']:,} sats")
                 print(f"      Fee cap:  {fp['max_fee_ppm']} ppm")
+
+        # Show scenarios if there are depleted channels without fallbacks
+        _show_rebalance_scenarios(force)
 
         print(f"\n  [DRY RUN] No payments executed.")
         return []
