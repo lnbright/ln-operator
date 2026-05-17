@@ -255,28 +255,33 @@ def cmd_rebalance_channels(args):
                     status = f"🟡 above target ({ratio:.0%} local) — force source"
             print(f"    {alias}: {status}")
 
-        # Explain why fallbacks do or don't exist
-        all_targets  = {p["target_chan_id"]: p["target_alias"] for p in primaries}
-        all_sources  = {p["source_chan_id"]: p["source_alias"] for p in primaries}
+        # Show all depleted/overfull channels from the full plan list (primaries + fallbacks)
+        all_targets = {p["target_chan_id"]: p["target_alias"] for p in plans}
+        all_sources = {p["source_chan_id"]: p["source_alias"] for p in plans}
 
         print(f"\n  Candidates:")
-        print(f"    Depleted (need sats):  {', '.join(p['target_alias'] for p in primaries) or 'none'}")
-        print(f"    Overfull (can donate): {', '.join(p['source_alias'] for p in primaries) or 'none'}")
+        print(f"    Depleted (need sats):  {', '.join(all_targets.values()) or 'none'}")
+        print(f"    Overfull (can donate): {', '.join(dict.fromkeys(all_sources.values())) or 'none'}")
 
-        if len(all_targets) == 1 and len(all_sources) == 1:
-            print(f"\n  Only one possible pair — no fallback available.")
-            print(f"  A fallback would require either:")
-            print(f"    • A second overfull channel (to try a different source)")
-            print(f"    • A second depleted channel (to try a different target)")
-            print(f"  If this pair fails, nothing else can be tried this run.")
-        elif len(all_targets) == 1 and len(all_sources) > 1:
-            print(f"\n  One depleted channel, {len(all_sources)} overfull sources.")
-            print(f"  {len(fallbacks)} fallback(s) available — will try different source if primary fails.")
-        elif len(all_targets) > 1 and len(all_sources) == 1:
-            print(f"\n  {len(all_targets)} depleted channels, one overfull source.")
-            print(f"  {len(fallbacks)} fallback(s) available — will try different target if primary fails.")
-        elif fallbacks:
-            print(f"\n  {len(fallbacks)} fallback pair(s) available if primary fails.")
+        num_targets = len(all_targets)
+        num_sources  = len(set(all_sources.keys()))
+
+        if not fallbacks:
+            if num_targets == 1 and num_sources == 1:
+                print(f"\n  Only one possible pair — no fallback available.")
+                print(f"  A fallback would require either:")
+                print(f"    • A second overfull channel (to try a different source)")
+                print(f"    • A second depleted channel (to try a different target)")
+                print(f"  If this pair fails, nothing else can be tried this run.")
+        else:
+            if num_targets > num_sources:
+                print(f"\n  {num_targets} depleted channels, {num_sources} overfull source(s).")
+                print(f"  {len(fallbacks)} fallback(s): if primary fails, source tries a different target.")
+            elif num_sources > num_targets:
+                print(f"\n  {num_targets} depleted channel(s), {num_sources} overfull sources.")
+                print(f"  {len(fallbacks)} fallback(s): if primary fails, target tries a different source.")
+            else:
+                print(f"\n  {len(fallbacks)} fallback pair(s) available if primary fails.")
         print()
 
         print(f"  Primary plans ({len(primaries)}):") 
@@ -297,13 +302,19 @@ def cmd_rebalance_channels(args):
                 fallback_by_target[fp["target_alias"]].append(fp)
 
             print(f"\n  Fallback plans (tried if primary fails):")
-            for target_alias, fps in fallback_by_target.items():
-                for fp in fps:
-                    print(f"    {fp['source_alias']} ({fp['source_local_ratio']:.0%}) "
-                          f"→ {fp['target_alias']} ({fp['target_local_ratio']:.0%}) "
-                          f"[fallback for {target_alias}]")
-                    print(f"      Amount:   {fp['amount_sats']:,} sats")
-                    print(f"      Fee cap:  {fp['max_fee_ppm']} ppm")
+            for fp in fallbacks:
+                # Find which primary this is a fallback for (same source, different target)
+                primary_for = next(
+                    (p["target_alias"] for p in primaries
+                     if p["source_chan_id"] == fp["source_chan_id"]
+                     and p["target_chan_id"] != fp["target_chan_id"]),
+                    "primary"
+                )
+                print(f"    {fp['source_alias']} ({fp['source_local_ratio']:.0%}) "
+                      f"→ {fp['target_alias']} ({fp['target_local_ratio']:.0%}) "
+                      f"[if {fp['source_alias']}→{primary_for} fails]")
+                print(f"      Amount:   {fp['amount_sats']:,} sats")
+                print(f"      Fee cap:  {fp['max_fee_ppm']} ppm")
 
         print(f"\n  [DRY RUN] No payments executed.")
         return []
