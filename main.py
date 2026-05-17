@@ -627,12 +627,50 @@ def cmd_status(args):
         print(f"  Local: {total_local:,} ({ratio:.0%})")
         print(f"  On-chain: {int(onchain.get('confirmed_balance', 0)):,} sats")
 
+        # Fetch fee policies for each channel from the graph
+        my_pk = info.get("identity_pubkey", "")
+        channel_fees = {}
+        for ch in channels:
+            try:
+                edge = lnd_client._get(f"/v1/graph/edge/{ch['scid']}")
+                if edge:
+                    if edge.get("node1_pub") == my_pk:
+                        my_pol   = edge.get("node1_policy", {})
+                        their_pol = edge.get("node2_policy", {})
+                    else:
+                        my_pol   = edge.get("node2_policy", {})
+                        their_pol = edge.get("node1_policy", {})
+
+                    channel_fees[ch["chan_id"]] = {
+                        "my_ppm":      int(my_pol.get("fee_rate_milli_msat", 0)),
+                        "their_ppm":   int(their_pol.get("fee_rate_milli_msat", 0)),
+                        "their_base":  int(their_pol.get("fee_base_msat", 0)) // 1000,
+                        "their_inbound_ppm": int(their_pol.get("inbound_fee_rate_milli_msat", 0)),
+                    }
+            except Exception:
+                pass
+
         print(f"\n  Per-channel breakdown:")
+        print(f"  {'─'*70}")
+        print(f"  {'Channel':<22} {'Balance':<22} {'Our fee':>9} {'Their fee':>12} {'Their inbound':>14}")
+        print(f"  {'─'*70}")
         for ch in sorted(channels, key=lambda c: c["local_ratio"]):
             bar = _balance_bar(ch["local_ratio"], 20)
             status = "●" if ch["active"] else "○"
-            print(f"    {status} {ch['peer_alias'][:20]:20s} {bar} "
-                  f"{ch['local_ratio']:.0%} ({ch['capacity']:,})")
+            fees = channel_fees.get(ch["chan_id"], {})
+            my_ppm    = fees.get("my_ppm", "?")
+            their_ppm = fees.get("their_ppm", "?")
+            their_base = fees.get("their_base", 0)
+            their_inbound = fees.get("their_inbound_ppm", 0)
+
+            their_str = f"{their_base}b+{their_ppm}ppm" if their_base else f"{their_ppm}ppm"
+            inbound_str = f"{their_inbound}ppm" if their_inbound else "—"
+
+            print(f"  {status} {ch['peer_alias'][:20]:20s} {bar} {ch['local_ratio']:.0%} "
+                  f"| {my_ppm:>6}ppm | {their_str:>11} | {inbound_str:>12}")
+        print(f"  {'─'*70}")
+        print(f"  Our fee = what we charge for routing out. Their fee = what they charge.")
+        print(f"  Their inbound = what they charge for receiving (affects rebalance cost).")
 
     except Exception as e:
         print(f"  Error connecting to LND: {e}")
