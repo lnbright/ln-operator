@@ -55,8 +55,6 @@ def cmd_plan(args):
     total_balance     = int(onchain.get("confirmed_balance", 0))
     anchor_reserved   = int(onchain.get("reserved_balance_anchor_chan", 0))
 
-    print(f"\n  Wallet balance:           {total_balance:>12,} sats")
-    print(f"  Existing anchor reserve:  {anchor_reserved:>12,} sats  (already locked by LND)")
 
     # ── Step 2: Get fee rate from LND ────────────────────────────
     fee_rate = lnd_client.estimate_fee(conf_target=2) or 3
