@@ -669,8 +669,8 @@ def cmd_status(args):
             print(f"  {status} {ch['peer_alias'][:20]:20s} {bar} {ch['local_ratio']:.0%} "
                   f"| {my_ppm:>6}ppm | {their_str:>11} | {inbound_str:>12}")
         print(f"  {'─'*70}")
-        print(f"  Our fee = what we charge for routing out. Their fee = what they charge.")
-        print(f"  Their inbound = what they charge for receiving (affects rebalance cost).")
+        print(f"  Our fee = what we charge to route payments out. Their fee = what they charge others to route to us.")
+        print(f"  Their inbound = extra fee they charge for receiving (— means 0 or not set in graph).")
 
     except Exception as e:
         print(f"  Error connecting to LND: {e}")
