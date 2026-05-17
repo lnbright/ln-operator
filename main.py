@@ -231,7 +231,23 @@ def cmd_rebalance_channels(args):
 
     if args.dry_run:
         # Show full plan breakdown without executing
-        print(f"\n  Primary plans ({len(primaries)}):")
+        # Explain why fallbacks do or don't exist
+        depleted  = [p for p in primaries]
+        all_targets  = {p["target_chan_id"]: p["target_alias"] for p in primaries}
+        all_sources  = {p["source_chan_id"]: p["source_alias"] for p in primaries}
+
+        print(f"\n  Candidates:")
+        print(f"    Depleted (need sats):  {', '.join(p['target_alias'] for p in primaries) or 'none'}")
+        print(f"    Overfull (can donate): {', '.join(p['source_alias'] for p in primaries) or 'none'}")
+
+        if len(all_targets) == 1 and len(all_sources) == 1:
+            print(f"\n  Only one possible pair — no fallback available.")
+            print(f"  If this fails, nothing else can be tried this run.")
+        elif fallbacks:
+            print(f"\n  {len(fallbacks)} fallback pair(s) available if primary fails.")
+        print()
+
+        print(f"  Primary plans ({len(primaries)}):") 
         for p in primaries:
             tier_icon = {"proven": "📊", "discovery": "🔍", "deadweight": "💤"}.get(p.get("budget_tier",""), "•")
             max_fee_sats = int(p["amount_sats"] * p["max_fee_ppm"] / 1_000_000 * 1.1)
