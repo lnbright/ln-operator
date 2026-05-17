@@ -310,28 +310,35 @@ def cmd_rebalance_channels(args):
 
     print(f"\nExecuting {len(primaries)} primary plan(s) (+ {len(fallbacks)} fallback(s)):\n")
     results = []
-    satisfied_targets = set()
-    failed_primaries = set()
+    satisfied_targets = set()  # target chan_ids successfully rebalanced this run
+    failed_pairs = set()        # (source_chan_id, target_chan_id) that failed
 
     for p in plans:
-        if p["target_chan_id"] in satisfied_targets:
-            log.debug("skipping %s→%s — target already satisfied this run",
+        source_id = p["source_chan_id"]
+        target_id = p["target_chan_id"]
+
+        # Skip if target already got sats this run
+        if target_id in satisfied_targets:
+            log.debug("skipping %s→%s — target already satisfied",
                       p["source_alias"], p["target_alias"])
             continue
 
+        # Fallbacks only fire if the source has already failed on a primary plan.
+        # This means: Kraken failed on LNBiG Hub-3, so now try Kraken→ACINQ.
         if p.get("is_fallback"):
-            if p["target_chan_id"] not in failed_primaries:
-                log.debug("skipping fallback %s→%s — primary not yet tried",
-                          p["source_alias"], p["target_alias"])
+            source_had_failure = any(src == source_id for src, _ in failed_pairs)
+            if not source_had_failure:
+                log.debug("skipping fallback %s→%s — source %s has not failed yet",
+                          p["source_alias"], p["target_alias"], p["source_alias"])
                 continue
-            log.info("trying fallback plan: %s→%s (primary failed, trying alternative route)",
-                     p["source_alias"], p["target_alias"])
+            log.info("trying fallback: %s→%s (source %s failed on primary, trying alternative target)",
+                     p["source_alias"], p["target_alias"], p["source_alias"])
 
         result = engine.execute_rebalance(p, dry_run=False)
         results.append(result)
 
         if result["success"]:
-            satisfied_targets.add(p["target_chan_id"])
+            satisfied_targets.add(target_id)
             log.info("rebalance succeeded: %s→%s moved %s sats (fee %d sats, %.0f ppm)",
                      p["source_alias"], p["target_alias"],
                      f"{result.get('amount', p['amount_sats']):,}",
@@ -341,19 +348,20 @@ def cmd_rebalance_channels(args):
                   f"fee {result['fee_paid']:,} sats "
                   f"({result['fee_ppm']:.0f} ppm) [{p.get('budget_tier','?')}]")
         else:
-            if not p.get("is_fallback"):
-                failed_primaries.add(p["target_chan_id"])
-
+            failed_pairs.add((source_id, target_id))
             fallback_available = any(
-                fp.get("is_fallback") and fp["target_chan_id"] == p["target_chan_id"]
+                fp.get("is_fallback") and fp["source_chan_id"] == source_id
+                and fp["target_chan_id"] not in satisfied_targets
                 for fp in plans
             )
             if fallback_available and not p.get("is_fallback"):
-                log.info("primary failed for %s — will try fallback route", p["target_alias"])
+                log.info("primary failed %s→%s — will try fallback with same source",
+                         p["source_alias"], p["target_alias"])
                 print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
-                      f"{result['failure_reason']} — trying alternative route")
+                      f"{result['failure_reason']} — trying alternative target")
             else:
-                log.warning("rebalance failed for %s: no more alternatives to try", p["target_alias"])
+                log.warning("rebalance failed %s→%s: no more alternatives",
+                            p["source_alias"], p["target_alias"])
                 print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
                       f"{result['failure_reason']}")
 
