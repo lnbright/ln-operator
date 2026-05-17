@@ -225,32 +225,92 @@ def cmd_rebalance_channels(args):
         print(f"  {reason}")
         return []
 
-    print(f"\nFound {len(plans)} rebalance candidate(s):\n")
+    # Split into primary and fallback for display
+    primaries  = [p for p in plans if not p.get("is_fallback")]
+    fallbacks  = [p for p in plans if p.get("is_fallback")]
+
+    if args.dry_run:
+        # Show full plan breakdown without executing
+        print(f"\n  Primary plans ({len(primaries)}):")
+        for p in primaries:
+            tier_icon = {"proven": "📊", "discovery": "🔍", "deadweight": "💤"}.get(p.get("budget_tier",""), "•")
+            max_fee_sats = int(p["amount_sats"] * p["max_fee_ppm"] / 1_000_000 * 1.1)
+            print(f"    {p['source_alias']} ({p['source_local_ratio']:.0%}) "
+                  f"→ {p['target_alias']} ({p['target_local_ratio']:.0%})")
+            print(f"      Amount:   {p['amount_sats']:,} sats")
+            print(f"      Fee cap:  {p['max_fee_ppm']} ppm = {max_fee_sats:,} sats max")
+            print(f"      Tier:     {tier_icon} {p.get('budget_tier','?')} — {p.get('budget_reason','')}")
+
+        if fallbacks:
+            # Group fallbacks by target
+            from collections import defaultdict
+            fallback_by_target = defaultdict(list)
+            for fp in fallbacks:
+                fallback_by_target[fp["target_alias"]].append(fp)
+
+            print(f"\n  Fallback plans (tried if primary fails):")
+            for target_alias, fps in fallback_by_target.items():
+                for fp in fps:
+                    print(f"    {fp['source_alias']} ({fp['source_local_ratio']:.0%}) "
+                          f"→ {fp['target_alias']} ({fp['target_local_ratio']:.0%}) "
+                          f"[fallback for {target_alias}]")
+                    print(f"      Amount:   {fp['amount_sats']:,} sats")
+                    print(f"      Fee cap:  {fp['max_fee_ppm']} ppm")
+
+        print(f"\n  [DRY RUN] No payments executed.")
+        return []
+
+    print(f"\nExecuting {len(primaries)} primary plan(s) (+ {len(fallbacks)} fallback(s)):\n")
     results = []
+    satisfied_targets = set()
+    failed_primaries = set()
 
     for p in plans:
-        tier_icon = {"proven": "📊", "discovery": "🔍", "deadweight": "💤"}.get(
-            p.get("budget_tier", ""), "•"
-        )
-        print(
-            f"  {p['source_alias']} ({p['source_local_ratio']:.0%}) → "
-            f"{p['target_alias']} ({p['target_local_ratio']:.0%}): "
-            f"{p['amount_sats']:,} sats (max fee: {p['max_fee_ppm']} ppm)"
-        )
-        print(f"    {tier_icon} [{p.get('budget_tier', '?')}] {p.get('budget_reason', '')}")
+        if p["target_chan_id"] in satisfied_targets:
+            log.debug("skipping %s→%s — target already satisfied this run",
+                      p["source_alias"], p["target_alias"])
+            continue
 
-        result = engine.execute_rebalance(p, dry_run=args.dry_run)
+        if p.get("is_fallback"):
+            if p["target_chan_id"] not in failed_primaries:
+                log.debug("skipping fallback %s→%s — primary not yet tried",
+                          p["source_alias"], p["target_alias"])
+                continue
+            log.info("trying fallback plan: %s→%s (primary failed, trying alternative route)",
+                     p["source_alias"], p["target_alias"])
+
+        result = engine.execute_rebalance(p, dry_run=False)
         results.append(result)
 
-        if args.dry_run:
-            print(f"    [DRY RUN] Would attempt rebalance")
-        elif result["success"]:
-            print(f"    ✓ Success! Fee: {result['fee_paid']:,} sats ({result['fee_ppm']:.0f} ppm)")
+        if result["success"]:
+            satisfied_targets.add(p["target_chan_id"])
+            log.info("rebalance succeeded: %s→%s moved %s sats (fee %d sats, %.0f ppm)",
+                     p["source_alias"], p["target_alias"],
+                     f"{result.get('amount', p['amount_sats']):,}",
+                     result["fee_paid"], result["fee_ppm"])
+            print(f"  ✓ {p['source_alias']} → {p['target_alias']}: "
+                  f"{result.get('amount', p['amount_sats']):,} sats moved, "
+                  f"fee {result['fee_paid']:,} sats "
+                  f"({result['fee_ppm']:.0f} ppm) [{p.get('budget_tier','?')}]")
         else:
-            print(f"    ✗ Failed: {result['failure_reason']}")
+            if not p.get("is_fallback"):
+                failed_primaries.add(p["target_chan_id"])
+
+            fallback_available = any(
+                fp.get("is_fallback") and fp["target_chan_id"] == p["target_chan_id"]
+                for fp in plans
+            )
+            if fallback_available and not p.get("is_fallback"):
+                log.info("primary failed for %s — will try fallback route", p["target_alias"])
+                print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
+                      f"{result['failure_reason']} — trying alternative route")
+            else:
+                log.warning("rebalance failed for %s: no more alternatives to try", p["target_alias"])
+                print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
+                      f"{result['failure_reason']}")
 
     # Telegram
-    if not args.dry_run and not args.no_telegram:
+    if results and not args.no_telegram:
         msg = telegram_bot.format_rebalance_report(results)
         telegram_bot.send_message(msg)
 
