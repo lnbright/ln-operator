@@ -171,12 +171,22 @@ def cmd_plan(args):
                 avg = c.get("avg_channel_size", 0)
                 avg_str = f"{avg//1_000_000}M" if avg >= 1_000_000 else f"{avg//1_000}k" if avg >= 1_000 else str(avg)
                 fee = c.get("avg_fee_ppm", 0)
-                print(f"  {i:2}. {c['alias'][:26]:<26} | score {c['score']:.3f} "
+                fee_str = f"{fee:>4}ppm" if fee < 100_000 else "  n/a"
+
+                alias = c.get("alias", "")
+                pubkey = c.get("pubkey", "unknown")
+                no_alias = not alias or alias == pubkey[:len(alias)]
+
+                display_name = alias[:26] if not no_alias else pubkey[:26]
+
+                print(f"  {i:2}. {display_name:<26} | score {c['score']:.3f} "
                       f"| rank {c.get('network_rank','?'):>3} "
                       f"| {c['channel_count']:>4} ch "
                       f"| avg {avg_str:>5} "
-                      f"| fee {fee:>4}ppm "
+                      f"| fee {fee_str:>8} "
                       f"| {tier}")
+                if no_alias:
+                    print(f"      pk: {pubkey}")
 
         _print_candidates(primary_pool, primary_label)
         if secondary_pool:
