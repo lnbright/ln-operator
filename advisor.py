@@ -380,11 +380,14 @@ def _fetch_candidates_from_graph(state):
                     node_map[pk]["capacity"] += cap
                     node_map[pk]["channel_count"] += 1
                     # Collect outbound fee rate for this node's side of the channel
-                    policy = edge.get(policy_field) or {}
-                    fee_rate = int(policy.get("fee_rate_milli_msat", 0))
-                    if policy:  # only count if policy exists
-                        node_map[pk]["fee_ppm_sum"] += fee_rate
-                        node_map[pk]["fee_ppm_count"] += 1
+                    # Only count channels with a real policy and non-zero fee rate
+                    # to avoid 0-fee channels (common on large hubs) dragging avg down
+                    policy = edge.get(policy_field)
+                    if policy:
+                        fee_rate = int(policy.get("fee_rate_milli_msat", 0))
+                        if fee_rate > 0:
+                            node_map[pk]["fee_ppm_sum"] += fee_rate
+                            node_map[pk]["fee_ppm_count"] += 1
 
         # Filter out nodes with zero channels (likely inactive/phantom nodes)
         active_nodes = [n for n in node_map.values() if n["channel_count"] > 0]
