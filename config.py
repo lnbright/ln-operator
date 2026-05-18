@@ -69,12 +69,9 @@ MAX_CHANNEL_SIZE_SATS = 16_777_215       # LND wumbo channel max without additio
 
 # Peer scoring weights (must sum to 1.0)
 PEER_SCORE_WEIGHTS = {
-    "channels":        0.20,  # number of channels (topology reach, reliable from graph)
-    "avg_chan_size":    0.30,  # avg channel size in sats (quality metric — larger = better routing partner)
-    "centrality":      0.20,  # betweenness proxy: (channels + capacity) normalised
-    "diversity":       0.30,  # % of their peers new to you (improves your graph reach)
-    # Note: uptime removed (always 0.5 placeholder — not useful)
-    # Note: raw capacity removed (unreliable from local graph — use avg_chan_size instead)
+    "diversity":       0.40,  # % of their peers new to you — most important for a small node
+    "centrality":      0.30,  # proxy for network importance (channels + capacity normalised)
+    "low_fee":         0.30,  # lower avg outbound fee = cheaper routing & rebalancing
 }
 
 # ─── External data sources ───────────────────────────────────────
