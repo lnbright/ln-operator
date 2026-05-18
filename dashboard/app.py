@@ -328,34 +328,6 @@ TEMPLATE = """
 
   .empty-state { padding: 24px; text-align: center; color: var(--muted); font-size: 12px; }
   .error-card { background: rgba(255,77,109,0.08); border: 1px solid rgba(255,77,109,0.3); padding: 20px; margin-bottom: 16px; color: var(--red); font-size: 13px; }
-
-  /* ─── Mobile responsive fixes ─── */
-  @media (max-width: 600px) {
-    .wrap { padding: 12px 8px; }
-    .card { padding: 12px; }
-    .card-title { font-size: 13px; }
-    .data-table { font-size: 10px; min-width: 300px; }
-    .data-table th { padding: 6px 6px; font-size: 9px; }
-    .data-table td { padding: 6px 6px; }
-    .chan-table { font-size: 10px; }
-    .chan-table th, .chan-table td { padding: 6px 4px; }
-    .stat-label { font-size: 10px; }
-    .stat-value { font-size: 11px; max-width: 55%; }
-    .balance-grid { gap: 6px; }
-    h1 { font-size: 16px; }
-    h2 { font-size: 14px; }
-  }
-
-  @media (max-width: 400px) {
-    .wrap { padding: 8px 4px; }
-    .data-table { font-size: 9px; }
-    .data-table th { padding: 4px 3px; }
-    .data-table td { padding: 5px 3px; }
-  }
-
-  /* Ensure all tables scroll horizontally on small screens */
-  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; padding: 0 4px; }
-  .table-wrap table { min-width: max-content; }
 </style>
 </head>
 <body>
@@ -691,7 +663,7 @@ TEMPLATE = """
     <div class="card">
       <div class="card-title">Rebalance History</div>
       {% if data.rebalances %}
-      <div class="table-wrap"><table class="data-table">
+      <table class="data-table">
         <thead><tr><th>Time</th><th>Route</th><th>Amount</th><th>Fee</th><th></th><th>Source</th></tr></thead>
         <tbody>
           {% for r in data.rebalances %}
@@ -708,7 +680,6 @@ TEMPLATE = """
           {% endfor %}
         </tbody>
       </table>
-      </div>
       {% else %}
       <div class="empty-state">No rebalances yet</div>
       {% endif %}
@@ -717,7 +688,7 @@ TEMPLATE = """
     <div class="card">
       <div class="card-title">Recent Fee Updates</div>
       {% if data.fee_updates %}
-      <div class="table-wrap"><table class="data-table">
+      <table class="data-table">
         <thead><tr><th>Time</th><th>Peer</th><th>Old</th><th>New</th><th>Local</th></tr></thead>
         <tbody>
           {% for u in data.fee_updates %}
@@ -745,7 +716,7 @@ TEMPLATE = """
     <div class="card">
       <div class="card-title">Recent Alerts</div>
       {% if data.alerts %}
-      <div class="table-wrap"><table class="data-table">
+      <table class="data-table">
         <thead><tr><th>Time</th><th>Type</th><th>Message</th></tr></thead>
         <tbody>
           {% for a in data.alerts %}
