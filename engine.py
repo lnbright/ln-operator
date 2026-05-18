@@ -728,14 +728,19 @@ def sync_rebalances():
         log.error("sync_rebalances: could not get node pubkey")
         return 0
 
-    # Build a map of our channel IDs to aliases for display
+    # Build maps of our channel IDs to aliases, peer pubkeys, and open times
     channels = lnd_client.get_channels()
     channels = lnd_client.resolve_aliases(channels)
     chan_alias_map = {}
-    chan_peer_map = {}  # chan_id -> peer_pubkey
+    chan_peer_map = {}    # peer_pubkey -> chan_id
+    chan_open_ts = {}     # chan_id -> timestamp when channel opened
+    now = int(time.time())
     for ch in channels:
         chan_alias_map[ch["chan_id"]] = ch.get("peer_alias", ch["chan_id"][:12])
         chan_peer_map[ch.get("peer_pubkey", "")] = ch["chan_id"]
+        # Calculate channel open time from lifetime
+        lifetime = int(ch.get("lifetime", 0))
+        chan_open_ts[ch["chan_id"]] = now - lifetime if lifetime > 0 else 0
 
     # Fetch all payments from LND
     payments_data = lnd_client._get("/v1/payments?include_incomplete=false&max_payments=100")
@@ -788,6 +793,14 @@ def sync_rebalances():
             amount = int(pay.get("value_sat", 0))
             fee = int(pay.get("fee_sat", 0))
             ts = int(pay.get("creation_date", 0))
+
+            # Skip payments older than the target channel's open time
+            # Prevents attributing old rebalances to new channels with same peer
+            target_opened = chan_open_ts.get(target_chan_id, 0)
+            if ts < target_opened:
+                log.debug("sync_rebalances: skipping payment %s — older than channel open time",
+                          payment_hash[:16])
+                continue
 
             # Also check if an auto entry exists for the same amount/time
             # (our tool logged it but without payment_hash)
