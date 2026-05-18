@@ -355,10 +355,7 @@ TEMPLATE = """
 
   /* Ensure all tables scroll horizontally on small screens */
   .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .table-wrap table { min-width: max-content; }
 
-  /* Cards must contain their overflow — prevents tables from escaping the background */
-  .card { overflow: hidden; }
 </style>
 </head>
 <body>
