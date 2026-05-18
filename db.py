@@ -229,7 +229,7 @@ def save_fee_update(chan_id, peer_alias, old_ppm, new_ppm, old_base, new_base,
 
 def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
                            amount, fee_paid, success, failure_reason="",
-                           duration=0.0):
+                           duration=0.0, payment_hash=None):
     """Log a rebalance attempt."""
     fee_ppm = (fee_paid / amount * 1_000_000) if amount > 0 and fee_paid else 0
     with get_conn() as conn:
@@ -237,10 +237,11 @@ def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
             INSERT INTO rebalance_log
             (source_chan_id, target_chan_id, source_alias, target_alias,
              amount_sats, fee_paid_sats, fee_ppm, success, failure_reason,
-             duration_seconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             duration_seconds, payment_hash, triggered_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto')
         """, (source_chan, target_chan, source_alias, target_alias,
-              amount, fee_paid, fee_ppm, int(success), failure_reason, duration))
+              amount, fee_paid, fee_ppm, int(success), failure_reason, duration,
+              payment_hash))
 
 
 def save_forwarding_events(events: list[dict]):

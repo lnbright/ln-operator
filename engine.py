@@ -777,12 +777,39 @@ def sync_rebalances():
             target_peer_pubkey = second_last_hop.get("pub_key", "")
             target_chan_id = chan_peer_map.get(target_peer_pubkey, "")
 
+            # Skip if source and target are the same channel — not a real rebalance
+            # (e.g. a test self-payment that goes out and comes back on same peer)
+            if first_hop_chan == target_chan_id or not target_chan_id:
+                continue
+
             source_alias = chan_alias_map.get(first_hop_chan, first_hop_chan[:12])
             target_alias = chan_alias_map.get(target_chan_id, target_peer_pubkey[:12])
 
             amount = int(pay.get("value_sat", 0))
             fee = int(pay.get("fee_sat", 0))
             ts = int(pay.get("creation_date", 0))
+
+            # Also check if an auto entry exists for the same amount/time
+            # (our tool logged it but without payment_hash)
+            with db.get_conn() as conn:
+                existing = conn.execute("""
+                    SELECT id FROM rebalance_log
+                    WHERE source_chan_id = ? AND target_chan_id = ?
+                    AND amount_sats = ? AND abs(ts - ?) < 10
+                    AND success = 1
+                """, (first_hop_chan, target_chan_id, amount, ts)).fetchone()
+                if existing:
+                    # Update the existing auto entry with payment_hash instead of creating duplicate
+                    conn.execute("""
+                        UPDATE rebalance_log SET payment_hash = ?, fee_paid_sats = ?,
+                        fee_ppm = ? WHERE id = ?
+                    """, (payment_hash, fee,
+                          fee / amount * 1_000_000 if amount > 0 else 0,
+                          existing["id"]))
+                    log.info("sync_rebalances: updated existing auto entry %s→%s with payment hash",
+                             source_alias, target_alias)
+                    synced += 1
+                    break
 
             db.save_manual_rebalance(
                 source_chan_id=first_hop_chan,

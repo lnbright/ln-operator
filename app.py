@@ -209,13 +209,14 @@ def get_dashboard_data():
 
     data["rebalances"] = db_all("""
         SELECT ts, source_alias, target_alias, amount_sats,
-               fee_paid_sats, fee_ppm, success, failure_reason
-        FROM rebalance_log ORDER BY ts DESC LIMIT 20
+               fee_paid_sats, fee_ppm, success, failure_reason,
+               COALESCE(triggered_by, 'auto') as triggered_by
+        FROM rebalance_log ORDER BY ts DESC LIMIT 10
     """)
 
     data["fee_updates"] = db_all("""
         SELECT ts, peer_alias, old_fee_ppm, new_fee_ppm, local_ratio
-        FROM fee_updates ORDER BY ts DESC LIMIT 20
+        FROM fee_updates ORDER BY ts DESC LIMIT 10
     """)
 
     data["alerts"] = db_all("""
@@ -663,7 +664,7 @@ TEMPLATE = """
       <div class="card-title">Rebalance History</div>
       {% if data.rebalances %}
       <table class="data-table">
-        <thead><tr><th>Time</th><th>Route</th><th>Amount</th><th>Fee</th><th></th></tr></thead>
+        <thead><tr><th>Time</th><th>Route</th><th>Amount</th><th>Fee</th><th></th><th>Source</th></tr></thead>
         <tbody>
           {% for r in data.rebalances %}
           <tr>
@@ -674,6 +675,7 @@ TEMPLATE = """
               {% if r.success %}-{{ "{:,}".format(r.fee_paid_sats) }} <span style="color:var(--muted)">({{ r.fee_ppm | int }}ppm)</span>{% else %}—{% endif %}
             </td>
             <td>{% if r.success %}<span class="badge badge-green">✓</span>{% else %}<span class="badge badge-red" title="{{ r.failure_reason }}">✗</span>{% endif %}</td>
+            <td>{% if r.triggered_by == 'manual' %}<span class="badge badge-blue">manual</span>{% else %}<span class="badge badge-muted">auto</span>{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>
