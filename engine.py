@@ -709,3 +709,96 @@ def sync_forwarding_history():
         log.info("sync_routing: no new events since last run (offset %d)", last_offset)
 
     return total_synced
+
+
+def sync_rebalances():
+    """Sync circular rebalance payments from LND into rebalance_log.
+
+    Identifies self-payments by checking if destination == our pubkey.
+    For each self-payment that succeeded, extracts the outgoing channel
+    (first hop) and incoming channel (last hop's peer) and logs it.
+    Skips payments already in the DB (by payment_hash).
+
+    This captures manually-executed rebalances done via lncli payinvoice
+    that bypassed our automated rebalancer.
+    """
+    my_info = lnd_client.get_info()
+    my_pubkey = my_info.get("identity_pubkey", "")
+    if not my_pubkey:
+        log.error("sync_rebalances: could not get node pubkey")
+        return 0
+
+    # Build a map of our channel IDs to aliases for display
+    channels = lnd_client.get_channels()
+    channels = lnd_client.resolve_aliases(channels)
+    chan_alias_map = {}
+    chan_peer_map = {}  # chan_id -> peer_pubkey
+    for ch in channels:
+        chan_alias_map[ch["chan_id"]] = ch.get("peer_alias", ch["chan_id"][:12])
+        chan_peer_map[ch.get("peer_pubkey", "")] = ch["chan_id"]
+
+    # Fetch all payments from LND
+    payments_data = lnd_client._get("/v1/payments?include_incomplete=false&max_payments=100")
+    payments = payments_data.get("payments", []) if payments_data else []
+
+    synced = 0
+    for pay in payments:
+        if pay.get("status") != "SUCCEEDED":
+            continue
+
+        payment_hash = pay.get("payment_hash", "")
+        if not payment_hash:
+            continue
+
+        # Skip if already in DB
+        if db.rebalance_exists_by_hash(payment_hash):
+            continue
+
+        # Check each HTLC for self-payment pattern
+        for htlc in pay.get("htlcs", []):
+            if htlc.get("status") != "SUCCEEDED":
+                continue
+
+            route = htlc.get("route", {})
+            hops = route.get("hops", [])
+            if len(hops) < 2:
+                continue
+
+            # Last hop destination should be our pubkey (self-payment)
+            last_hop = hops[-1]
+            if last_hop.get("pub_key") != my_pubkey:
+                continue
+
+            # This is a circular self-payment — extract channel info
+            # First hop: outgoing channel (source)
+            first_hop_chan = hops[0].get("chan_id", "")
+            # Second-to-last hop: the peer whose channel received the payment (target)
+            second_last_hop = hops[-2]
+            target_peer_pubkey = second_last_hop.get("pub_key", "")
+            target_chan_id = chan_peer_map.get(target_peer_pubkey, "")
+
+            source_alias = chan_alias_map.get(first_hop_chan, first_hop_chan[:12])
+            target_alias = chan_alias_map.get(target_chan_id, target_peer_pubkey[:12])
+
+            amount = int(pay.get("value_sat", 0))
+            fee = int(pay.get("fee_sat", 0))
+            ts = int(pay.get("creation_date", 0))
+
+            db.save_manual_rebalance(
+                source_chan_id=first_hop_chan,
+                target_chan_id=target_chan_id,
+                source_alias=source_alias,
+                target_alias=target_alias,
+                amount_sats=amount,
+                fee_paid_sats=fee,
+                payment_hash=payment_hash,
+                ts=ts,
+            )
+            synced += 1
+            log.info("sync_rebalances: found manual rebalance %s→%s %s sats (fee %d sats)",
+                     source_alias, target_alias, f"{amount:,}", fee)
+            break  # one HTLC per payment is enough
+
+    if synced > 0:
+        log.info("sync_rebalances: synced %d manual rebalance(s) from LND", synced)
+    return synced

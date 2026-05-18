@@ -205,6 +205,52 @@ def cmd_plan(args):
              "breakdown": best_breakdown, "fee_rate": fee_rate}, ""
         )
 
+    # ── Step 6: Offer to generate a deposit address ───────────────
+    print(f"\n  {'─'*45}")
+    try:
+        answer = input("  Generate a deposit address to top up wallet? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = "n"
+
+    if answer == "y":
+        try:
+            addr_type_input = input("  Address type: [1] Native segwit p2wkh  [2] Taproot p2tr  (default: 1) ").strip()
+        except (EOFError, KeyboardInterrupt):
+            addr_type_input = "1"
+
+        if addr_type_input == "2":
+            addr_type = "p2tr"
+            addr_label = "taproot"
+        else:
+            addr_type = "p2wkh"
+            addr_label = "native segwit"
+
+        address = lnd_client.new_address(addr_type)
+        if address:
+            print(f"\n  Deposit address ({addr_label}):")
+            print(f"  {address}\n")
+
+            # Generate QR code using only stdlib — print as ASCII blocks in terminal
+            try:
+                import urllib.request
+                import base64
+                # Use a QR code terminal renderer via qrencode if available
+                import subprocess
+                result = subprocess.run(
+                    ["qrencode", "-t", "UTF8", "-o", "-", address],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    print(result.stdout)
+                else:
+                    raise FileNotFoundError
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                # qrencode not available — show manual QR options
+                print(f"  Scan on Amboss:  https://amboss.space/node/{address}")
+                print(f"  Or install qrencode for terminal QR: sudo apt install qrencode")
+        else:
+            print("  Error: could not generate address from LND")
+
 
 
 def cmd_adjust_fees(args):

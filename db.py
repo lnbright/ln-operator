@@ -27,6 +27,16 @@ from contextlib import contextmanager
 from config import DB_PATH
 
 
+def _migrate_rebalance_log():
+    """Add payment_hash and triggered_by columns if missing (migration)."""
+    with get_conn() as conn:
+        cols = [row["name"] for row in conn.execute("PRAGMA table_info(rebalance_log)")]
+        if "payment_hash" not in cols:
+            conn.execute("ALTER TABLE rebalance_log ADD COLUMN payment_hash TEXT")
+        if "triggered_by" not in cols:
+            conn.execute("ALTER TABLE rebalance_log ADD COLUMN triggered_by TEXT DEFAULT 'auto'")
+
+
 def init_db():
     """Create all tables if they don't exist."""
     with get_conn() as conn:
@@ -99,7 +109,9 @@ CREATE TABLE IF NOT EXISTS rebalance_log (
     fee_ppm          REAL,
     success          INTEGER NOT NULL DEFAULT 0,
     failure_reason   TEXT,
-    duration_seconds REAL
+    duration_seconds REAL,
+    payment_hash     TEXT,
+    triggered_by     TEXT DEFAULT 'auto'
 );
 
 -- ─── Forwarding events (routing fees earned) ────────────────────
@@ -437,6 +449,31 @@ def get_channel_earned_ppm(chan_id, days=30):
     if row["total_routed"] == 0:
         return 0.0
     return row["total_fees"] / row["total_routed"] * 1_000_000
+
+
+def rebalance_exists_by_hash(payment_hash):
+    """Check if a rebalance with this payment hash is already in the log."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM rebalance_log WHERE payment_hash = ?",
+            (payment_hash,)
+        ).fetchone()
+        return row is not None
+
+
+def save_manual_rebalance(source_chan_id, target_chan_id, source_alias, target_alias,
+                          amount_sats, fee_paid_sats, payment_hash, ts):
+    """Save a manually-executed rebalance discovered from LND payments."""
+    with get_conn() as conn:
+        fee_ppm = fee_paid_sats / amount_sats * 1_000_000 if amount_sats > 0 else 0
+        conn.execute("""
+            INSERT INTO rebalance_log
+            (ts, source_chan_id, target_chan_id, source_alias, target_alias,
+             amount_sats, fee_paid_sats, fee_ppm, success, failure_reason,
+             duration_seconds, payment_hash, triggered_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, 'manual')
+        """, (ts, source_chan_id, target_chan_id, source_alias, target_alias,
+              amount_sats, fee_paid_sats, fee_ppm, payment_hash))
 
 
 def get_repeated_rebalance_failures(chan_id, min_failures=3):

@@ -375,3 +375,15 @@ def resolve_aliases(channels):
                 cache[pk] = pk[:12]
         ch["peer_alias"] = cache[pk]
     return channels
+
+
+def new_address(addr_type="p2wkh"):
+    """Generate a new on-chain address from LND.
+
+    addr_type: p2wkh (native segwit bech32, recommended) or np2wkh (wrapped segwit)
+    Returns the address string or None on failure.
+    """
+    type_map = {"p2wkh": 0, "np2wkh": 1, "p2tr": 4}
+    addr_int = type_map.get(addr_type, 0)
+    result = _post("/v1/newaddress", {"type": addr_int})
+    return result.get("address") if result else None
