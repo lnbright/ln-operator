@@ -69,9 +69,9 @@ MAX_CHANNEL_SIZE_SATS = 16_777_215       # LND wumbo channel max without additio
 
 # Peer scoring weights (must sum to 1.0)
 PEER_SCORE_WEIGHTS = {
-    "diversity":       0.40,  # % of their peers new to you — most important for a small node
-    "centrality":      0.30,  # proxy for network importance (channels + capacity normalised)
-    "low_fee":         0.30,  # lower avg outbound fee = cheaper routing & rebalancing
+    "diversity":       0.50,  # % of their peers new to you — most important for a small node
+    "centrality":      0.50,  # proxy for network importance (channels + capacity normalised)
+    # Note: fee rate is displayed but not scored — local graph fee data is too unreliable
 }
 
 # ─── External data sources ───────────────────────────────────────

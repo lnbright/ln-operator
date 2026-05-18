@@ -604,8 +604,6 @@ def _score_candidates(candidates, state):
     # Normalisation maximums
     max_channels = max(c.get("channel_count", 0) for c in candidates) or 1
     max_capacity = max(c.get("capacity", 0) for c in candidates) or 1
-    max_fee_ppm  = max(c.get("avg_fee_ppm", 0) for c in candidates) or 1
-
     for c in candidates:
         scores = {}
 
@@ -624,15 +622,6 @@ def _score_candidates(candidates, state):
         else:
             scores["diversity"] = 0.5  # placeholder until graph enrichment runs
 
-        # Low fee — inverted: lower avg outbound fee = higher score
-        # A 0 ppm node scores 1.0, expensive nodes score lower
-        # Using inverted log scale so the penalty is gradual, not cliff-like
-        fee = c.get("avg_fee_ppm", 0)
-        if max_fee_ppm > 0 and fee > 0:
-            scores["low_fee"] = 1.0 - (math.log(1 + fee) / math.log(1 + max_fee_ppm))
-        else:
-            scores["low_fee"] = 1.0  # no fee data or 0 fee = best score
-
         # Penalise previously unreliable peers from DB history
         peer_hist = db.get_peer_history(c["pubkey"])
         if peer_hist:
@@ -641,12 +630,12 @@ def _score_candidates(candidates, state):
                     scores["centrality"] *= 0.5
                     c["history_note"] = f"Previously closed: {record['reason']}"
 
-        # Weighted final score
+        # Weighted final score — two metrics only
+        # Fee rate is displayed but not scored (local graph data too unreliable)
         w = PEER_SCORE_WEIGHTS
         c["score"] = round(
             scores["diversity"]   * w["diversity"] +
-            scores["centrality"]  * w["centrality"] +
-            scores["low_fee"]     * w["low_fee"],
+            scores["centrality"]  * w["centrality"],
             4
         )
         c["score_breakdown"] = scores
