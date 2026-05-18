@@ -140,34 +140,48 @@ def cmd_plan(args):
         candidates = advisor._enrich_with_1ml_aliases(candidates)
         scored = advisor._score_candidates(candidates, state)
 
-        # Apply portfolio strategy — same logic as allocate_budget
+        # Apply portfolio strategy — show 10 from recommended tier + 10 from next tier
         portfolio = advisor._classify_existing_portfolio(state["channels"], scored)
         hub_count = portfolio["hub_count"]
-        hubs, mid_tier = advisor._split_candidates_by_tier(scored)
+        hubs, mid_tier, small = advisor._split_candidates_by_tier(scored)
 
         if hub_count == 0:
-            pool = hubs[:10]
-            strategy = "no hub connections yet — showing top hubs"
-        elif hub_count >= 2:
-            pool = mid_tier[:10]
-            strategy = f"{hub_count} hubs already — showing mid-tier nodes for diversification"
+            primary_pool = hubs[:10]
+            secondary_pool = mid_tier[:10]
+            primary_label = "Recommended: hubs (build routing backbone first)"
+            secondary_label = "Also consider: mid-tier nodes"
+        elif hub_count == 1:
+            primary_pool = hubs[:10]
+            secondary_pool = mid_tier[:10]
+            primary_label = "Recommended: hubs (1 hub — add more for redundancy)"
+            secondary_label = "Also consider: mid-tier nodes"
         else:
-            # 1 hub — show 2 hubs + 8 mid-tier
-            pool = (hubs[:2] + mid_tier[:8])[:10]
-            strategy = f"1 hub already — showing 2 hubs + mid-tier nodes"
+            primary_pool = mid_tier[:10]
+            secondary_pool = small[:10]
+            primary_label = f"Recommended: mid-tier ({hub_count} hubs already — diversify)"
+            secondary_label = "Also consider: smaller nodes (rank 251-500)"
 
-        log.info("plan candidates: %s", strategy)
-        print(f"  Top 10 candidates ({strategy}):\n")
+        log.info("plan candidates: hub_count=%d, showing %d primary + %d secondary",
+                 hub_count, len(primary_pool), len(secondary_pool))
 
-        for i, c in enumerate(pool, 1):
-            tier = c.get("tier_hint", "?")
-            avg = c.get("avg_channel_size", 0)
-            avg_str = f"{avg//1_000_000}M" if avg >= 1_000_000 else f"{avg//1_000}k" if avg >= 1_000 else str(avg)
-            print(f"  {i:2}. {c['alias'][:28]:<28} | score {c['score']:.3f} "
-                  f"| rank {c.get('network_rank','?'):>3} "
-                  f"| {c['channel_count']:>4} ch "
-                  f"| avg {avg_str:>5} "
-                  f"| {tier}")
+        def _print_candidates(pool, label):
+            print(f"  {label}:\n")
+            for i, c in enumerate(pool, 1):
+                tier = c.get("tier_hint", "?")
+                avg = c.get("avg_channel_size", 0)
+                avg_str = f"{avg//1_000_000}M" if avg >= 1_000_000 else f"{avg//1_000}k" if avg >= 1_000 else str(avg)
+                fee = c.get("avg_fee_ppm", 0)
+                print(f"  {i:2}. {c['alias'][:26]:<26} | score {c['score']:.3f} "
+                      f"| rank {c.get('network_rank','?'):>3} "
+                      f"| {c['channel_count']:>4} ch "
+                      f"| avg {avg_str:>5} "
+                      f"| fee {fee:>4}ppm "
+                      f"| {tier}")
+
+        _print_candidates(primary_pool, primary_label)
+        if secondary_pool:
+            print()
+            _print_candidates(secondary_pool, secondary_label)
     except Exception as e:
         log.error("could not fetch candidates: %s", e)
         print(f"  Error fetching candidates: {e}")

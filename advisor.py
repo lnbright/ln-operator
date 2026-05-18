@@ -367,16 +367,24 @@ def _fetch_candidates_from_graph(state):
                     "channel_count": 0,
                     "source": "graph",
                     "last_update": node.get("last_update", 0),
+                    "fee_ppm_sum": 0,      # sum of outbound fee rates across channels
+                    "fee_ppm_count": 0,    # number of channels with fee data
                 }
 
-        # Count channels and sum capacity from edges
+        # Count channels, sum capacity, and collect fee rates from edges
         for edge in edges_raw:
             cap = int(edge.get("capacity", 0))
-            for pk_field in ["node1_pub", "node2_pub"]:
+            for pk_field, policy_field in [("node1_pub", "node1_policy"), ("node2_pub", "node2_policy")]:
                 pk = edge.get(pk_field, "")
                 if pk in node_map:
                     node_map[pk]["capacity"] += cap
                     node_map[pk]["channel_count"] += 1
+                    # Collect outbound fee rate for this node's side of the channel
+                    policy = edge.get(policy_field) or {}
+                    fee_rate = int(policy.get("fee_rate_milli_msat", 0))
+                    if policy:  # only count if policy exists
+                        node_map[pk]["fee_ppm_sum"] += fee_rate
+                        node_map[pk]["fee_ppm_count"] += 1
 
         # Filter out nodes with zero channels (likely inactive/phantom nodes)
         active_nodes = [n for n in node_map.values() if n["channel_count"] > 0]
@@ -388,10 +396,15 @@ def _fetch_candidates_from_graph(state):
                  len(nodes_raw), len(active_nodes), len(state["existing_peers"]))
 
         # Assign network rank and tier based on channel count rank
-        # Top 50 by channels = hubs, 51-250 = mid-tier, rest excluded
-        for i, node in enumerate(active_nodes[:250]):
+        # Top 50 = hubs, 51-250 = mid-tier, 251-500 = small
+        for i, node in enumerate(active_nodes[:500]):
             rank = i + 1
-            tier = "hub" if rank <= 50 else "mid-tier"
+            if rank <= 50:
+                tier = "hub"
+            elif rank <= 250:
+                tier = "mid-tier"
+            else:
+                tier = "small"
             node["network_rank"] = rank
             node["tier_hint"] = tier
             # avg_channel_size is a quality metric — larger avg = more serious routing partner
@@ -401,11 +414,17 @@ def _fetch_candidates_from_graph(state):
                 node["capacity"] // node["channel_count"]
                 if node["channel_count"] > 0 else 0
             )
+            # Average outbound fee rate — lower is better for routing through them
+            node["avg_fee_ppm"] = (
+                node["fee_ppm_sum"] // node["fee_ppm_count"]
+                if node["fee_ppm_count"] > 0 else 0
+            )
             candidates.append(node)
 
-        log.info("graph candidates: %d hubs (rank 1-50), %d mid-tier (rank 51-250)",
+        log.info("graph candidates: %d hubs (rank 1-50), %d mid-tier (rank 51-250), %d small (rank 251-500)",
                  sum(1 for c in candidates if c["tier_hint"] == "hub"),
-                 sum(1 for c in candidates if c["tier_hint"] == "mid-tier"))
+                 sum(1 for c in candidates if c["tier_hint"] == "mid-tier"),
+                 sum(1 for c in candidates if c["tier_hint"] == "small"))
 
     except Exception as e:
         log.warning("graph candidate fetch failed: %s", e)
@@ -580,50 +599,51 @@ def _score_candidates(candidates, state):
     max_channels = max(c["channel_count"] for c in candidates) if candidates else 1
 
     # Normalisation maximums
-    max_channels     = max(c.get("channel_count", 0) for c in candidates) or 1
-    max_avg_chan_size = max(c.get("avg_channel_size", 0) for c in candidates) or 1
-    max_capacity     = max(c.get("capacity", 0) for c in candidates) or 1
+    max_channels = max(c.get("channel_count", 0) for c in candidates) or 1
+    max_capacity = max(c.get("capacity", 0) for c in candidates) or 1
+    max_fee_ppm  = max(c.get("avg_fee_ppm", 0) for c in candidates) or 1
 
     for c in candidates:
         scores = {}
 
-        # Channel count score (0-1, log scale — reliable from gossip)
-        ch = c.get("channel_count", 0)
-        scores["channels"] = math.log(1 + ch) / math.log(1 + max_channels) if ch > 0 else 0
-
-        # Average channel size score (0-1, log scale — quality metric)
-        # Larger avg size = more serious routing partner, handles bigger payments
-        avg = c.get("avg_channel_size", 0)
-        scores["avg_chan_size"] = (
-            math.log(1 + avg) / math.log(1 + max_avg_chan_size) if avg > 0 else 0
-        )
-
         # Centrality proxy — combination of channels and capacity normalised
+        # Captures network importance: well-connected, high-capacity nodes score high
+        ch = c.get("channel_count", 0)
         cap = c.get("capacity", 0)
+        ch_score = math.log(1 + ch) / math.log(1 + max_channels) if ch > 0 else 0
         cap_score = math.log(1 + cap) / math.log(1 + max_capacity) if cap > 0 else 0
-        scores["centrality"] = (scores["channels"] + cap_score) / 2
+        scores["centrality"] = (ch_score + cap_score) / 2
 
-        # Diversity — use computed score from graph enrichment if available
+        # Diversity — what % of their peers are new to you
+        # Most important metric for a small node — maximises your reach
         if c.get("diversity_score_computed") is not None:
             scores["diversity"] = c["diversity_score_computed"]
         else:
             scores["diversity"] = 0.5  # placeholder until graph enrichment runs
+
+        # Low fee — inverted: lower avg outbound fee = higher score
+        # A 0 ppm node scores 1.0, expensive nodes score lower
+        # Using inverted log scale so the penalty is gradual, not cliff-like
+        fee = c.get("avg_fee_ppm", 0)
+        if max_fee_ppm > 0 and fee > 0:
+            scores["low_fee"] = 1.0 - (math.log(1 + fee) / math.log(1 + max_fee_ppm))
+        else:
+            scores["low_fee"] = 1.0  # no fee data or 0 fee = best score
 
         # Penalise previously unreliable peers from DB history
         peer_hist = db.get_peer_history(c["pubkey"])
         if peer_hist:
             for record in peer_hist:
                 if record["action"] == "closed" and "unreliable" in (record["reason"] or ""):
-                    scores["avg_chan_size"] *= 0.5  # penalise quality score
+                    scores["centrality"] *= 0.5
                     c["history_note"] = f"Previously closed: {record['reason']}"
 
         # Weighted final score
         w = PEER_SCORE_WEIGHTS
         c["score"] = round(
-            scores["channels"]     * w["channels"] +
-            scores["avg_chan_size"] * w["avg_chan_size"] +
-            scores["centrality"]   * w["centrality"] +
-            scores["diversity"]    * w["diversity"],
+            scores["diversity"]   * w["diversity"] +
+            scores["centrality"]  * w["centrality"] +
+            scores["low_fee"]     * w["low_fee"],
             4
         )
         c["score_breakdown"] = scores
