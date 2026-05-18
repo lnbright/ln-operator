@@ -309,7 +309,7 @@ TEMPLATE = """
   .bar-healthy   { background: linear-gradient(90deg, var(--accent), var(--accent2)); }
 
   /* Generic data table */
-  .data-table { width: 100%; border-collapse: collapse; font-size: 11px; min-width: 400px; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
   .data-table th { text-align: left; padding: 8px 12px; color: var(--muted); font-weight: 400; border-bottom: 1px solid var(--border); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
   .data-table td { padding: 10px 12px; border-bottom: 1px solid rgba(30,30,46,0.5); vertical-align: middle; }
   .data-table tr:last-child td { border-bottom: none; }
@@ -354,8 +354,11 @@ TEMPLATE = """
   }
 
   /* Ensure all tables scroll horizontally on small screens */
-  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; padding: 0 4px; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .table-wrap table { min-width: max-content; }
+
+  /* Cards must contain their overflow — prevents tables from escaping the background */
+  .card { overflow: hidden; }
 </style>
 </head>
 <body>
