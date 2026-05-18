@@ -46,7 +46,7 @@ REBALANCE_HARD_CAP_PPM = 1000         # absolute ceiling — never pay more than
 REBALANCE_REVENUE_RATIO = 0.5         # for proven channels: max fee = earned_ppm × this ratio
 REBALANCE_DISCOVERY_PPM = 1000        # for new/unproven channels: budget to discover if they route
 REBALANCE_DEADWEIGHT_PPM = 150        # for channels that had a chance and earned nothing
-REBALANCE_DISCOVERY_DAYS = 30         # how many days of balanced time before judging a channel
+REBALANCE_DISCOVERY_DAYS = 15         # how many days of balanced time before judging a channel
 REBALANCE_BALANCED_RATIO = 0.30       # channel counts as "balanced" when local ratio is above this
 REBALANCE_BALANCED_RATIO_HIGH = 0.70  # ... and below this
 
