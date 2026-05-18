@@ -41,6 +41,7 @@ def init_db():
     """Create all tables if they don't exist."""
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+    _migrate_rebalance_log()
 
 
 @contextmanager
@@ -520,3 +521,9 @@ def set_sync_state(key, value):
 if __name__ == "__main__":
     init_db()
     print(f"Database initialised at {DB_PATH}")
+else:
+    # Run migration on import to add new columns if missing
+    try:
+        _migrate_rebalance_log()
+    except Exception:
+        pass  # DB may not exist yet
