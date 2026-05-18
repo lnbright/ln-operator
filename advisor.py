@@ -780,12 +780,12 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
     all_channels = state.get("channels", [])
     portfolio = _classify_existing_portfolio(all_channels, candidates)
     hub_count = portfolio["hub_count"]
-    hubs, mid_tier = _split_candidates_by_tier(candidates)
+    hubs, mid_tier, small = _split_candidates_by_tier(candidates)
 
     log.info("portfolio: %d hub connection(s), %d mid-tier connection(s)",
              hub_count, portfolio["mid_tier_count"])
-    log.info("candidates: %d hub(s), %d mid-tier available",
-             len(hubs), len(mid_tier))
+    log.info("candidates: %d hub(s), %d mid-tier, %d small available",
+             len(hubs), len(mid_tier), len(small))
 
     # ── Step 2: Upsize undersized channels ────────────────────────
     for ch in channel_analysis["undersized"]:
