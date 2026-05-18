@@ -538,7 +538,7 @@ def cmd_rebalance_channels(args):
 
 
 def cmd_sync_routing(args):
-    """Sync routing events from LND into the local database."""
+    """Sync forwarding events and manual rebalances from LND into the local database."""
     log = get_logger("main")
     log.info("sync_routing: starting")
     print("\n⚡ LN Operator — Sync Routing History")
@@ -546,6 +546,12 @@ def cmd_sync_routing(args):
 
     num_events = engine.sync_forwarding_history()
     print(f"  Synced {num_events} new forwarding events")
+
+    num_rebal = engine.sync_rebalances()
+    if num_rebal > 0:
+        print(f"  Synced {num_rebal} manual rebalance(s) from LND")
+    else:
+        print(f"  No new manual rebalances found")
     return num_events
 
 
@@ -621,6 +627,9 @@ def cmd_run(args):
     print("\n── Step 3: Sync Routing ──")
     num_events = engine.sync_forwarding_history()
     print(f"  {num_events} new routing event(s) synced")
+    num_rebal = engine.sync_rebalances()
+    if num_rebal > 0:
+        print(f"  {num_rebal} manual rebalance(s) synced from LND")
 
     # Step 4: Health check + alerts
     print("\n── Step 4: Health Check ──")
