@@ -108,8 +108,8 @@ def get_channel_perf(chan_id, days30):
     reb30 = db_one("""
         SELECT COALESCE(SUM(fee_paid_sats),0) as reb_cost
         FROM rebalance_log
-        WHERE (source_chan_id=? OR target_chan_id=?) AND ts>? AND success=1
-    """, (chan_id, chan_id, days30))
+        WHERE target_chan_id=? AND ts>? AND success=1
+    """, (chan_id, days30))
 
     # Lifetime stats (all-time)
     rev_all = db_one("""
@@ -120,8 +120,8 @@ def get_channel_perf(chan_id, days30):
     reb_all = db_one("""
         SELECT COALESCE(SUM(fee_paid_sats),0) as reb_cost
         FROM rebalance_log
-        WHERE (source_chan_id=? OR target_chan_id=?) AND success=1
-    """, (chan_id, chan_id))
+        WHERE target_chan_id=? AND success=1
+    """, (chan_id,))
 
     mat = db_one("SELECT balanced_seconds FROM channel_maturity WHERE chan_id=?", (chan_id,))
 
