@@ -711,36 +711,44 @@ def _classify_existing_portfolio(channels, candidates):
 
 
 def _split_candidates_by_tier(candidates):
-    """Split candidates into hub (network rank 1-50) and mid-tier (rank 51-200).
+    """Split scored candidates into hub, mid-tier, and small lists.
 
-    Uses network_rank from 1ML if available (rank by capacity on the network).
-    Falls back to sorting by channel count if rank not set (e.g. graph-sourced nodes).
-    Returns (hubs, mid_tier) lists, each sorted by score descending.
+    hub      = rank 1-50   (500+ channels)
+    mid-tier = rank 51-250 (20-499 channels)
+    small    = rank 251-500
+
+    Returns (hubs, mid_tier, small) lists, each sorted by score descending.
     """
     hubs = []
     mid_tier = []
+    small = []
 
     for c in candidates:
-        rank = c.get("network_rank")
         tier_hint = c.get("tier_hint")
 
-        if tier_hint == "hub" or (rank is not None and rank <= 50):
+        if tier_hint == "hub":
             hubs.append(c)
-        elif tier_hint == "mid-tier" or (rank is not None and rank > 50):
+        elif tier_hint == "mid-tier":
             mid_tier.append(c)
+        elif tier_hint == "small":
+            small.append(c)
         else:
-            # No rank info — classify by channel count
+            # No tier hint — classify by channel count
             if c.get("channel_count", 0) >= HUB_CHANNEL_THRESHOLD:
                 hubs.append(c)
-            else:
+            elif c.get("channel_count", 0) >= 20:
                 mid_tier.append(c)
+            else:
+                small.append(c)
 
     # Within each tier, sort by score
     hubs.sort(key=lambda c: c["score"], reverse=True)
     mid_tier.sort(key=lambda c: c["score"], reverse=True)
+    small.sort(key=lambda c: c["score"], reverse=True)
 
-    log.debug("tier split: %d hubs, %d mid-tier candidates", len(hubs), len(mid_tier))
-    return hubs, mid_tier
+    log.debug("tier split: %d hubs, %d mid-tier, %d small candidates",
+              len(hubs), len(mid_tier), len(small))
+    return hubs, mid_tier, small
 
 
 def _make_open_action(candidate, size, reason, priority=2):
