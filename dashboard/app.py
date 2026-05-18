@@ -95,33 +95,55 @@ def db_all(sql, params=()):
         return []
 
 def get_channel_perf(chan_id, days30):
-    """Get 30-day performance stats for a channel from the operator DB."""
-    rev = db_one("""
+    """Get performance stats for a channel from the operator DB.
+
+    Returns both 30-day and lifetime (all-time) revenue, cost, and net.
+    """
+    # 30-day stats
+    rev30 = db_one("""
         SELECT COALESCE(SUM(fee_earned_sats),0) as fee_rev, COUNT(*) as forwards
         FROM forwarding_log
         WHERE (chan_in=? OR chan_out=?) AND ts>?
     """, (chan_id, chan_id, days30))
-    reb = db_one("""
+    reb30 = db_one("""
         SELECT COALESCE(SUM(fee_paid_sats),0) as reb_cost
         FROM rebalance_log
         WHERE (source_chan_id=? OR target_chan_id=?) AND ts>? AND success=1
     """, (chan_id, chan_id, days30))
+
+    # Lifetime stats (all-time)
+    rev_all = db_one("""
+        SELECT COALESCE(SUM(fee_earned_sats),0) as fee_rev, COUNT(*) as forwards
+        FROM forwarding_log
+        WHERE (chan_in=? OR chan_out=?)
+    """, (chan_id, chan_id))
+    reb_all = db_one("""
+        SELECT COALESCE(SUM(fee_paid_sats),0) as reb_cost
+        FROM rebalance_log
+        WHERE (source_chan_id=? OR target_chan_id=?) AND success=1
+    """, (chan_id, chan_id))
+
     mat = db_one("SELECT balanced_seconds FROM channel_maturity WHERE chan_id=?", (chan_id,))
 
-    fee_rev  = rev["fee_rev"] if rev else 0
-    reb_cost = reb["reb_cost"] if reb else 0
+    fee_rev_30  = rev30["fee_rev"] if rev30 else 0
+    reb_cost_30 = reb30["reb_cost"] if reb30 else 0
+    fee_rev_all  = rev_all["fee_rev"] if rev_all else 0
+    reb_cost_all = reb_all["reb_cost"] if reb_all else 0
     bal_days = (mat["balanced_seconds"] / 86400) if mat else 0
 
     if bal_days >= 30:
-        tier = "proven" if fee_rev > 0 else "deadweight"
+        tier = "proven" if fee_rev_30 > 0 else "deadweight"
     else:
         tier = "discovery"
 
     return {
-        "fee_rev":  fee_rev,
-        "reb_cost": reb_cost,
-        "net":      fee_rev - reb_cost,
-        "forwards": rev["forwards"] if rev else 0,
+        "fee_rev":  fee_rev_30,
+        "reb_cost": reb_cost_30,
+        "net":      fee_rev_30 - reb_cost_30,
+        "fee_rev_all":  fee_rev_all,
+        "reb_cost_all": reb_cost_all,
+        "net_all":      fee_rev_all - reb_cost_all,
+        "forwards": rev30["forwards"] if rev30 else 0,
         "bal_days": round(bal_days, 1),
         "tier":     tier,
     }
@@ -188,12 +210,12 @@ def get_dashboard_data():
     data["rebalances"] = db_all("""
         SELECT ts, source_alias, target_alias, amount_sats,
                fee_paid_sats, fee_ppm, success, failure_reason
-        FROM rebalance_log ORDER BY ts DESC LIMIT 20
+        FROM rebalance_log ORDER BY ts DESC LIMIT 10
     """)
 
     data["fee_updates"] = db_all("""
         SELECT ts, peer_alias, old_fee_ppm, new_fee_ppm, local_ratio
-        FROM fee_updates ORDER BY ts DESC LIMIT 20
+        FROM fee_updates ORDER BY ts DESC LIMIT 10
     """)
 
     data["alerts"] = db_all("""
@@ -477,6 +499,7 @@ TEMPLATE = """
             <th>Revenue 30d</th>
             <th>Rebal Cost 30d</th>
             <th>Net 30d</th>
+            <th>Net Lifetime</th>
             <th>Tier</th>
             <th>Status</th>
           </tr>
@@ -513,6 +536,9 @@ TEMPLATE = """
             </td>
             <td class="{% if perf.net > 0 %}amount-positive{% elif perf.net < 0 %}amount-negative{% else %}amount-muted{% endif %}">
               {% if perf.net != 0 %}{% if perf.net > 0 %}+{% endif %}{{ "{:,}".format(perf.net) }}{% else %}—{% endif %}
+            </td>
+            <td class="{% if perf.net_all > 0 %}amount-positive{% elif perf.net_all < 0 %}amount-negative{% else %}amount-muted{% endif %}">
+              {% if perf.net_all != 0 %}{% if perf.net_all > 0 %}+{% endif %}{{ "{:,}".format(perf.net_all) }}{% else %}—{% endif %}
             </td>
             <td>
               {% if perf.tier == 'proven' %}<span class="badge badge-green">proven</span>
