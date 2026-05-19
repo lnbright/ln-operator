@@ -84,6 +84,7 @@ def get_channels():
 
         result.append({
             "chan_id": ch.get("chan_id", ""),
+            "scid": ch.get("scid", ""),
             "channel_point": ch.get("channel_point", ""),
             "peer_pubkey": ch.get("remote_pubkey", ""),
             "peer_alias": "",  # filled in later via get_node_info

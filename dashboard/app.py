@@ -171,9 +171,11 @@ def get_dashboard_data():
     channels_enriched = []
     for ch in raw_channels:
         chan_id   = ch.get("chan_id", "")
+        scid     = ch.get("scid", "")
         capacity  = int(ch.get("capacity", 0))
         local     = int(ch.get("local_balance", 0))
-        ch["perf"]      = get_channel_perf(chan_id, days30)
+        # Use scid for DB queries — forwarding_log and rebalance_log store numeric scid
+        ch["perf"]      = get_channel_perf(scid, days30)
         ch["local_pct"] = round(local / capacity * 100, 1) if capacity > 0 else 0
         channels_enriched.append(ch)
     data["channels"] = channels_enriched
