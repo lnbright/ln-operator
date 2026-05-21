@@ -38,8 +38,8 @@ DB_PATH = os.getenv("LN_OPERATOR_DB", os.path.join(os.path.dirname(__file__), "l
 #   ppm = MIN + (MAX - MIN) × (1 - local_ratio)
 # Full channel → MIN (attract routing). Depleted → MAX (protect liquidity).
 FEE_BASE_MSAT = 0       # base fee per HTLC (0 = best practice)
-FEE_MIN_PPM = 50         # floor: channel is full, want to drain
-FEE_MAX_PPM = 500        # ceiling: channel is depleted, protect what's left
+FEE_MIN_PPM = 25         # floor: channel is full, want to drain
+FEE_MAX_PPM = 250        # ceiling: channel is depleted, protect what's left
 
 
 # ─── Rebalancing Thresholds ──────────────────────────────────────
