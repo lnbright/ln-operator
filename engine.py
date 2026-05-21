@@ -28,6 +28,28 @@ import lnd_client
 import db
 from logging_config import get_logger
 
+
+def chan_open_ts_from_id(chan_id, current_block_height, now):
+    """Estimate a channel's open timestamp from its chan_id.
+
+    LND's chan_id encodes the funding tx's block height in the high bits
+    (block_height << 40). Combined with the current chain tip we can
+    approximate when the channel was funded at ~600 s/block. Used as a
+    floor when attributing self-payments — if a payment is older than the
+    target channel's open time, it must belong to a previous channel with
+    the same peer.
+
+    Returns 0 if the chan_id can't be parsed. Subtracts a 1-day margin to
+    stay safely earlier than the true open time (block intervals vary).
+    """
+    try:
+        open_block = int(chan_id) >> 40
+    except (ValueError, TypeError):
+        return 0
+    if open_block <= 0 or current_block_height <= 0 or open_block > current_block_height:
+        return 0
+    return max(0, now - (current_block_height - open_block) * 600 - 86400)
+
 log = get_logger('engine')
 
 
@@ -48,7 +70,7 @@ def calculate_fee_ppm(local_ratio):
 
 def update_all_fees(dry_run=False):
     """Update fee policies on all channels based on current balance ratios.
-    
+
     Returns list of changes made.
     """
     channels = lnd_client.get_channels()
@@ -727,6 +749,8 @@ def sync_rebalances():
     if not my_pubkey:
         log.error("sync_rebalances: could not get node pubkey")
         return 0
+    # Chain tip — needed to derive open times from chan_ids
+    current_block_height = int(my_info.get("block_height", 0))
 
     # Build maps of our channel IDs to aliases, peer pubkeys, and open times
     channels = lnd_client.get_channels()
@@ -738,9 +762,9 @@ def sync_rebalances():
     for ch in channels:
         chan_alias_map[ch["chan_id"]] = ch.get("peer_alias", ch["chan_id"][:12])
         chan_peer_map[ch.get("peer_pubkey", "")] = ch["chan_id"]
-        # Calculate channel open time from lifetime
-        lifetime = int(ch.get("lifetime", 0))
-        chan_open_ts[ch["chan_id"]] = now - lifetime if lifetime > 0 else 0
+        chan_open_ts[ch["chan_id"]] = chan_open_ts_from_id(
+            ch["chan_id"], current_block_height, now
+        )
 
     # Fetch all payments from LND
     payments_data = lnd_client._get("/v1/payments?include_incomplete=false&max_payments=100")
