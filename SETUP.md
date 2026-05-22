@@ -10,12 +10,15 @@ Runs on the same host as LND.
 ```
 LND host
 ├── LND              — REST API on localhost:9000
-├── LND Dashboard    — port 4000
-├── Miner Dashboard  — port 4001
-└── LN Operator       — CLI tool (no port, runs on-demand)
+├── LND Dashboard    — port 4000 (bound to a private/tailnet IP)
+└── LN Operator      — CLI tool (no port, runs on-demand)
     ├── 60% Python engine    — fees, rebalancing, peer scoring
     ├── 30% SQLite database  — historical tracking & learning
     └── 10% Claude API agent — plain-English summaries
+
+Backup host (separate machine, reachable over the tailnet)
+└── receives channel.backup over rsync/SSH — destination configured
+    via BACKUP_* keys in .env
 ```
 
 ---
