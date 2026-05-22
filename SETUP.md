@@ -1,14 +1,14 @@
 # LN Operator — Setup Guide
 
 Lightning Network channel management and investment advisor for your LND node.
-Runs on backup-host alongside LND.
+Runs on the same host as LND.
 
 ---
 
 ## Architecture
 
 ```
-backup-host (10.0.0.1)
+LND host
 ├── LND              — REST API on localhost:9000
 ├── LND Dashboard    — port 4000
 ├── Miner Dashboard  — port 4001
@@ -22,7 +22,7 @@ backup-host (10.0.0.1)
 
 ## Prerequisites
 
-- LND running and synced on backup-host
+- LND running and synced on the same host
 - Python 3.9+ (already installed if dashboards work)
 - Anthropic API key (optional — tool works without it, just no AI summaries)
 - Telegram bot token + chat ID (optional — for notifications)

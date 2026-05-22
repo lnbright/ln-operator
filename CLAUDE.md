@@ -1,15 +1,9 @@
 # LN Operator — Project Context
 
 ## Infrastructure
-- operator-host (10.0.0.1): Bitcoin Core + LND + LN Operator + dashboards
-- backup-host (10.0.0.2): Backup target for channel.backup
-- Node pubkey: NODE_PUBKEY
-- Node alias: example.node
-
-## Current Channels
-- ACINQ: opened 2023, 11.8M capacity
-- Kraken: 3.25M capacity
-- LNBiG Hub-3: 3.39M capacity, hard to rebalance (high intermediate fees ~3000ppm)
+- Primary host runs Bitcoin Core + LND + LN Operator + dashboards (bound to a Tailscale IP, see .env)
+- Backup host receives channel.backup over SSH (see BACKUP_* keys in .env)
+- Specific host/node details intentionally kept out of the repo — query live state from LND or check .env
 
 ## Key Design Decisions
 - REST API chan_id from LND = numeric scid (not hex) — DB stores this format

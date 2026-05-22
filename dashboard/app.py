@@ -20,11 +20,19 @@ Or install as systemd service — see lnd-dashboard.service.
 
 import os
 import sqlite3
+from pathlib import Path
+
 import requests
 import urllib3
 import psutil
 from flask import Flask, render_template_string
 from datetime import datetime
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -34,8 +42,11 @@ app = Flask(__name__)
 LND_REST_URL = "https://127.0.0.1:9000"
 LND_CERT     = "/home/lnd/tls.cert"
 LND_MACAROON = "/home/lnd/data/chain/bitcoin/mainnet/admin.macaroon"
-TAILSCALE_IP = "10.0.0.1"
-PORT         = 4000
+# Bind address — set DASHBOARD_BIND_IP in .env to your Tailscale IP so the
+# dashboard is reachable across the tailnet but not the public internet.
+# Defaults to 127.0.0.1 (localhost only) if unset.
+BIND_IP      = os.getenv("DASHBOARD_BIND_IP", "127.0.0.1")
+PORT         = int(os.getenv("DASHBOARD_PORT", "4000"))
 DB_PATH      = os.getenv("LN_OPERATOR_DB", "/home/pi/ln-operator/ln_operator.db")
 
 
@@ -894,4 +905,4 @@ def index():
 
 
 if __name__ == "__main__":
-    app.run(host=TAILSCALE_IP, port=PORT, debug=False)
+    app.run(host=BIND_IP, port=PORT, debug=False)

@@ -274,8 +274,9 @@ def plan_rebalances(channels=None, force=None):
     Fallback plans: alternative pairings for each target, tried if the
     primary pair fails at execution time (e.g. no route between those nodes).
 
-    This means if Kraken→LNBiG fails due to no route, the executor will
-    automatically try Kraken→ACINQ before giving up on the run.
+    This means if a primary source→target pair fails due to no route, the
+    executor will try the same source against an alternative target before
+    giving up on the run.
 
     force: if set to a float (0.0-1.0), ignore thresholds and use that ratio as target.
     Returns a (plans, reason) tuple.
@@ -309,7 +310,7 @@ def plan_rebalances(channels=None, force=None):
     # Generate ALL possible source→target pairs, ordered by priority:
     # most depleted targets first, each paired with all available sources.
     # The executor tries pairs in order — if one fails, the next pair is tried.
-    # This ensures that if Kraken→LNBiG fails, Kraken→ACINQ is tried next.
+    # This ensures that if source→targetA fails, source→targetB is tried next.
     plans = []
     used_source_sats = {}  # track how much each source has committed
 

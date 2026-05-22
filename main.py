@@ -490,7 +490,8 @@ def cmd_rebalance_channels(args):
             continue
 
         # Fallbacks only fire if the source has already failed on a primary plan.
-        # This means: Kraken failed on LNBiG Hub-3, so now try Kraken→ACINQ.
+        # This means: source failed on its primary target, so now try the same source
+        # against an alternative target.
         if p.get("is_fallback"):
             source_had_failure = any(src == source_id for src, _ in failed_pairs)
             if not source_had_failure:
