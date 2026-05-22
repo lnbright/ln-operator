@@ -9,6 +9,7 @@ Usage:
     python main.py rebalance_channels [--dry-run]  — rebalance depleted/overfull channels
     python main.py sync_routing                    — sync routing events from LND
     python main.py healthcheck                     — check channel health + fire alerts
+    python main.py backup [--trigger ...]          — push channel.backup off-site (called by systemd)
     python main.py plan [--min-channel SATS] [--treasury RATIO] — channel plan
     python main.py status                          — quick node overview
     python main.py history [days]                  — recent activity from database
@@ -26,6 +27,7 @@ from logging_config import setup_logging, get_logger
 import advisor
 import telegram_bot
 import lnd_client
+import backup
 
 
 def cmd_plan(args):
@@ -789,6 +791,12 @@ def cmd_history(args):
             print(f"    [{dt}] {a['alert_type']}: {a['message']}")
 
 
+def cmd_backup(args):
+    """Push channel.backup to the remote host configured in backup.py."""
+    ok = backup.run_backup(trigger=args.trigger)
+    sys.exit(0 if ok else 1)
+
+
 def _display_plan(plan):
     """Pretty-print an investment plan to terminal."""
     state = plan.get("current_state", {})
@@ -902,6 +910,12 @@ def main():
     p_health = subparsers.add_parser("healthcheck",
         help="[debug]     Snapshot channel states, check for problems, fire alerts")
 
+    p_backup = subparsers.add_parser("backup",
+        help="[automated] Push channel.backup to remote host (called by systemd)")
+    p_backup.add_argument("--trigger", default="manual",
+        choices=["path", "timer", "manual"],
+        help="What triggered this backup run (recorded in DB)")
+
     args = parser.parse_args()
 
     # Initialise logging
@@ -928,6 +942,8 @@ def main():
         cmd_status(args)
     elif args.command == "history":
         cmd_history(args)
+    elif args.command == "backup":
+        cmd_backup(args)
     else:
         parser.print_help()
 

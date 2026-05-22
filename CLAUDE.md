@@ -34,7 +34,10 @@
 
 ## Services
 - Dashboard: systemd lnd-dashboard.service, port 4000
-- Channel backup: systemd lnd-channel-backup.service → backup-host
+- Channel backup: systemd lnd-channel-backup.path (inotify on channel.backup) +
+  lnd-channel-backup.timer (2h heartbeat), both triggering lnd-channel-backup@{path,timer}.service.
+  Destination configured via BACKUP_* keys in .env. Attempts logged in backup_log table;
+  dashboard shows freshness badge.
 - Pipeline: cron every 2 hours
 
 ## Crontab

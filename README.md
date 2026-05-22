@@ -158,6 +158,9 @@ main.py rebalance_channels --force 0.4       # target 40% on all
 main.py adjust_fees [--dry-run]
 main.py sync_routing
 main.py healthcheck
+
+# ── OFF-SITE BACKUP (run by systemd, not invoked manually) ──
+main.py backup [--trigger path|timer|manual]   # rsync channel.backup to BACKUP_SSH_HOST
 ```
 
 ### Crontab

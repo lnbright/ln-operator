@@ -189,6 +189,20 @@ CREATE TABLE IF NOT EXISTS channel_maturity (
     last_snapshot_ts INTEGER NOT NULL DEFAULT 0,   -- when we last checked
     last_was_balanced INTEGER NOT NULL DEFAULT 0   -- was it balanced at last check?
 );
+
+-- ─── Channel backup attempts (off-site channel.backup rsync) ────
+CREATE TABLE IF NOT EXISTS backup_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    success      INTEGER NOT NULL,
+    file_mtime   INTEGER,           -- mtime of channel.backup when uploaded
+    file_bytes   INTEGER,           -- size of the file uploaded
+    destination  TEXT,              -- e.g. user@host:/path/
+    duration_ms  INTEGER,
+    trigger      TEXT,              -- 'path', 'timer', 'manual'
+    error        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_backup_log_ts ON backup_log(ts);
 """
 
 
@@ -499,6 +513,36 @@ def get_repeated_rebalance_failures(chan_id, min_failures=3):
     if all(not row["success"] for row in rows):
         return len(rows)
     return 0
+
+
+def save_backup_attempt(success, file_mtime, file_bytes, destination,
+                        duration_ms, trigger, error=None):
+    """Log a channel.backup upload attempt."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO backup_log
+            (success, file_mtime, file_bytes, destination, duration_ms, trigger, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (int(bool(success)), file_mtime, file_bytes, destination,
+              duration_ms, trigger, error))
+
+
+def get_latest_backup_status():
+    """Return last attempt row and last successful row (both may be None).
+
+    The dashboard uses this to render age + last error.
+    """
+    with get_conn() as conn:
+        last_any = conn.execute(
+            "SELECT * FROM backup_log ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+        last_ok = conn.execute(
+            "SELECT * FROM backup_log WHERE success=1 ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    return {
+        "last_attempt": dict(last_any) if last_any else None,
+        "last_success": dict(last_ok) if last_ok else None,
+    }
 
 
 def get_sync_state(key, default=None):

@@ -224,8 +224,41 @@ def get_dashboard_data():
         FROM alerts ORDER BY ts DESC LIMIT 10
     """)
 
+    data["backup"] = get_backup_status(now)
+
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return data
+
+
+def get_backup_status(now):
+    """Read channel-backup state for the dashboard card.
+
+    States:
+      fresh  — last success ≤ 12h ago AND last attempt also succeeded.
+      error  — most recent attempt failed (regardless of last-success age).
+      stale  — last success > 12h ago.
+      never  — backup_log is empty.
+    """
+    last_attempt = db_one("SELECT * FROM backup_log ORDER BY ts DESC LIMIT 1")
+    last_success = db_one("SELECT * FROM backup_log WHERE success=1 ORDER BY ts DESC LIMIT 1")
+
+    if last_success is None:
+        status = "never"
+    else:
+        age = now - last_success["ts"]
+        last_failed = last_attempt and not last_attempt["success"]
+        if last_failed:
+            status = "error"
+        elif age > 12 * 3600:
+            status = "stale"
+        else:
+            status = "fresh"
+
+    return {
+        "status":       status,
+        "last_attempt": last_attempt,
+        "last_success": last_success,
+    }
 
 
 # ─── Template ────────────────────────────────────────────────────
@@ -590,6 +623,51 @@ TEMPLATE = """
   </div>
   {% endif %}
 
+  <!-- Channel Backup -->
+  {% if data.backup %}
+  {% set bk = data.backup %}
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">Channel Backup — Off-site</div>
+      {% set badge_class = {'fresh':'badge-green','error':'badge-yellow','stale':'badge-red','never':'badge-muted'}[bk.status] %}
+      {% set badge_label = {'fresh':'fresh','error':'last attempt failed','stale':'stale','never':'no backup yet'}[bk.status] %}
+      <div class="stat-row">
+        <span class="stat-label">Status</span>
+        <span><span class="badge {{ badge_class }}">{{ badge_label }}</span></span>
+      </div>
+      {% if bk.last_success %}
+      <div class="stat-row">
+        <span class="stat-label">Last successful upload</span>
+        <span class="stat-value">{{ bk.last_success.ts | format_ts }} &nbsp;<span style="color:var(--muted)">({{ bk.last_success.ts | format_age }})</span></span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">File size</span>
+        <span class="stat-value">{{ "{:,}".format(bk.last_success.file_bytes or 0) }} bytes</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Destination</span>
+        <span class="stat-value">{{ bk.last_success.destination }}</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Trigger</span>
+        <span class="stat-value">{{ bk.last_success.trigger }}</span>
+      </div>
+      {% else %}
+      <div class="stat-row">
+        <span class="stat-label">Last successful upload</span>
+        <span class="stat-value red">never</span>
+      </div>
+      {% endif %}
+      {% if bk.last_attempt and not bk.last_attempt.success %}
+      <div class="stat-row">
+        <span class="stat-label">Last error ({{ bk.last_attempt.ts | format_age }})</span>
+        <span class="stat-value red" style="max-width:75%;">{{ bk.last_attempt.error or '—' }}</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Payments & Invoices -->
   <div class="grid-2">
     <div class="card">
@@ -784,6 +862,27 @@ def format_ts(ts):
     try:
         return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M")
     except:
+        return "—"
+
+
+@app.template_filter("format_age")
+def format_age(ts):
+    """Jinja2 filter: returns 'N min ago' / 'Nh Nm ago' / 'Nd ago' for a unix ts."""
+    try:
+        delta = int(datetime.now().timestamp()) - int(ts)
+        if delta < 0:
+            return "just now"
+        if delta < 60:
+            return f"{delta}s ago"
+        if delta < 3600:
+            return f"{delta // 60} min ago"
+        if delta < 86400:
+            h, m = divmod(delta // 60, 60)
+            return f"{h}h {m}m ago" if m else f"{h}h ago"
+        d, rem = divmod(delta, 86400)
+        h = rem // 3600
+        return f"{d}d {h}h ago" if h else f"{d}d ago"
+    except Exception:
         return "—"
 
 

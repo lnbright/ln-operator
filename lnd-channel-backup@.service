@@ -1,0 +1,12 @@
+[Unit]
+Description=Push LND channel.backup off-site (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/ln-operator
+ExecStart=/home/pi/ln-operator/venv/bin/python3 /home/pi/ln-operator/main.py backup --trigger %i
+Nice=10

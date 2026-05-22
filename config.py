@@ -33,6 +33,16 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 DB_PATH = os.getenv("LN_OPERATOR_DB", os.path.join(os.path.dirname(__file__), "ln_operator.db"))
 
 
+# ─── Off-site channel.backup upload ──────────────────────────────
+# Pushed by backup.py over rsync/ssh whenever LND rewrites the file
+# and on a 2h heartbeat timer. Set BACKUP_SSH_HOST in .env to enable.
+BACKUP_SOURCE_PATH = os.getenv("BACKUP_SOURCE_PATH", "/home/lnd/lnd-backup/channel.backup")
+BACKUP_SSH_HOST    = os.getenv("BACKUP_SSH_HOST", "")    # e.g. "backup-host"
+BACKUP_SSH_USER    = os.getenv("BACKUP_SSH_USER", "")    # e.g. "backup-user"
+BACKUP_SSH_PORT    = int(os.getenv("BACKUP_SSH_PORT", "22"))
+BACKUP_DEST_DIR    = os.getenv("BACKUP_DEST_DIR", "")    # e.g. "/path/on/remote/"
+
+
 # ─── Fee Policy ──────────────────────────────────────────────────
 # Dynamic per-channel fee from local balance ratio:
 #   ppm = MIN + (MAX - MIN) × (1 - local_ratio)

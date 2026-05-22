@@ -1,0 +1,11 @@
+[Unit]
+Description=Heartbeat timer for LND channel.backup uploads
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2h
+Unit=lnd-channel-backup@timer.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
