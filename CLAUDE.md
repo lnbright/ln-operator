@@ -14,6 +14,10 @@
 - agent.py exists but plan command doesn't use it (pure local graph)
 - Rebalance auto-chunks on failure (halves down to 100k min)
 - Fallback pairs: if source→target fails, tries source→alternative target
+- Manual fee pins (`fee_overrides` table) suppress auto-fees per channel.
+  `engine.update_all_fees` checks the table first; pinned channels use the
+  stored ppm with reason `manual pin: N ppm` instead of `calculate_fee_ppm`.
+  Set via `main.py set_fee`, cleared via `main.py clear_fee`, shown by `status`.
 
 ## LND Access
 - REST: https://127.0.0.1:9000
@@ -25,6 +29,7 @@
 - SQLite at /home/pi/ln-operator/ln_operator.db
 - forwarding_log and rebalance_log store numeric scid as chan_id
 - rebalance_log has payment_hash and triggered_by columns (migration added)
+- fee_overrides table: chan_id (PK), pinned_ppm, set_at, note — manual fee pins
 
 ## Services
 - Dashboard: systemd lnd-dashboard.service, port 4000

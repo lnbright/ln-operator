@@ -76,6 +76,7 @@ def update_all_fees(dry_run=False):
     channels = lnd_client.get_channels()
     channels = lnd_client.resolve_aliases(channels)
     fee_report = lnd_client.get_fee_report()
+    overrides = db.get_fee_overrides()
 
     # Build lookup of current fees by channel point
     current_fees = {}
@@ -88,7 +89,15 @@ def update_all_fees(dry_run=False):
 
     updates = []
     for ch in channels:
-        new_ppm = calculate_fee_ppm(ch["local_ratio"])
+        pin = overrides.get(ch["chan_id"])
+        if pin is not None:
+            new_ppm = pin["pinned_ppm"]
+            reason = f"manual pin: {pin['pinned_ppm']} ppm"
+            pinned = True
+        else:
+            new_ppm = calculate_fee_ppm(ch["local_ratio"])
+            reason = f"auto: local_ratio={ch['local_ratio']:.2f}"
+            pinned = False
         cp = ch["channel_point"]
         old = current_fees.get(cp, {})
         old_ppm = old.get("fee_rate_ppm", 0)
@@ -96,8 +105,9 @@ def update_all_fees(dry_run=False):
 
         # Only update if fee changed by more than 5 ppm (avoid gossip spam)
         if abs(new_ppm - old_ppm) < 5 and old_base == FEE_BASE_MSAT:
-            log.debug("fees: %s unchanged at %d ppm (local %.0f%%)",
-                      ch["peer_alias"], old_ppm, ch["local_ratio"] * 100)
+            log.debug("fees: %s unchanged at %d ppm (local %.0f%%)%s",
+                      ch["peer_alias"], old_ppm, ch["local_ratio"] * 100,
+                      " [pinned]" if pinned else "")
             continue
 
         change = {
@@ -109,6 +119,7 @@ def update_all_fees(dry_run=False):
             "old_base": old_base,
             "new_base": FEE_BASE_MSAT,
             "local_ratio": ch["local_ratio"],
+            "pinned": pinned,
         }
 
         if not dry_run:
@@ -119,8 +130,6 @@ def update_all_fees(dry_run=False):
                 change["applied"] = False
                 change["error"] = str(e)
 
-            # Log to database
-            reason = f"auto: local_ratio={ch['local_ratio']:.2f}"
             db.save_fee_update(
                 ch["chan_id"], ch["peer_alias"], old_ppm, new_ppm,
                 old_base, FEE_BASE_MSAT, ch["local_ratio"], reason

@@ -203,6 +203,16 @@ CREATE TABLE IF NOT EXISTS backup_log (
     error        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_backup_log_ts ON backup_log(ts);
+
+-- ─── Manual fee overrides ───────────────────────────────────────
+-- Pins a channel's outbound fee_rate_ppm so the auto-fee pipeline
+-- leaves it alone. Removed when the operator runs `clear_fee`.
+CREATE TABLE IF NOT EXISTS fee_overrides (
+    chan_id      TEXT PRIMARY KEY,
+    pinned_ppm   INTEGER NOT NULL,
+    set_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    note         TEXT
+);
 """
 
 
@@ -281,6 +291,42 @@ def save_investment_plan(total_sats, treasury, deployable, plan_dict, agent_summ
             (total_sats, treasury_reserve, deployable_sats, plan_json, agent_summary)
             VALUES (?, ?, ?, ?, ?)
         """, (total_sats, treasury, deployable, json.dumps(plan_dict), agent_summary))
+
+
+def set_fee_override(chan_id, ppm, note=""):
+    """Pin a channel's outbound fee rate. Overwrites any existing pin."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO fee_overrides (chan_id, pinned_ppm, set_at, note)
+            VALUES (?, ?, strftime('%s','now'), ?)
+            ON CONFLICT(chan_id) DO UPDATE SET
+              pinned_ppm = excluded.pinned_ppm,
+              set_at     = excluded.set_at,
+              note       = excluded.note
+        """, (chan_id, int(ppm), note or None))
+
+
+def clear_fee_override(chan_id):
+    """Remove a fee pin. Returns True if a pin existed, False otherwise."""
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM fee_overrides WHERE chan_id = ?", (chan_id,))
+        return cur.rowcount > 0
+
+
+def get_fee_overrides():
+    """Return all fee pins as {chan_id: {pinned_ppm, set_at, note}}."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT chan_id, pinned_ppm, set_at, note FROM fee_overrides"
+        ).fetchall()
+        return {
+            r["chan_id"]: {
+                "pinned_ppm": r["pinned_ppm"],
+                "set_at": r["set_at"],
+                "note": r["note"],
+            }
+            for r in rows
+        }
 
 
 def save_alert(alert_type, message, channel_id=None, sent_telegram=False):

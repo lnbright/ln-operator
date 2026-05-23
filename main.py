@@ -13,6 +13,8 @@ Usage:
     python main.py plan [--min-channel SATS] [--treasury RATIO] — channel plan
     python main.py status                          — quick node overview
     python main.py history [days]                  — recent activity from database
+    python main.py set_fee <chan> <ppm> [--note]   — pin a channel's outbound fee
+    python main.py clear_fee <chan>                — remove a fee pin (pins are shown by `status`)
 """
 
 import sys
@@ -732,10 +734,12 @@ def cmd_status(args):
             except Exception:
                 pass
 
+        pins = db.get_fee_overrides()
+
         print(f"\n  Per-channel breakdown:")
-        print(f"  {'─'*70}")
-        print(f"  {'Channel':<22} {'Balance':<22} {'Our fee':>9} {'Their fee':>12} {'Their inbound':>14}")
-        print(f"  {'─'*70}")
+        print(f"  {'─'*72}")
+        print(f"  {'Channel':<22} {'Balance':<22} {'Our fee':>10} {'Their fee':>12} {'Their inbound':>14}")
+        print(f"  {'─'*72}")
         for ch in sorted(channels, key=lambda c: c["local_ratio"]):
             bar = _balance_bar(ch["local_ratio"], 20)
             status = "●" if ch["active"] else "○"
@@ -747,12 +751,25 @@ def cmd_status(args):
 
             their_str = f"{their_base}b+{their_ppm}ppm" if their_base else f"{their_ppm}ppm"
             inbound_str = f"{their_inbound}ppm" if their_inbound else "—"
+            my_ppm_str = f"{my_ppm}📌" if ch["chan_id"] in pins else f"{my_ppm} "
 
             print(f"  {status} {ch['peer_alias'][:20]:20s} {bar} {ch['local_ratio']:.0%} "
-                  f"| {my_ppm:>6}ppm | {their_str:>11} | {inbound_str:>12}")
-        print(f"  {'─'*70}")
+                  f"| {my_ppm_str:>7}ppm | {their_str:>11} | {inbound_str:>12}")
+        print(f"  {'─'*72}")
         print(f"  Our fee = what we charge to route payments out. Their fee = what they charge others to route to us.")
         print(f"  Their inbound = extra fee they charge for receiving (— means 0 or not set in graph).")
+
+        if pins:
+            print(f"\n  Pinned fees (auto-fees skipped on these channels):")
+            print(f"  {'─'*72}")
+            print(f"  {'Channel':<22} {'Pinned':>9}  {'Set at':<18} Note")
+            for chan_id, pin in pins.items():
+                ch = next((c for c in channels if c["chan_id"] == chan_id), None)
+                alias = ch["peer_alias"] if ch else "(channel closed?)"
+                set_at = datetime.fromtimestamp(pin["set_at"]).strftime("%Y-%m-%d %H:%M")
+                note = pin.get("note") or ""
+                print(f"  {alias[:21]:<22} {pin['pinned_ppm']:>5} ppm  {set_at:<18} {note}")
+            print(f"  Clear with: main.py clear_fee <alias-or-chan_id>")
 
     except Exception as e:
         print(f"  Error connecting to LND: {e}")
@@ -796,6 +813,99 @@ def cmd_backup(args):
     """Push channel.backup to the remote host configured in backup.py."""
     ok = backup.run_backup(trigger=args.trigger)
     sys.exit(0 if ok else 1)
+
+
+def _resolve_channel(needle):
+    """Find a channel by chan_id or alias substring (case-insensitive).
+
+    Returns the channel dict, or prints an error and exits.
+    """
+    channels = lnd_client.get_channels()
+    channels = lnd_client.resolve_aliases(channels)
+
+    # Exact chan_id match wins
+    for ch in channels:
+        if ch["chan_id"] == needle:
+            return ch
+
+    # Otherwise, case-insensitive alias substring match
+    needle_lc = needle.lower()
+    matches = [c for c in channels if needle_lc in (c["peer_alias"] or "").lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        print(f"  ✗ No channel matches '{needle}'.")
+        print(f"  Available channels:")
+        for c in channels:
+            print(f"    {c['chan_id']}  {c['peer_alias']}")
+        sys.exit(1)
+    print(f"  ✗ '{needle}' is ambiguous — matches {len(matches)} channels:")
+    for c in matches:
+        print(f"    {c['chan_id']}  {c['peer_alias']}")
+    print(f"  Use the chan_id instead.")
+    sys.exit(1)
+
+
+def cmd_set_fee(args):
+    """Pin a channel's outbound fee rate so the pipeline leaves it alone."""
+    log = get_logger("main")
+    print("\n⚡ LN Operator — Pin Channel Fee")
+    print("=" * 40)
+
+    if args.ppm < 0:
+        print(f"  ✗ ppm must be >= 0 (got {args.ppm})")
+        sys.exit(1)
+
+    ch = _resolve_channel(args.channel)
+    cp = ch["channel_point"]
+
+    # Current fee for diff display
+    fee_report = lnd_client.get_fee_report()
+    old_ppm = 0
+    for item in fee_report.get("channel_fees", []):
+        if item.get("channel_point") == cp:
+            old_ppm = int(item.get("fee_per_mil", 0))
+            break
+
+    # Apply on LND immediately so the pin takes effect now
+    from config import FEE_BASE_MSAT
+    try:
+        lnd_client.update_channel_policy(cp, FEE_BASE_MSAT, args.ppm)
+    except Exception as e:
+        print(f"  ✗ LND policy update failed: {e}")
+        sys.exit(1)
+
+    db.set_fee_override(ch["chan_id"], args.ppm, note=args.note)
+    db.save_fee_update(
+        ch["chan_id"], ch["peer_alias"], old_ppm, args.ppm,
+        FEE_BASE_MSAT, FEE_BASE_MSAT, ch["local_ratio"],
+        f"manual pin{f': {args.note}' if args.note else ''}",
+    )
+    log.info("set_fee: pinned %s at %d ppm (was %d ppm)",
+             ch["peer_alias"], args.ppm, old_ppm)
+
+    print(f"  ✓ Pinned {ch['peer_alias']}: {old_ppm} → {args.ppm} ppm")
+    print(f"    chan_id: {ch['chan_id']}")
+    if args.note:
+        print(f"    note:    {args.note}")
+    print(f"  Pipeline will leave this channel alone until 'clear_fee'.")
+
+
+def cmd_clear_fee(args):
+    """Remove a fee pin so the pipeline can resume auto-adjusting."""
+    log = get_logger("main")
+    print("\n⚡ LN Operator — Clear Fee Pin")
+    print("=" * 40)
+
+    ch = _resolve_channel(args.channel)
+    existed = db.clear_fee_override(ch["chan_id"])
+    if not existed:
+        print(f"  No pin on {ch['peer_alias']} — nothing to clear.")
+        return
+
+    log.info("clear_fee: removed pin on %s", ch["peer_alias"])
+    print(f"  ✓ Pin removed from {ch['peer_alias']}.")
+    print(f"  Run 'main.py adjust_fees' to recompute now, or wait for the next pipeline run.")
 
 
 def _display_plan(plan):
@@ -917,6 +1027,20 @@ def main():
         choices=["path", "timer", "manual"],
         help="What triggered this backup run (recorded in DB)")
 
+    p_setfee = subparsers.add_parser("set_fee",
+        help="[feature]   Pin a channel's outbound fee — pipeline will leave it alone")
+    p_setfee.add_argument("channel",
+        help="chan_id or peer alias (substring match)")
+    p_setfee.add_argument("ppm", type=int,
+        help="Fee rate in ppm to pin (e.g. 100)")
+    p_setfee.add_argument("--note", default="",
+        help="Optional note recorded with the pin")
+
+    p_clearfee = subparsers.add_parser("clear_fee",
+        help="[feature]   Remove a fee pin so the pipeline can auto-adjust again")
+    p_clearfee.add_argument("channel",
+        help="chan_id or peer alias (substring match)")
+
     args = parser.parse_args()
 
     # Initialise logging
@@ -945,6 +1069,10 @@ def main():
         cmd_history(args)
     elif args.command == "backup":
         cmd_backup(args)
+    elif args.command == "set_fee":
+        cmd_set_fee(args)
+    elif args.command == "clear_fee":
+        cmd_clear_fee(args)
     else:
         parser.print_help()
 

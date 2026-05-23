@@ -226,7 +226,9 @@ def get_dashboard_data():
     """)
 
     data["fee_updates"] = db_all("""
-        SELECT ts, peer_alias, old_fee_ppm, new_fee_ppm, local_ratio
+        SELECT ts, peer_alias, old_fee_ppm, new_fee_ppm, local_ratio,
+               COALESCE(reason, '') as reason,
+               CASE WHEN COALESCE(reason,'') LIKE 'manual pin%' THEN 'pin' ELSE 'auto' END as source
         FROM fee_updates ORDER BY ts DESC LIMIT 10
     """)
 
@@ -808,7 +810,7 @@ TEMPLATE = """
       <div class="card-title">Recent Fee Updates</div>
       {% if data.fee_updates %}
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Time</th><th>Peer</th><th>Old</th><th>New</th><th>Local</th></tr></thead>
+        <thead><tr><th>Time</th><th>Peer</th><th>Old</th><th>New</th><th>Local</th><th>Source</th></tr></thead>
         <tbody>
           {% for u in data.fee_updates %}
           <tr>
@@ -820,6 +822,10 @@ TEMPLATE = """
               {% else %}<span style="color:var(--green)">↓ {{ u.new_fee_ppm }} ppm</span>{% endif %}
             </td>
             <td style="color:var(--muted);">{{ "%.0f"|format(u.local_ratio * 100) }}%</td>
+            <td>
+              {% if u.source == 'pin' %}<span class="badge badge-blue" title="{{ u.reason }}">📌 pin</span>
+              {% else %}<span class="badge badge-muted">auto</span>{% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
