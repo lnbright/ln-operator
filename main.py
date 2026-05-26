@@ -275,11 +275,13 @@ def cmd_recompute_signals(args):
         print("No channels found.")
         return
 
-    print(f"\n{'Peer':<24} {'Last Refill':>12} {'Failures':>9} {'Mult':>7}")
-    print("─" * 60)
+    print(f"\n{'Peer':<24} {'Last Refill':>12} {'Failures':>9} {'Mult':>16}  {'Why':<36}")
+    print("─" * 102)
     for r in results:
         refill = f"{r['last_refill_ppm']} ppm" if r['last_refill_ppm'] is not None else "—"
-        print(f"  {r['alias'][:22]:<22} {refill:>12} {r['failures_since_success']:>9} {r['mult']:+.2f}")
+        mult_col = f"{r['mult_prev']:+.2f} → {r['mult']:+.2f}"
+        print(f"  {r['alias'][:22]:<22} {refill:>12} {r['failures_since_success']:>9} "
+              f"{mult_col:>16}  {r['mult_reason']:<36}")
     print()
     log.info("recompute_signals: updated %d channels", len(results))
 

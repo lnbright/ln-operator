@@ -312,22 +312,33 @@ def compute_market_multiplier(chan_id, prev_mult):
     Clamped to [MARKET_MULT_MIN, MARKET_MULT_MAX]. The defense-zone
     asymmetry (multiplier can only RAISE the fee at low local) is enforced
     later, in compute_fee_target — the multiplier itself stays unconstrained.
+
+    Returns (new_mult, reason) — reason is a short string for logging.
     """
     now = int(time.time())
     last_ts = db.get_last_forward_ts(chan_id)
-    mult = float(prev_mult or 0.0)
+    prev = float(prev_mult or 0.0)
+    mult = prev
 
     if last_ts is not None:
-        age = now - last_ts
-        if age <= MARKET_MULT_BUSY_HOURS * 3600:
+        age_days = (now - last_ts) / 86400.0
+        if (now - last_ts) <= MARKET_MULT_BUSY_HOURS * 3600:
             mult += MARKET_MULT_STEP
-        elif age >= MARKET_MULT_SILENT_DAYS * 86400:
+            reason = f"busy (forward {age_days*24:.1f}h ago)"
+        elif (now - last_ts) >= MARKET_MULT_SILENT_DAYS * 86400:
             mult -= MARKET_MULT_STEP
+            reason = f"silent ({age_days:.1f}d, ≥{MARKET_MULT_SILENT_DAYS}d)"
+        else:
+            reason = f"idle ({age_days:.1f}d, no nudge)"
     else:
-        # Never forwarded — treat as silent.
         mult -= MARKET_MULT_STEP
+        reason = "never forwarded"
 
-    return max(MARKET_MULT_MIN, min(MARKET_MULT_MAX, mult))
+    clamped = max(MARKET_MULT_MIN, min(MARKET_MULT_MAX, mult))
+    delta = clamped - prev
+    if abs(clamped - mult) > 1e-9:
+        reason += " [clamped]"
+    return clamped, f"{reason}, Δ={delta:+.2f}"
 
 
 def recompute_all_signals():
@@ -346,8 +357,9 @@ def recompute_all_signals():
     for ch in channels:
         chan_id = ch["chan_id"]
         prev = db.get_channel_signals(chan_id)
+        prev_mult = float(prev.get("market_multiplier", 0.0) or 0.0)
 
-        mult = compute_market_multiplier(chan_id, prev.get("market_multiplier", 0.0))
+        mult, mult_reason = compute_market_multiplier(chan_id, prev_mult)
         last_refill = db.get_last_refill_ppm(chan_id)
         failures = db.count_failures_since_last_success(chan_id)
 
@@ -362,11 +374,14 @@ def recompute_all_signals():
             "last_refill_ppm": last_refill,
             "failures_since_success": failures,
             "mult": mult,
+            "mult_prev": prev_mult,
+            "mult_reason": mult_reason,
         })
-        log.info("recompute_signals: %s last_refill=%s ppm failures=%d mult=%+.2f",
+        log.info("recompute_signals: %s last_refill=%s ppm failures=%d "
+                 "mult %+.2f → %+.2f (%s)",
                  ch.get("peer_alias", chan_id[:12]),
                  last_refill if last_refill is not None else "none",
-                 failures, mult)
+                 failures, prev_mult, mult, mult_reason)
 
     return results
 
