@@ -262,6 +262,11 @@ def update_all_fees(dry_run=False):
                       ch["peer_alias"], why, new_ppm, old_ppm)
             continue
 
+        # INFO-level audit line for every broadcast so the log explains why
+        # the fee moved (sigmoid / floor / pin) and how hysteresis allowed it.
+        log.info("fees: %s %d → %d ppm — %s [hysteresis: %s]",
+                 ch["peer_alias"], old_ppm, new_ppm, reason, why)
+
         if not dry_run:
             try:
                 lnd_client.update_channel_policy(cp, FEE_BASE_MSAT, new_ppm)

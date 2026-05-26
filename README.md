@@ -275,7 +275,7 @@ discovered, then `last_refill_ppm` and the fee floor track the new market.
 ### Outbound fee impact
 
 After the first successful refill at `R` ppm:
-- The fee floor becomes `R × 1.3` (e.g. 2300 → 2990).
+- The fee floor becomes `R × 1.1` (e.g. 2300 → 2530).
 - `update_all_fees` posts that target on the next 2h pipeline run, subject
   to hysteresis (`SNAP_PPM` usually lets it through without waiting).
 - No 5-sample warmup, no median smoothing — one refill = one fee update.
@@ -378,7 +378,7 @@ Key settings in `config.py`:
 | `REBALANCE_DEFAULT_BUDGET_PPM` | 500 | Bootstrap budget when no refill history |
 | `REBALANCE_MAX_BUDGET_PPM` | 5000 | Hard ceiling on rebalance fee |
 | `REBALANCE_BUDGET_ESCALATION_STEP` | 0.20 | +20% per consecutive failure since last success |
-| `REBALANCE_FEE_MARGIN` | 1.3 | Outbound fee floor = last_refill × this |
+| `REBALANCE_FEE_MARGIN` | 1.1 | Outbound fee floor = last_refill × this |
 
 ### Planner
 | Setting | Default | |
@@ -497,7 +497,7 @@ failures walk it back up if the market has moved.
 | Case | Behavior |
 |---|---|
 | Brand-new channel, no refill yet | Budget = `DEFAULT_BUDGET` (500), no fee floor (sigmoid alone). Failures escalate budget at 20% per cron cycle |
-| Manual urgency refill at high cost | Stored as success row with actual ppm → next budget = that ppm, next fee floor = ppm × 1.3. No filtering of manual rows |
+| Manual urgency refill at high cost | Stored as success row with actual ppm → next budget = that ppm, next fee floor = ppm × REBALANCE_FEE_MARGIN. No filtering of manual rows |
 | Single chunk succeeded at small amount | Logged as success at chunk ppm. May be inflated vs full-amount price — accepted as the cost of having any signal at all |
 | Market drifted upward, refills fail | Failure counter ticks, budget escalates 20%/cycle until new price is discovered |
 | Channel idle 30+ days, then drains | `last_refill_ppm` still anchors — budget starts at last known price + escalation if it has drifted |

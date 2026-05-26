@@ -23,7 +23,7 @@
   recent successful rebalance into a channel) drives BOTH the rebalance
   budget AND the outbound fee floor. Budget = `last_refill ×
   (1 + 0.20 × failures_since_last_success)`, capped at 5000.
-  Outbound floor = `last_refill × 1.3`. Bootstrap from
+  Outbound floor = `last_refill × REBALANCE_FEE_MARGIN`. Bootstrap from
   `REBALANCE_DEFAULT_BUDGET_PPM = 500` when no history; failure escalation
   handles both bootstrap and upward market drift. No PROVEN/DISCOVERY/DEADWEIGHT
   tiers, no `earned_ppm × revenue_ratio`, no median/window smoothing,

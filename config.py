@@ -105,7 +105,7 @@ REBALANCE_MAX_AMOUNT_RATIO = 0.5  # 50% max — auto-chunks on failure
 REBALANCE_DEFAULT_BUDGET_PPM       = 500    # bootstrap budget when no refill history
 REBALANCE_MAX_BUDGET_PPM           = 5000   # hard ceiling on what we'll ever pay
 REBALANCE_BUDGET_ESCALATION_STEP   = 0.20   # per consecutive failure since last success
-REBALANCE_FEE_MARGIN               = 1.3    # outbound fee floor = last_refill × this
+REBALANCE_FEE_MARGIN               = 1.1    # outbound fee floor = last_refill × this
 
 # What counts as "balanced" for status reporting (no longer gates budget tiers)
 REBALANCE_BALANCED_RATIO = 0.30      # local must be above 30%...

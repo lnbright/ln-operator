@@ -230,7 +230,7 @@ All tuneable values are in `config.py`:
 | `REBALANCE_DEFAULT_BUDGET_PPM` | 500 | Bootstrap budget when channel has no refill history |
 | `REBALANCE_MAX_BUDGET_PPM` | 5000 | Hard ceiling on what we'll pay to refill |
 | `REBALANCE_BUDGET_ESCALATION_STEP` | 0.20 | Budget +20% per consecutive failure since last success |
-| `REBALANCE_FEE_MARGIN` | 1.3 | Outbound fee floor = `last_refill_ppm × this` |
+| `REBALANCE_FEE_MARGIN` | 1.1 | Outbound fee floor = `last_refill_ppm × this` |
 | `TREASURY_MIN_RATIO` | 0.025 | Wallet reserve (default 2.5%) |
 | `MIN_CHANNEL_SIZE_SATS` | 1,000,000 | Minimum channel size |
 | `PREFERRED_CHANNEL_SIZE_SATS` | 3,000,000 | Target channel size in `plan` |
