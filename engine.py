@@ -853,24 +853,29 @@ def sync_rebalances():
                           payment_hash[:16])
                 continue
 
-            # Also check if an auto entry exists for the same amount/time
-            # (our tool logged it but without payment_hash)
+            # Backfill payment_hash on a legacy hash-less auto row that matches
+            # this payment exactly. The guard `payment_hash IS NULL OR ''` is
+            # critical — without it, a second chunk with the same amount/time
+            # would overwrite the hash of the first chunk that just synced,
+            # silently losing rows. Auto rows now save with hash from the
+            # start (engine.execute_rebalance), so this only fires for old
+            # data; it never matches a row we already populated.
             with db.get_conn() as conn:
                 existing = conn.execute("""
                     SELECT id FROM rebalance_log
                     WHERE source_chan_id = ? AND target_chan_id = ?
                     AND amount_sats = ? AND abs(ts - ?) < 10
                     AND success = 1
+                    AND (payment_hash IS NULL OR payment_hash = '')
                 """, (first_hop_chan, target_chan_id, amount, ts)).fetchone()
                 if existing:
-                    # Update the existing auto entry with payment_hash instead of creating duplicate
                     conn.execute("""
                         UPDATE rebalance_log SET payment_hash = ?, fee_paid_sats = ?,
                         fee_ppm = ? WHERE id = ?
                     """, (payment_hash, fee,
                           fee / amount * 1_000_000 if amount > 0 else 0,
                           existing["id"]))
-                    log.info("sync_rebalances: updated existing auto entry %s→%s with payment hash",
+                    log.info("sync_rebalances: backfilled hash on legacy auto entry %s→%s",
                              source_alias, target_alias)
                     synced += 1
                     break
