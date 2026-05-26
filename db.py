@@ -213,6 +213,27 @@ CREATE TABLE IF NOT EXISTS fee_overrides (
     set_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     note         TEXT
 );
+
+-- ─── Per-channel slow-moving signals ────────────────────────────
+-- Populated by `main.py recompute_signals` (nightly). The 2h fee/rebalance
+-- pipeline reads from here instead of recomputing on every run, which keeps
+-- the floor stable and prevents hysteresis from fighting jiggling inputs.
+--   market_multiplier    : nudge applied to sigmoid base (e.g. +0.2 → 120%)
+--   rebalance_cost_floor : minimum outbound ppm so we don't sell below refill
+--   adaptive_cap_ppm     : per-channel rebalance budget ceiling
+--   last_fee_update_ts   : when this channel was last broadcast (hysteresis)
+CREATE TABLE IF NOT EXISTS channel_signals (
+    chan_id                       TEXT PRIMARY KEY,
+    market_multiplier             REAL    NOT NULL DEFAULT 0.0,
+    rebalance_cost_floor_ppm      INTEGER NOT NULL DEFAULT 0,
+    rebalance_cost_floor_samples  INTEGER NOT NULL DEFAULT 0,
+    rebalance_cost_floor_source   TEXT,         -- 'auto', 'manual_fallback', 'default'
+    adaptive_cap_ppm              INTEGER NOT NULL DEFAULT 0,
+    adaptive_cap_samples          INTEGER NOT NULL DEFAULT 0,
+    last_fee_update_ts            INTEGER NOT NULL DEFAULT 0,
+    last_local_ratio              REAL,         -- for edge-zone-crossing detection
+    signals_updated_ts            INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -589,6 +610,75 @@ def get_latest_backup_status():
         "last_attempt": dict(last_any) if last_any else None,
         "last_success": dict(last_ok) if last_ok else None,
     }
+
+
+# ─── Channel signals (slow-moving per-channel state) ───────────
+
+def get_channel_signals(chan_id):
+    """Return the channel_signals row for a channel, or a defaults dict."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM channel_signals WHERE chan_id = ?", (chan_id,)
+        ).fetchone()
+    if row is None:
+        return {
+            "chan_id": chan_id,
+            "market_multiplier": 0.0,
+            "rebalance_cost_floor_ppm": 0,
+            "rebalance_cost_floor_samples": 0,
+            "rebalance_cost_floor_source": None,
+            "adaptive_cap_ppm": 0,
+            "adaptive_cap_samples": 0,
+            "last_fee_update_ts": 0,
+            "last_local_ratio": None,
+            "signals_updated_ts": 0,
+        }
+    return dict(row)
+
+
+def upsert_channel_signals(chan_id, **fields):
+    """Insert or update a channel_signals row. Only writes provided fields."""
+    if not fields:
+        return
+    cols = list(fields.keys())
+    placeholders = ", ".join(f"{c} = excluded.{c}" for c in cols)
+    col_list = ", ".join(["chan_id"] + cols)
+    val_list = ", ".join(["?"] * (len(cols) + 1))
+    params = [chan_id] + [fields[c] for c in cols]
+    with get_conn() as conn:
+        conn.execute(
+            f"INSERT INTO channel_signals ({col_list}) VALUES ({val_list}) "
+            f"ON CONFLICT(chan_id) DO UPDATE SET {placeholders}",
+            params,
+        )
+
+
+def get_target_rebalance_ppms(chan_id, days=30, auto_only=False):
+    """Return list of successful fee_ppm values for rebalances INTO this channel.
+
+    Used to compute the rebalance-cost floor and the adaptive cap.
+    """
+    cutoff = int(time.time()) - days * 86400
+    sql = """
+        SELECT fee_ppm FROM rebalance_log
+        WHERE target_chan_id = ? AND ts > ? AND success = 1
+          AND fee_ppm IS NOT NULL
+    """
+    params = [chan_id, cutoff]
+    if auto_only:
+        sql += " AND triggered_by = 'auto'"
+    with get_conn() as conn:
+        return [r["fee_ppm"] for r in conn.execute(sql, params).fetchall()]
+
+
+def get_last_forward_ts(chan_id):
+    """Most recent forwarding event ts where this channel was in or out, or None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(ts) AS ts FROM forwarding_log WHERE chan_in = ? OR chan_out = ?",
+            (chan_id, chan_id),
+        ).fetchone()
+    return row["ts"] if row and row["ts"] else None
 
 
 def get_sync_state(key, default=None):

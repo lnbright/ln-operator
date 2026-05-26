@@ -44,12 +44,55 @@ BACKUP_DEST_DIR    = os.getenv("BACKUP_DEST_DIR", "")    # e.g. "/path/on/remote
 
 
 # ─── Fee Policy ──────────────────────────────────────────────────
-# Dynamic per-channel fee from local balance ratio:
-#   ppm = MIN + (MAX - MIN) × (1 - local_ratio)
-# Full channel → MIN (attract routing). Depleted → MAX (protect liquidity).
+# The fee target is computed in layers, in this order:
+#   1. Pin (fee_overrides table) wins outright.
+#   2. base   = sigmoid(local_ratio) between SIGMOID_MIN_PPM and SIGMOID_MAX_PPM
+#   3. mult   = market_multiplier (slow, demand-derived, asymmetric at low local)
+#   4. floor  = rebalance-cost floor (what refilling actually costs us)
+#   5. target = clamp( max(base * (1+mult), floor), 0, FEE_HARD_CEILING_PPM )
+#   6. Broadcast only if hysteresis allows (tolerance + cooldown + snap escape)
 FEE_BASE_MSAT = 0       # base fee per HTLC (0 = best practice)
-FEE_MIN_PPM = 25         # floor: channel is full, want to drain
-FEE_MAX_PPM = 250        # ceiling: channel is depleted, protect what's left
+
+# Sigmoid curve — asymptotes of the liquidity-driven base fee
+SIGMOID_MIN_PPM   = 25        # local_ratio → 1.0 (drain)
+SIGMOID_MAX_PPM   = 250       # local_ratio → 0.0 (defend)
+SIGMOID_K         = 8.0       # steepness; higher = sharper midpoint, flatter edges.
+                              # K=8 gives clean plateaus near 0% and 100% local while
+                              # staying roughly linear-ish through the healthy middle.
+                              # Hysteresis (not the curve) is what damps gossip spam.
+SIGMOID_MIDPOINT  = 0.5       # local_ratio where curve is halfway between min and max
+
+# Absolute cap. The floor can push the target above SIGMOID_MAX_PPM; the
+# hard ceiling is the last line of defence against runaway floor data.
+FEE_HARD_CEILING_PPM = 2000
+
+# Hysteresis — when to actually broadcast a fee change
+FEE_HYSTERESIS_TOLERANCE_PPM   = 10       # absolute floor on what counts as "changed"
+FEE_HYSTERESIS_TOLERANCE_PCT   = 0.10     # also need ≥10% relative move
+FEE_HYSTERESIS_COOLDOWN_SEC    = 6 * 3600 # don't update same channel within 6h
+FEE_HYSTERESIS_SNAP_PPM        = 30       # delta this big escapes the cooldown
+FEE_HYSTERESIS_EDGE_LOW        = 0.20     # crossing into/out of this also escapes
+FEE_HYSTERESIS_EDGE_HIGH       = 0.80     # crossing into/out of this also escapes
+
+# Market multiplier — slow-moving per-channel adjustment from observed demand
+MARKET_MULT_STEP        = 0.05     # how much to nudge per nightly recompute
+MARKET_MULT_MIN         = -0.5     # never lower base by more than 50%
+MARKET_MULT_MAX         = 2.0      # cap at 3× base (1 + 2.0)
+MARKET_MULT_BUSY_HOURS  = 24       # forwards in last N hours → nudge up
+MARKET_MULT_SILENT_DAYS = 3        # no forwards for N days → nudge down
+
+# Rebalance-cost floor — "don't sell outbound below what refilling costs us"
+REBALANCE_FLOOR_WINDOW_DAYS    = 30
+REBALANCE_FLOOR_MIN_SAMPLES    = 5     # below this, fall back to manual data
+REBALANCE_FLOOR_MULTIPLIER     = 1.5   # floor = median(rebalance_ppm) × this
+REBALANCE_FLOOR_DEFAULT_PPM    = 0     # no rebalance data → no floor; sigmoid alone
+                                       # decides. The floor only kicks in once we have
+                                       # real refill-cost evidence for the channel.
+
+# Deprecated linear-curve constants. Kept as aliases so old call sites keep
+# working until they're cleaned up. New code should use the SIGMOID_* names.
+FEE_MIN_PPM = SIGMOID_MIN_PPM
+FEE_MAX_PPM = SIGMOID_MAX_PPM
 
 
 # ─── Rebalancing Thresholds ──────────────────────────────────────
@@ -64,10 +107,23 @@ REBALANCE_MAX_AMOUNT_RATIO = 0.5  # 50% max — auto-chunks on failure
 # Each channel gets a fee budget based on its track record.
 # Prevents spending more on rebalancing than a channel earns.
 REBALANCE_DISCOVERY_PPM = 1000      # new channels: generous budget while proving themselves
-REBALANCE_HARD_CAP_PPM = 1000       # proven channels: absolute ceiling
 REBALANCE_REVENUE_RATIO = 0.5       # proven channels: budget = earned_ppm × 0.5
 REBALANCE_DEADWEIGHT_PPM = 150      # zero-revenue channels: minimal budget
 REBALANCE_DISCOVERY_DAYS = 15       # balanced days before a channel is judged
+
+# Adaptive per-channel rebalance cap. Replaces the old global hard cap.
+#   cap = clamp( median(successful_rebalance_ppm, 30d, this target) × MULTIPLIER,
+#                REBALANCE_CAP_MIN_PPM, REBALANCE_CAP_MAX_PPM )
+# A channel with no data gets REBALANCE_CAP_DEFAULT_PPM. Stored in
+# channel_signals.adaptive_cap_ppm by the nightly recompute job.
+REBALANCE_CAP_DEFAULT_PPM = 1000   # used when no rebalance data exists
+REBALANCE_CAP_MIN_PPM     = 500    # adaptive cap never lower than this
+REBALANCE_CAP_MAX_PPM     = 5000   # adaptive cap never higher than this
+REBALANCE_CAP_MULTIPLIER  = 1.5    # cap = observed median × this
+
+# Kept as alias for any caller still using the old constant — equal to the
+# adaptive default so behaviour for new/dataless channels is unchanged.
+REBALANCE_HARD_CAP_PPM = REBALANCE_CAP_DEFAULT_PPM
 
 # What counts as "balanced" for the discovery clock
 REBALANCE_BALANCED_RATIO = 0.30      # local must be above 30%...

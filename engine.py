@@ -16,10 +16,22 @@ SQLite (via db). It writes results back to SQLite for the dashboard and CLI to r
 
 import time
 import math
+import statistics
 from config import (
     REBALANCE_LOW_THRESHOLD, REBALANCE_HIGH_THRESHOLD, REBALANCE_TARGET,
-    FEE_BASE_MSAT, FEE_MIN_PPM, FEE_MAX_PPM,
-    REBALANCE_MAX_AMOUNT_RATIO, REBALANCE_HARD_CAP_PPM,
+    FEE_BASE_MSAT,
+    SIGMOID_MIN_PPM, SIGMOID_MAX_PPM, SIGMOID_K, SIGMOID_MIDPOINT,
+    FEE_HARD_CEILING_PPM,
+    FEE_HYSTERESIS_TOLERANCE_PPM, FEE_HYSTERESIS_TOLERANCE_PCT,
+    FEE_HYSTERESIS_COOLDOWN_SEC, FEE_HYSTERESIS_SNAP_PPM,
+    FEE_HYSTERESIS_EDGE_LOW, FEE_HYSTERESIS_EDGE_HIGH,
+    MARKET_MULT_STEP, MARKET_MULT_MIN, MARKET_MULT_MAX,
+    MARKET_MULT_BUSY_HOURS, MARKET_MULT_SILENT_DAYS,
+    REBALANCE_FLOOR_WINDOW_DAYS, REBALANCE_FLOOR_MIN_SAMPLES,
+    REBALANCE_FLOOR_MULTIPLIER, REBALANCE_FLOOR_DEFAULT_PPM,
+    REBALANCE_MAX_AMOUNT_RATIO,
+    REBALANCE_CAP_DEFAULT_PPM, REBALANCE_CAP_MIN_PPM, REBALANCE_CAP_MAX_PPM,
+    REBALANCE_CAP_MULTIPLIER,
     REBALANCE_REVENUE_RATIO, REBALANCE_DISCOVERY_PPM,
     REBALANCE_DEADWEIGHT_PPM, REBALANCE_DISCOVERY_DAYS,
     REBALANCE_BALANCED_RATIO, REBALANCE_BALANCED_RATIO_HIGH,
@@ -55,30 +67,136 @@ log = get_logger('engine')
 
 # ─── Fee Management ──────────────────────────────────────────────
 
-def calculate_fee_ppm(local_ratio):
-    """Calculate the optimal fee rate based on local balance ratio.
-    
-    local_ratio close to 1.0 (full)     → low fees (attract routing)
-    local_ratio close to 0.5 (balanced) → mid fees
-    local_ratio close to 0.0 (depleted) → high fees (protect liquidity + reputation)
-    
-    Uses a linear curve: ppm = min_ppm + (max_ppm - min_ppm) * (1 - local_ratio)
+def sigmoid_fee_ppm(local_ratio):
+    """Sigmoid mapping from local_ratio to base outbound fee ppm.
+
+    Flat across the healthy middle (~30-70% local), steep at the edges.
+    Avoids the linear curve's problem of triggering broadcasts on tiny
+    healthy drift while being sluggish in the defense zone.
+
+    f(ratio) = MIN + (MAX - MIN) / (1 + exp( K * (ratio - MIDPOINT) ))
     """
-    ppm = FEE_MIN_PPM + (FEE_MAX_PPM - FEE_MIN_PPM) * (1 - local_ratio)
-    return int(max(FEE_MIN_PPM, min(FEE_MAX_PPM, round(ppm))))
+    try:
+        x = SIGMOID_K * (local_ratio - SIGMOID_MIDPOINT)
+        if x > 700:    # avoid math.exp overflow at extreme ratios
+            sig = 0.0
+        elif x < -700:
+            sig = 1.0
+        else:
+            sig = 1.0 / (1.0 + math.exp(x))
+    except (TypeError, ValueError):
+        sig = 0.5
+    ppm = SIGMOID_MIN_PPM + (SIGMOID_MAX_PPM - SIGMOID_MIN_PPM) * sig
+    return int(round(max(SIGMOID_MIN_PPM, min(SIGMOID_MAX_PPM, ppm))))
+
+
+# Backwards-compatible alias for any caller still using the old name.
+calculate_fee_ppm = sigmoid_fee_ppm
+
+
+def _edge_zone(local_ratio):
+    """Classify which hysteresis edge zone a ratio falls in: 'low', 'high', or 'mid'."""
+    if local_ratio < FEE_HYSTERESIS_EDGE_LOW:
+        return "low"
+    if local_ratio > FEE_HYSTERESIS_EDGE_HIGH:
+        return "high"
+    return "mid"
+
+
+def compute_fee_target(channel, signals, now):
+    """Compute the target outbound fee for a channel + decide whether to broadcast.
+
+    Returns dict with: target_ppm, base_ppm, mult, floor_ppm, source, reason,
+    broadcast (bool), broadcast_reason.
+    """
+    local_ratio = channel["local_ratio"]
+
+    base = sigmoid_fee_ppm(local_ratio)
+    mult = float(signals.get("market_multiplier", 0.0) or 0.0)
+    floor = int(signals.get("rebalance_cost_floor_ppm", 0) or 0)
+
+    # Adjusted base with market multiplier. In the low-local defense zone,
+    # the multiplier may never push the fee BELOW the sigmoid output — that
+    # would invite the very drain we're defending against.
+    adjusted = base * (1.0 + mult)
+    if local_ratio < FEE_HYSTERESIS_EDGE_LOW:
+        adjusted = max(adjusted, base)
+
+    target = max(adjusted, float(floor))
+    target = min(target, float(FEE_HARD_CEILING_PPM))
+    target_ppm = int(round(target))
+
+    if floor and floor >= adjusted:
+        source = "floor"
+    elif abs(mult) > 0.01:
+        source = "sigmoid+market"
+    else:
+        source = "sigmoid"
+
+    reason = (
+        f"sigmoid={base} mult={mult:+.2f} floor={floor} "
+        f"local={local_ratio:.2f} → {target_ppm} [{source}]"
+    )
+
+    return {
+        "target_ppm": target_ppm,
+        "base_ppm": base,
+        "mult": mult,
+        "floor_ppm": floor,
+        "source": source,
+        "reason": reason,
+    }
+
+
+def _should_broadcast(target_ppm, current_ppm, signals, local_ratio, now):
+    """Hysteresis gate. Returns (broadcast: bool, why: str)."""
+    delta = target_ppm - current_ppm
+    abs_delta = abs(delta)
+
+    # Tolerance — must clear both the absolute and the relative thresholds.
+    pct = abs_delta / max(current_ppm, 1)
+    if abs_delta < FEE_HYSTERESIS_TOLERANCE_PPM and pct < FEE_HYSTERESIS_TOLERANCE_PCT:
+        return False, f"within tolerance (Δ={delta:+d})"
+
+    # Snap escapes — always broadcast big jumps.
+    if abs_delta >= FEE_HYSTERESIS_SNAP_PPM:
+        return True, f"snap (Δ={delta:+d})"
+
+    # Edge-zone crossing escapes the cooldown.
+    last_ratio = signals.get("last_local_ratio")
+    if last_ratio is not None:
+        if _edge_zone(local_ratio) != _edge_zone(last_ratio):
+            return True, f"edge crossing ({_edge_zone(last_ratio)}→{_edge_zone(local_ratio)})"
+
+    # Cooldown — otherwise rate-limit to once per FEE_HYSTERESIS_COOLDOWN_SEC.
+    last_ts = int(signals.get("last_fee_update_ts") or 0)
+    if last_ts and (now - last_ts) < FEE_HYSTERESIS_COOLDOWN_SEC:
+        remaining = FEE_HYSTERESIS_COOLDOWN_SEC - (now - last_ts)
+        return False, f"cooldown ({remaining // 60}m left)"
+
+    return True, f"normal (Δ={delta:+d})"
 
 
 def update_all_fees(dry_run=False):
-    """Update fee policies on all channels based on current balance ratios.
+    """Update fee policies on all channels.
 
-    Returns list of changes made.
+    Pipeline per channel:
+      1. Pin in fee_overrides? → use pin, done.
+      2. base   = sigmoid(local_ratio)
+      3. mult   = market_multiplier  (defense zone only allows positive)
+      4. floor  = rebalance_cost_floor_ppm
+      5. target = clamp( max(base*(1+mult), floor), 0, FEE_HARD_CEILING_PPM )
+      6. Broadcast only if hysteresis permits.
+
+    Pins below the rebalance floor are honoured but logged as a warning.
+    Returns list of changes attempted.
     """
+    now = int(time.time())
     channels = lnd_client.get_channels()
     channels = lnd_client.resolve_aliases(channels)
     fee_report = lnd_client.get_fee_report()
     overrides = db.get_fee_overrides()
 
-    # Build lookup of current fees by channel point
     current_fees = {}
     for item in fee_report.get("channel_fees", []):
         cp = item.get("channel_point", "")
@@ -89,29 +207,38 @@ def update_all_fees(dry_run=False):
 
     updates = []
     for ch in channels:
-        pin = overrides.get(ch["chan_id"])
-        if pin is not None:
-            new_ppm = pin["pinned_ppm"]
-            reason = f"manual pin: {pin['pinned_ppm']} ppm"
-            pinned = True
-        else:
-            new_ppm = calculate_fee_ppm(ch["local_ratio"])
-            reason = f"auto: local_ratio={ch['local_ratio']:.2f}"
-            pinned = False
+        chan_id = ch["chan_id"]
         cp = ch["channel_point"]
+        signals = db.get_channel_signals(chan_id)
         old = current_fees.get(cp, {})
         old_ppm = old.get("fee_rate_ppm", 0)
         old_base = old.get("base_fee_msat", 0)
 
-        # Only update if fee changed by more than 5 ppm (avoid gossip spam)
-        if abs(new_ppm - old_ppm) < 5 and old_base == FEE_BASE_MSAT:
-            log.debug("fees: %s unchanged at %d ppm (local %.0f%%)%s",
-                      ch["peer_alias"], old_ppm, ch["local_ratio"] * 100,
-                      " [pinned]" if pinned else "")
-            continue
+        pin = overrides.get(chan_id)
+        if pin is not None:
+            new_ppm = int(pin["pinned_ppm"])
+            floor = int(signals.get("rebalance_cost_floor_ppm", 0) or 0)
+            if floor and new_ppm < floor:
+                log.warning("fees: %s pin %d ppm is BELOW rebalance floor %d ppm — "
+                            "you may be selling below refill cost",
+                            ch["peer_alias"], new_ppm, floor)
+            reason = f"manual pin: {new_ppm} ppm"
+            target_info = {
+                "target_ppm": new_ppm, "base_ppm": new_ppm, "mult": 0.0,
+                "floor_ppm": floor, "source": "pin", "reason": reason,
+            }
+            broadcast = (new_ppm != old_ppm) or (old_base != FEE_BASE_MSAT)
+            why = "pin enforced" if broadcast else "pin unchanged"
+        else:
+            target_info = compute_fee_target(ch, signals, now)
+            new_ppm = target_info["target_ppm"]
+            reason = target_info["reason"]
+            broadcast, why = _should_broadcast(
+                new_ppm, old_ppm, signals, ch["local_ratio"], now
+            )
 
         change = {
-            "chan_id": ch["chan_id"],
+            "chan_id": chan_id,
             "channel_point": cp,
             "alias": ch["peer_alias"],
             "old_ppm": old_ppm,
@@ -119,8 +246,19 @@ def update_all_fees(dry_run=False):
             "old_base": old_base,
             "new_base": FEE_BASE_MSAT,
             "local_ratio": ch["local_ratio"],
-            "pinned": pinned,
+            "pinned": pin is not None,
+            "source": target_info["source"],
+            "base_ppm": target_info["base_ppm"],
+            "mult": target_info["mult"],
+            "floor_ppm": target_info["floor_ppm"],
+            "broadcast": broadcast,
+            "broadcast_reason": why,
         }
+
+        if not broadcast:
+            log.debug("fees: %s skip — %s (target %d, current %d)",
+                      ch["peer_alias"], why, new_ppm, old_ppm)
+            continue
 
         if not dry_run:
             try:
@@ -131,8 +269,14 @@ def update_all_fees(dry_run=False):
                 change["error"] = str(e)
 
             db.save_fee_update(
-                ch["chan_id"], ch["peer_alias"], old_ppm, new_ppm,
+                chan_id, ch["peer_alias"], old_ppm, new_ppm,
                 old_base, FEE_BASE_MSAT, ch["local_ratio"], reason
+            )
+            # Stamp last_fee_update_ts + last_local_ratio for next-run hysteresis.
+            db.upsert_channel_signals(
+                chan_id,
+                last_fee_update_ts=now,
+                last_local_ratio=ch["local_ratio"],
             )
         else:
             change["applied"] = "dry_run"
@@ -144,8 +288,142 @@ def update_all_fees(dry_run=False):
         log.info("fees: %d change(s) applied, %d failed",
                  applied, len(updates) - applied)
     else:
-        log.info("fees: all channels within 5 ppm tolerance — no changes needed")
+        log.info("fees: no broadcasts needed (all within hysteresis bands)")
     return updates
+
+
+# ─── Signal recomputation (nightly job) ──────────────────────────
+
+def compute_rebalance_cost_floor(chan_id):
+    """Return (floor_ppm, samples, source) for this channel.
+
+    Strategy:
+      1. Try auto-only successful rebalances last N days.
+      2. If too few samples, fall back to ALL successful (auto+manual).
+         (LNBiG case: if every refill is manual at market rate, that IS
+         the price signal — refusing to learn from it leaves the channel
+         priced below cost.)
+      3. If still empty, return REBALANCE_FLOOR_DEFAULT_PPM with source='default'.
+
+    Floor = median(samples) × REBALANCE_FLOOR_MULTIPLIER, rounded.
+    """
+    auto = db.get_target_rebalance_ppms(
+        chan_id, days=REBALANCE_FLOOR_WINDOW_DAYS, auto_only=True
+    )
+    if len(auto) >= REBALANCE_FLOOR_MIN_SAMPLES:
+        sample, source = auto, "auto"
+    else:
+        all_ = db.get_target_rebalance_ppms(
+            chan_id, days=REBALANCE_FLOOR_WINDOW_DAYS, auto_only=False
+        )
+        if len(all_) >= REBALANCE_FLOOR_MIN_SAMPLES:
+            sample, source = all_, "manual_fallback"
+        elif all_:
+            # Some data but below the trust threshold. Use it anyway —
+            # better than the global default for a channel that's
+            # actively being rebalanced.
+            sample, source = all_, "manual_fallback"
+        else:
+            return REBALANCE_FLOOR_DEFAULT_PPM, 0, "default"
+
+    median = statistics.median(sample)
+    floor = int(round(median * REBALANCE_FLOOR_MULTIPLIER))
+    return floor, len(sample), source
+
+
+def compute_adaptive_rebalance_cap(chan_id):
+    """Return (cap_ppm, samples) for this channel's rebalance budget ceiling.
+
+    Uses ALL successful rebalances (auto + manual) since manuals are the
+    only signal for channels where auto attempts always fail at the old cap.
+    """
+    sample = db.get_target_rebalance_ppms(
+        chan_id, days=REBALANCE_FLOOR_WINDOW_DAYS, auto_only=False
+    )
+    if not sample:
+        return REBALANCE_CAP_DEFAULT_PPM, 0
+    median = statistics.median(sample)
+    cap = int(round(median * REBALANCE_CAP_MULTIPLIER))
+    cap = max(REBALANCE_CAP_MIN_PPM, min(REBALANCE_CAP_MAX_PPM, cap))
+    return cap, len(sample)
+
+
+def compute_market_multiplier(chan_id, prev_mult):
+    """Nudge the per-channel market multiplier based on observed forward activity.
+
+    Slow-moving by design (±MARKET_MULT_STEP per recompute):
+      - If forwarded in the last MARKET_MULT_BUSY_HOURS → nudge up.
+      - If no forwards for MARKET_MULT_SILENT_DAYS → nudge down.
+      - Otherwise unchanged.
+
+    Clamped to [MARKET_MULT_MIN, MARKET_MULT_MAX]. The defense-zone
+    asymmetry (multiplier can only RAISE the fee at low local) is enforced
+    later, in compute_fee_target — the multiplier itself stays unconstrained.
+    """
+    now = int(time.time())
+    last_ts = db.get_last_forward_ts(chan_id)
+    mult = float(prev_mult or 0.0)
+
+    if last_ts is not None:
+        age = now - last_ts
+        if age <= MARKET_MULT_BUSY_HOURS * 3600:
+            mult += MARKET_MULT_STEP
+        elif age >= MARKET_MULT_SILENT_DAYS * 86400:
+            mult -= MARKET_MULT_STEP
+    else:
+        # Never forwarded — treat as silent.
+        mult -= MARKET_MULT_STEP
+
+    return max(MARKET_MULT_MIN, min(MARKET_MULT_MAX, mult))
+
+
+def recompute_all_signals():
+    """Recompute slow signals for every active channel and write to channel_signals.
+
+    Designed for a nightly cron. Cheap and idempotent. Doesn't touch fees
+    or broadcast anything — just refreshes the cached inputs that the 2h
+    pipeline reads.
+    """
+    now = int(time.time())
+    channels = lnd_client.get_channels()
+    channels = lnd_client.resolve_aliases(channels)
+    log.info("recompute_signals: processing %d channels", len(channels))
+
+    results = []
+    for ch in channels:
+        chan_id = ch["chan_id"]
+        prev = db.get_channel_signals(chan_id)
+
+        floor_ppm, floor_samples, floor_source = compute_rebalance_cost_floor(chan_id)
+        cap_ppm, cap_samples = compute_adaptive_rebalance_cap(chan_id)
+        mult = compute_market_multiplier(chan_id, prev.get("market_multiplier", 0.0))
+
+        db.upsert_channel_signals(
+            chan_id,
+            market_multiplier=mult,
+            rebalance_cost_floor_ppm=floor_ppm,
+            rebalance_cost_floor_samples=floor_samples,
+            rebalance_cost_floor_source=floor_source,
+            adaptive_cap_ppm=cap_ppm,
+            adaptive_cap_samples=cap_samples,
+            signals_updated_ts=now,
+        )
+        results.append({
+            "chan_id": chan_id,
+            "alias": ch.get("peer_alias", ""),
+            "floor_ppm": floor_ppm,
+            "floor_samples": floor_samples,
+            "floor_source": floor_source,
+            "cap_ppm": cap_ppm,
+            "cap_samples": cap_samples,
+            "mult": mult,
+        })
+        log.info("recompute_signals: %s floor=%d ppm (%s, n=%d) cap=%d ppm (n=%d) mult=%+.2f",
+                 ch.get("peer_alias", chan_id[:12]),
+                 floor_ppm, floor_source, floor_samples,
+                 cap_ppm, cap_samples, mult)
+
+    return results
 
 
 # ─── Rebalancing ─────────────────────────────────────────────────
@@ -158,18 +436,26 @@ def get_channel_rebalance_budget(chan_id):
        Budget = earned_ppm × 0.5 (never pay more than half what it earns).
 
     2. DISCOVERY — new channel, or hasn't had enough balanced time to judge.
-       Budget = REBALANCE_DISCOVERY_PPM (default 150). Give it a fair shot.
+       Budget = REBALANCE_DISCOVERY_PPM. Give it a fair shot.
 
     3. DEADWEIGHT — had 30+ balanced days but earned little or nothing.
-       Budget = REBALANCE_DEADWEIGHT_PPM (default 50). Minimal life support.
+       Budget = REBALANCE_DEADWEIGHT_PPM. Minimal life support.
 
-    All tiers capped at REBALANCE_HARD_CAP_PPM (default 500).
+    The tier budget is then capped by the per-channel adaptive cap from
+    channel_signals.adaptive_cap_ppm (computed nightly from observed
+    market price for refilling THIS channel). For channels with no
+    rebalance history the cap defaults to REBALANCE_CAP_DEFAULT_PPM.
 
     Returns dict with max_fee_ppm and the tier/reasoning for logging.
     """
     maturity = db.get_channel_maturity(chan_id)
     earned_ppm = db.get_channel_earned_ppm(chan_id, days=30)
     balanced_days = maturity["balanced_days"]
+    signals = db.get_channel_signals(chan_id)
+    adaptive_cap = int(signals.get("adaptive_cap_ppm") or 0) or REBALANCE_CAP_DEFAULT_PPM
+    cap_n = int(signals.get("adaptive_cap_samples") or 0)
+    cap_note = f"cap {adaptive_cap} ppm (adaptive, n={cap_n})" if cap_n else \
+               f"cap {adaptive_cap} ppm (default, no data)"
 
     if balanced_days >= REBALANCE_DISCOVERY_DAYS:
         # Channel has had enough balanced time — judge it on performance
@@ -177,34 +463,43 @@ def get_channel_rebalance_budget(chan_id):
             # PROVEN: it routes and earns. Budget based on actual revenue.
             budget = earned_ppm * REBALANCE_REVENUE_RATIO
             budget = max(budget, REBALANCE_DEADWEIGHT_PPM)  # floor
-            budget = min(budget, REBALANCE_HARD_CAP_PPM)    # ceiling
+            budget = min(budget, adaptive_cap)              # adaptive ceiling
             return {
                 "max_fee_ppm": int(budget),
                 "tier": "proven",
                 "reason": f"earns {earned_ppm:.0f} ppm, budget {budget:.0f} ppm "
-                          f"({REBALANCE_REVENUE_RATIO:.0%} of revenue)",
+                          f"({REBALANCE_REVENUE_RATIO:.0%} of revenue, {cap_note})",
                 "earned_ppm": earned_ppm,
                 "balanced_days": balanced_days,
             }
         else:
             # DEADWEIGHT: had its chance, earned nothing.
+            budget = min(REBALANCE_DEADWEIGHT_PPM, adaptive_cap)
             return {
-                "max_fee_ppm": REBALANCE_DEADWEIGHT_PPM,
+                "max_fee_ppm": int(budget),
                 "tier": "deadweight",
                 "reason": f"{balanced_days:.0f} balanced days, 0 ppm earned — "
-                          f"minimal budget {REBALANCE_DEADWEIGHT_PPM} ppm",
+                          f"minimal budget {budget} ppm ({cap_note})",
                 "earned_ppm": 0,
                 "balanced_days": balanced_days,
             }
     else:
-        # DISCOVERY: not enough data yet. Give it a fair budget.
+        # DISCOVERY: not enough balanced days yet. Give a fair shot — the
+        # baseline is REBALANCE_DISCOVERY_PPM, but if we already have
+        # observed rebalance cost for this target, respect that instead
+        # (otherwise channels like LNBiG, whose market price exceeds
+        # discovery budget, can never auto-rebalance and stay drained).
+        if cap_n > 0:
+            budget = max(REBALANCE_DISCOVERY_PPM, adaptive_cap)
+        else:
+            budget = REBALANCE_DISCOVERY_PPM
         remaining = REBALANCE_DISCOVERY_DAYS - balanced_days
         return {
-            "max_fee_ppm": REBALANCE_DISCOVERY_PPM,
+            "max_fee_ppm": int(budget),
             "tier": "discovery",
             "reason": f"{balanced_days:.0f}/{REBALANCE_DISCOVERY_DAYS} balanced days — "
-                      f"discovery budget {REBALANCE_DISCOVERY_PPM} ppm "
-                      f"({remaining:.0f} days until judged)",
+                      f"discovery budget {budget} ppm "
+                      f"({remaining:.0f} days until judged, {cap_note})",
             "earned_ppm": earned_ppm,
             "balanced_days": balanced_days,
         }

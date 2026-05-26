@@ -158,6 +158,7 @@ main.py rebalance_channels --force 0.4       # target 40% on all
 main.py adjust_fees [--dry-run]
 main.py sync_routing
 main.py healthcheck
+main.py recompute_signals                    # nightly job — recompute floor/cap/multiplier
 
 # ── MANUAL FEE PINS (override auto-fees on specific channels) ──
 main.py set_fee <alias-or-chan_id> <ppm> [--note "..."]   # pin
@@ -172,7 +173,11 @@ main.py backup [--trigger path|timer|manual]   # rsync channel.backup to BACKUP_
 ### Crontab
 
 ```
+# Fast loop — fees, rebalances, sync, healthcheck
 0 */2 * * * cd /path/to/ln-operator && venv/bin/python3 main.py pipeline 2>&1
+
+# Nightly — recompute slow signals (rebalance-cost floor, adaptive cap, market mult)
+15 3 * * * cd /path/to/ln-operator && venv/bin/python3 main.py recompute_signals >> logs/signals.log 2>&1
 ```
 
 ### Dashboard
@@ -187,24 +192,40 @@ Access at `http://YOUR_IP:4000`. No auth — use Tailscale or LAN only.
 
 ## Fee Formula
 
+Per-channel outbound fee is computed in layers, in this order:
+
 ```
-ppm = FEE_MIN_PPM + (FEE_MAX_PPM - FEE_MIN_PPM) × (1 - local_ratio)
+1. Pin set?                 → use pin (warns if below floor)
+2. base    = sigmoid(local_ratio)                # liquidity state
+3. mult    = market_multiplier  (slow, demand-derived)
+4. floor   = rebalance_cost_floor                # what refilling costs
+5. target  = clamp(max(base × (1+mult), floor), 0, FEE_HARD_CEILING_PPM)
+6. Broadcast only if hysteresis permits          # no gossip spam
 ```
 
-| Local | Fee | |
-|-------|-----|---|
-| 100% | 50 ppm | Cheap — attract routing |
-| 50% | 275 ppm | Balanced |
-| 0% | 500 ppm | Protect liquidity |
+The sigmoid replaces the old linear curve. It has clean plateaus near 0% and
+100% local — small drift inside the healthy middle doesn't snap fees around.
+Sample shape with defaults (`SIGMOID_MIN=25`, `SIGMOID_MAX=250`, `K=8`):
 
-Updates only when change >5 ppm. Base fee always 0.
+| Local | Fee |
+|-------|-----|
+| 5% | 244 ppm |
+| 20% | 231 ppm |
+| 50% | 138 ppm |
+| 80% | 44 ppm |
+| 95% | 31 ppm |
+
+Base fee is always 0. See **Advanced — Fee Engine Internals** below for the
+full pipeline, hysteresis, signals, and corner cases.
 
 ### Manual Fee Pins
 
 The auto-fee formula can be overridden per-channel with `set_fee`. A pinned
 channel keeps its fixed ppm across every pipeline run until you clear the pin
 with `clear_fee`. Pins are stored in the `fee_overrides` table and are
-honored by both the `pipeline` and `adjust_fees` commands.
+honored by both the `pipeline` and `adjust_fees` commands. If a pin is set
+*below* the rebalance-cost floor, `adjust_fees` logs a warning so you know
+you're selling outbound below what refilling costs.
 
 ```bash
 main.py set_fee LNBiG 3000 --note "experimenting with high outbound"
@@ -222,14 +243,31 @@ formula vs. a manual pin.
 
 Each channel gets a fee budget based on its track record:
 
-**Discovery** (< 15 balanced days) — 1000 ppm. New channel proving itself.
-Balanced time only counts when local ratio is 30-70%.
+**Discovery** (< 15 balanced days) — 1000 ppm baseline. If we already have
+rebalance data for the target (e.g. you've manually refilled it), the budget
+rises to the per-channel **adaptive cap** so auto-rebalances can succeed at
+true market price. Balanced time only counts when local ratio is 30-70%.
 
 **Proven** (15+ balanced days, earns fees) — 50% of earned ppm.
-Floor: 150 ppm. Ceiling: 1000 ppm.
+Floor: 150 ppm. Ceiling: per-channel adaptive cap.
 
 **Deadweight** (15+ balanced days, zero revenue) — 150 ppm.
 Consider closing.
+
+### Adaptive Cap
+
+Replaces the old global `REBALANCE_HARD_CAP_PPM`. Computed nightly per channel:
+
+```
+adaptive_cap = clamp( median(successful_rebal_ppm last 30d, this target) × 1.5,
+                      REBALANCE_CAP_MIN_PPM,   # 500
+                      REBALANCE_CAP_MAX_PPM )  # 5000
+```
+
+If a channel has no rebalance history yet, the cap defaults to
+`REBALANCE_CAP_DEFAULT_PPM` (1000). The cap rises as observed costs grow,
+so channels with expensive refill paths (like LNBiG) stop hitting the old
+1000 cap and failing every auto-rebalance attempt.
 
 ### Auto-Chunking
 
@@ -289,17 +327,51 @@ misattribution to new channels with the same peer.
 
 Key settings in `config.py`:
 
+### Fee curve
 | Setting | Default | |
 |---------|---------|---|
-| `FEE_MIN_PPM` | 50 | Fee when full |
-| `FEE_MAX_PPM` | 500 | Fee when depleted |
+| `SIGMOID_MIN_PPM` | 25 | Lower asymptote (channel full → drain) |
+| `SIGMOID_MAX_PPM` | 250 | Upper asymptote (channel depleted → defend) |
+| `SIGMOID_K` | 8.0 | Steepness; higher = sharper midpoint transition |
+| `SIGMOID_MIDPOINT` | 0.5 | local_ratio at curve midpoint |
+| `FEE_HARD_CEILING_PPM` | 2000 | Absolute cap — even floor can't exceed this |
+
+### Hysteresis (when to broadcast fee changes)
+| Setting | Default | |
+|---------|---------|---|
+| `FEE_HYSTERESIS_TOLERANCE_PPM` | 10 | Min absolute change to broadcast |
+| `FEE_HYSTERESIS_TOLERANCE_PCT` | 0.10 | Also need ≥10% relative change |
+| `FEE_HYSTERESIS_COOLDOWN_SEC` | 21600 | Don't update same channel within 6h |
+| `FEE_HYSTERESIS_SNAP_PPM` | 30 | Big jumps skip the cooldown |
+
+### Rebalance floor & market multiplier
+| Setting | Default | |
+|---------|---------|---|
+| `REBALANCE_FLOOR_WINDOW_DAYS` | 30 | History window for floor |
+| `REBALANCE_FLOOR_MIN_SAMPLES` | 5 | Below this, fall back to manual data |
+| `REBALANCE_FLOOR_MULTIPLIER` | 1.5 | floor = median × this |
+| `REBALANCE_FLOOR_DEFAULT_PPM` | 0 | No data → no floor (sigmoid alone) |
+| `MARKET_MULT_STEP` | 0.05 | Per-recompute nudge size |
+| `MARKET_MULT_MIN` | -0.5 | Max downward adjustment |
+| `MARKET_MULT_MAX` | 2.0 | Max upward adjustment (3× base) |
+
+### Rebalancer
+| Setting | Default | |
+|---------|---------|---|
 | `REBALANCE_LOW_THRESHOLD` | 0.20 | Trigger below 20% |
 | `REBALANCE_HIGH_THRESHOLD` | 0.80 | Trigger above 80% |
 | `REBALANCE_MAX_AMOUNT_RATIO` | 0.50 | Max per attempt |
-| `REBALANCE_DISCOVERY_PPM` | 1000 | New channel budget |
-| `REBALANCE_HARD_CAP_PPM` | 1000 | Proven ceiling |
+| `REBALANCE_DISCOVERY_PPM` | 1000 | New channel baseline budget |
 | `REBALANCE_DEADWEIGHT_PPM` | 150 | Zero-revenue budget |
 | `REBALANCE_DISCOVERY_DAYS` | 15 | Days before judging |
+| `REBALANCE_CAP_DEFAULT_PPM` | 1000 | Adaptive-cap fallback (no data) |
+| `REBALANCE_CAP_MIN_PPM` | 500 | Adaptive cap lower bound |
+| `REBALANCE_CAP_MAX_PPM` | 5000 | Adaptive cap upper bound |
+| `REBALANCE_CAP_MULTIPLIER` | 1.5 | cap = observed median × this |
+
+### Planner
+| Setting | Default | |
+|---------|---------|---|
 | `TREASURY_MIN_RATIO` | 0.025 | Wallet reserve |
 | `PREFERRED_CHANNEL_SIZE_SATS` | 3,000,000 | Min channel size |
 
@@ -331,6 +403,112 @@ Optional: watch `channel.backup` and push to a remote host on every change.
 ```bash
 sudo apt install inotify-tools
 # See SETUP.md for full systemd service configuration
+```
+
+---
+
+## Advanced — Fee Engine Internals
+
+The 2h pipeline reads cached signals; a nightly job recomputes them. This
+split keeps the fast loop cheap and the slow signals stable.
+
+### Cadence
+
+```
+Every 2h (cron):
+  1. adjust_fees       ← reads channel_signals, decides target,
+                          gated broadcast (hysteresis)
+  2. rebalance_channels
+  3. sync_routing
+  4. healthcheck
+
+Nightly (cron, separate line):
+  recompute_signals    ← refreshes market_multiplier, rebalance_cost_floor,
+                          adaptive_cap per channel
+```
+
+Suggested cron line for the nightly job:
+
+```
+15 3 * * * cd /path/to/ln-operator && venv/bin/python3 main.py recompute_signals >> logs/signals.log 2>&1
+```
+
+### The four layers
+
+1. **Sigmoid base** — `sigmoid_fee_ppm(local_ratio)`. Liquidity-driven base fee
+   with clean plateaus near 0% and 100% local. No clamps needed at the edges —
+   the curve naturally asymptotes to `SIGMOID_MIN/MAX_PPM`.
+
+2. **Market multiplier** — slow per-channel scalar in `channel_signals`. Each
+   nightly run nudges `+MARKET_MULT_STEP` if the channel forwarded in the last
+   24h, `-MARKET_MULT_STEP` if silent ≥ `MARKET_MULT_SILENT_DAYS`. Bounded by
+   `[MARKET_MULT_MIN, MARKET_MULT_MAX]`. Modulates the sigmoid: `adjusted =
+   base × (1 + mult)`.
+
+3. **Rebalance-cost floor** — "don't sell outbound below what refilling costs."
+   Floor = `median(successful_rebal_ppm last 30d, this target) × FLOOR_MULTIPLIER`.
+   Auto rebalances preferred; if `< MIN_SAMPLES`, falls back to manual data
+   (since for some peers, manual rebalances ARE the market signal). No data
+   at all → no floor (sigmoid alone decides).
+
+4. **Hard ceiling** — `FEE_HARD_CEILING_PPM`. Last line of defense against a
+   runaway floor (e.g. data poisoned by an urgent expensive manual refill).
+
+### Hysteresis (`_should_broadcast`)
+
+A computed target only becomes a broadcast `channel_update` if:
+- Δ from current fee ≥ both `TOLERANCE_PPM` AND `TOLERANCE_PCT` of current, AND
+- one of:
+  - cooldown expired (`COOLDOWN_SEC` since last broadcast), OR
+  - Δ ≥ `SNAP_PPM` (urgent — skip cooldown), OR
+  - channel crossed an edge zone (`EDGE_LOW`/`EDGE_HIGH`) since last update.
+
+This is what actually prevents gossip spam. The sigmoid shape is for *what*
+fee, not *whether to broadcast*.
+
+### Adaptive rebalance cap
+
+Replaces the global `REBALANCE_HARD_CAP_PPM`. Per-channel cap derived from
+observed market price (`median × 1.5`, clamped to `[MIN, MAX]`). Lets channels
+with expensive refill paths (e.g. LNBiG) escape the death-spiral where
+auto-rebalance fails every attempt at a too-low global cap.
+
+The discovery tier uses `max(REBALANCE_DISCOVERY_PPM, adaptive_cap)` when data
+exists — so a new channel whose refill cost we already know about gets a
+realistic budget instead of the default 1000 ppm.
+
+### Corner cases & how each is handled
+
+| Case | Behavior |
+|---|---|
+| Manual urgency rebalance at very high cost | Floor prefers `triggered_by='auto'` rows; manual ignored when ≥5 auto samples exist |
+| Channel with no auto successes (e.g. LNBiG) | Falls back to ALL successful rebalances (auto + manual) — manual *is* the price signal |
+| Single bad outlier rebalance | Median (not p90) ignores it |
+| New channel, < 5 rebalances | Floor falls back to `REBALANCE_FLOOR_DEFAULT_PPM` (0 = no floor) |
+| Pin below floor | Pin wins (explicit intent), warning logged |
+| Floor recompute noise → hysteresis fight | Floor is **cached nightly**, not recomputed every 2h |
+| Channel at <20% local, market says "lower" | **Blocked** — in defense zone, multiplier can only raise |
+| Channel at >80% local, market says "raise" | **Allowed** — earn more on outflow |
+| Channel at >80% local, market says "lower" | Allowed, bounded by `SIGMOID_MIN_PPM` |
+| Just paid expensive rebalance → big jump needed | `SNAP_PPM` escapes cooldown |
+| Crossing 20%/80% boundary | Edge-zone crossing escapes cooldown |
+| Tiny fee drift (1-2 ppm) | Caught by tolerance — no broadcast |
+| Channel offline | Skipped — no policy update |
+| Sender races a fee change mid-route | Cooldown + tolerance dampens flap, so sender mission control sees stable policy |
+
+### When data is missing
+
+The `channel_signals` row is created lazily on first read. Channels with no
+rebalance history are perfectly fine — they just use sigmoid alone (floor = 0)
+and the default rebalance cap (1000). The system "warms up" over the first
+30 days of observed activity.
+
+### Inspecting state
+
+```bash
+sqlite3 ln_operator.db "SELECT * FROM channel_signals;"
+main.py recompute_signals       # manual trigger; prints per-channel table
+main.py adjust_fees --dry-run   # see what would change without broadcasting
 ```
 
 ---

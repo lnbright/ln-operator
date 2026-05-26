@@ -257,6 +257,35 @@ def cmd_plan(args):
 
 
 
+def cmd_recompute_signals(args):
+    """Recompute slow per-channel signals (floor, cap, market multiplier).
+
+    Designed for a nightly cron. Reads from rebalance_log and forwarding_log,
+    writes to channel_signals. The 2h pipeline reads this table — no need to
+    recompute these on every run.
+    """
+    log = get_logger("main")
+    log.info("recompute_signals: starting")
+    print("\n⚡ LN Operator — Recompute Channel Signals")
+    print("=" * 45)
+
+    results = engine.recompute_all_signals()
+
+    if not results:
+        print("No channels found.")
+        return
+
+    print(f"\n{'Peer':<24} {'Floor':>10} {'Source':<16} {'Cap':>10} {'Mult':>7}")
+    print("─" * 70)
+    for r in results:
+        floor_str = f"{r['floor_ppm']} ppm"
+        cap_str   = f"{r['cap_ppm']} ppm"
+        src       = f"{r['floor_source']} (n={r['floor_samples']})"
+        print(f"  {r['alias'][:22]:<22} {floor_str:>10} {src:<16} {cap_str:>10} {r['mult']:+.2f}")
+    print()
+    log.info("recompute_signals: updated %d channels", len(results))
+
+
 def cmd_adjust_fees(args):
     """Update fee policies on all channels."""
     log = get_logger("main")
@@ -1041,6 +1070,9 @@ def main():
     p_clearfee.add_argument("channel",
         help="chan_id or peer alias (substring match)")
 
+    p_signals = subparsers.add_parser("recompute_signals",
+        help="[automated] Recompute slow per-channel signals (floor, adaptive cap, market mult). Designed for a nightly cron.")
+
     args = parser.parse_args()
 
     # Initialise logging
@@ -1073,6 +1105,8 @@ def main():
         cmd_set_fee(args)
     elif args.command == "clear_fee":
         cmd_clear_fee(args)
+    elif args.command == "recompute_signals":
+        cmd_recompute_signals(args)
     else:
         parser.print_help()
 
