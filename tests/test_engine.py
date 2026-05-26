@@ -189,5 +189,159 @@ class MarketMultiplierTests(unittest.TestCase):
         self.assertEqual(mult, config.MARKET_MULT_MIN)
 
 
+# ─── chan_open_ts_from_id ────────────────────────────────────────
+
+class ChanOpenTsTests(unittest.TestCase):
+    def _chan_id(self, block_height):
+        # LND packs the funding-tx block in the high 24 bits (>> 40).
+        return str(block_height << 40)
+
+    def test_returns_reasonable_timestamp_for_valid_input(self):
+        # Channel opened 100 blocks before tip; `now` is 2026-05-27 00:00 UTC.
+        # Expected: now - 100*600 - 86400 (the 1-day safety margin).
+        now = 1748390400
+        tip = 950_000
+        chan_id = self._chan_id(tip - 100)
+        ts = engine.chan_open_ts_from_id(chan_id, tip, now)
+        self.assertEqual(ts, now - 100 * 600 - 86400)
+
+    def test_invalid_chan_id_returns_zero(self):
+        self.assertEqual(engine.chan_open_ts_from_id("not-a-number", 950_000, 0), 0)
+        self.assertEqual(engine.chan_open_ts_from_id(None, 950_000, 0), 0)
+
+    def test_open_block_after_tip_returns_zero(self):
+        # Garbage chan_id that decodes to a future block → can't be a real channel
+        future = self._chan_id(1_000_000)
+        self.assertEqual(engine.chan_open_ts_from_id(future, 950_000, 0), 0)
+
+    def test_zero_tip_returns_zero(self):
+        # Defensive: if we can't read chain tip, refuse to guess
+        self.assertEqual(engine.chan_open_ts_from_id(self._chan_id(950_000), 0, 0), 0)
+
+    def test_never_negative(self):
+        # Very recent channel + tiny `now` → clamp to 0, not negative
+        now = 100
+        tip = 950_000
+        chan_id = self._chan_id(tip)  # opened *at* tip
+        self.assertEqual(engine.chan_open_ts_from_id(chan_id, tip, now), 0)
+
+
+# ─── _edge_zone ──────────────────────────────────────────────────
+
+class EdgeZoneTests(unittest.TestCase):
+    def test_low_zone(self):
+        self.assertEqual(engine._edge_zone(0.1), "low")
+        self.assertEqual(engine._edge_zone(0.0), "low")
+
+    def test_mid_zone(self):
+        self.assertEqual(engine._edge_zone(0.5), "mid")
+
+    def test_high_zone(self):
+        self.assertEqual(engine._edge_zone(0.9), "high")
+        self.assertEqual(engine._edge_zone(1.0), "high")
+
+    def test_boundary_is_mid(self):
+        # Comparisons are strict (`<` / `>`), so the boundary ratio itself is mid.
+        self.assertEqual(engine._edge_zone(config.FEE_HYSTERESIS_EDGE_LOW), "mid")
+        self.assertEqual(engine._edge_zone(config.FEE_HYSTERESIS_EDGE_HIGH), "mid")
+
+
+# ─── _should_broadcast ───────────────────────────────────────────
+
+class ShouldBroadcastTests(unittest.TestCase):
+    def test_within_tolerance_skipped(self):
+        # Need to fail BOTH abs and pct tolerance to skip. ±2 ppm on 150 is well
+        # under both 10ppm absolute and 10% relative thresholds.
+        ok, _ = engine._should_broadcast(152, 150, signals={}, local_ratio=0.5, now=1000)
+        self.assertFalse(ok)
+
+    def test_snap_overrides_cooldown(self):
+        # Big delta (≥ SNAP_PPM) should fire even within cooldown
+        signals = {"last_fee_update_ts": 1000}  # 0s ago
+        ok, why = engine._should_broadcast(300, 100, signals=signals, local_ratio=0.5, now=1000)
+        self.assertTrue(ok)
+        self.assertIn("snap", why)
+
+    def test_cooldown_blocks_normal_change(self):
+        # Mid-magnitude change (clears tolerance, below snap) inside cooldown
+        signals = {"last_fee_update_ts": 1000}
+        ok, why = engine._should_broadcast(125, 100, signals=signals, local_ratio=0.5, now=1000 + 60)
+        self.assertFalse(ok)
+        self.assertIn("cooldown", why)
+
+    def test_edge_crossing_overrides_cooldown(self):
+        # Same change as the cooldown test but local_ratio crossed from mid into low → fire anyway
+        signals = {"last_fee_update_ts": 1000, "last_local_ratio": 0.5}
+        ok, why = engine._should_broadcast(125, 100, signals=signals, local_ratio=0.15, now=1000 + 60)
+        self.assertTrue(ok)
+        self.assertIn("edge crossing", why)
+
+    def test_no_history_broadcasts(self):
+        # First-ever update — no last_fee_update_ts, no last_local_ratio
+        ok, _ = engine._should_broadcast(125, 100, signals={}, local_ratio=0.5, now=1000)
+        self.assertTrue(ok)
+
+    def test_after_cooldown_broadcasts(self):
+        signals = {"last_fee_update_ts": 1000}
+        later = 1000 + config.FEE_HYSTERESIS_COOLDOWN_SEC + 1
+        ok, _ = engine._should_broadcast(125, 100, signals=signals, local_ratio=0.5, now=later)
+        self.assertTrue(ok)
+
+
+# ─── find_rebalance_candidates ───────────────────────────────────
+
+class FindRebalanceCandidatesTests(unittest.TestCase):
+    def _ch(self, chan_id, ratio, active=True):
+        return {"chan_id": chan_id, "local_ratio": ratio, "active": active}
+
+    def test_partitions_by_default_thresholds(self):
+        chans = [
+            self._ch("depleted", 0.05),
+            self._ch("mid", 0.50),
+            self._ch("overfull", 0.95),
+        ]
+        inbound, outbound = engine.find_rebalance_candidates(channels=chans)
+        self.assertEqual([c["chan_id"] for c in inbound], ["depleted"])
+        self.assertEqual([c["chan_id"] for c in outbound], ["overfull"])
+
+    def test_inactive_channels_excluded(self):
+        chans = [
+            self._ch("offline-depleted", 0.05, active=False),
+            self._ch("offline-overfull", 0.95, active=False),
+        ]
+        inbound, outbound = engine.find_rebalance_candidates(channels=chans)
+        self.assertEqual(inbound, [])
+        self.assertEqual(outbound, [])
+
+    def test_inbound_sorted_most_depleted_first(self):
+        chans = [
+            self._ch("a", 0.18),
+            self._ch("b", 0.05),
+            self._ch("c", 0.12),
+        ]
+        inbound, _ = engine.find_rebalance_candidates(channels=chans)
+        self.assertEqual([c["chan_id"] for c in inbound], ["b", "c", "a"])
+
+    def test_outbound_sorted_most_overfull_first(self):
+        chans = [
+            self._ch("a", 0.82),
+            self._ch("b", 0.99),
+            self._ch("c", 0.91),
+        ]
+        _, outbound = engine.find_rebalance_candidates(channels=chans)
+        self.assertEqual([c["chan_id"] for c in outbound], ["b", "c", "a"])
+
+    def test_force_override_uses_custom_threshold(self):
+        # With force=0.4, anything <0.4 is inbound, >0.4 is outbound — bypasses
+        # the normal 0.20/0.80 thresholds entirely.
+        chans = [
+            self._ch("low", 0.30),    # would be 'mid' under defaults
+            self._ch("high", 0.55),   # would be 'mid' under defaults
+        ]
+        inbound, outbound = engine.find_rebalance_candidates(channels=chans, force=0.4)
+        self.assertEqual([c["chan_id"] for c in inbound], ["low"])
+        self.assertEqual([c["chan_id"] for c in outbound], ["high"])
+
+
 if __name__ == "__main__":
     unittest.main()
