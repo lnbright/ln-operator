@@ -4,8 +4,18 @@ CLAUDE.md has the project context. The node is live on mainnet — be careful.
 
 # What to do
 
-Inspect the last 24 hours and produce a concise exec summary. Then send the
-summary to Telegram and print it to stdout. Optionally fix bugs you find.
+Inspect the last 24 hours and produce a concise exec summary. Then print
+it to stdout for the cron wrapper to log. Optionally fix bugs you find.
+
+The checks below are a non-exhaustive scaffold — concrete things known to
+matter today. Treat them as a floor, not a ceiling. Apply judgment: look
+at the whole picture and flag anything a careful operator would notice as
+off, even if it isn't on the list. New failure modes appear as the system
+evolves; the lists won't catch them, but a thoughtful read of the data
+will. If something *feels* wrong (numbers that don't add up, a peer behaving
+strangely, a timing pattern that doesn't match the cron schedule, a counter
+that should be moving but isn't, anything weird in the logs), investigate
+and call it out.
 
 ## 1. Inspect the past 24h
 
@@ -98,6 +108,7 @@ You're looking for things a human operator would notice as off:
 - Inactive/offline channels still being chosen as rebalance sources
 - DB write errors, LND REST errors, anything that bypassed the normal flow
 - Test failures or import errors
+- Anything else that catches your eye and doesn't fit the patterns above
 
 You are authorized to unblock yourself on anything code-related — real bugs,
 obvious dead code, broken imports, stale comments, missing edge-case
