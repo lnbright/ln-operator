@@ -82,7 +82,7 @@ ln-operator/
 ### 1. Clone
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ln-operator.git
+git clone https://github.com/jr21M/ln-operator.git
 cd ln-operator
 ```
 
