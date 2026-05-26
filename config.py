@@ -75,7 +75,9 @@ FEE_HYSTERESIS_EDGE_LOW        = 0.20     # crossing into/out of this also escap
 FEE_HYSTERESIS_EDGE_HIGH       = 0.80     # crossing into/out of this also escapes
 
 # Market multiplier — slow-moving per-channel adjustment from observed demand
-MARKET_MULT_STEP        = 0.05     # how much to nudge per nightly recompute
+MARKET_MULT_STEP        = 0.08     # how much to nudge per nightly recompute.
+                                   # 0.08 = full saturation (0→+2.0) in ~25 nights,
+                                   # full deflation (0→-0.5) in ~7 nights.
 MARKET_MULT_MIN         = -0.5     # never lower base by more than 50%
 MARKET_MULT_MAX         = 2.0      # cap at 3× base (1 + 2.0)
 MARKET_MULT_BUSY_HOURS  = 24       # forwards in last N hours → nudge up
