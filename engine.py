@@ -455,14 +455,16 @@ def _attempt_single_rebalance(plan, amount, max_fee_sats):
             fee = pay_result["fee_sat"]
             ppm = fee / amount * 1_000_000 if amount > 0 else 0
             return {"success": True, "fee_paid": fee, "fee_ppm": ppm,
-                    "failure_reason": ""}
+                    "failure_reason": "",
+                    "payment_hash": pay_result.get("payment_hash", "")}
         else:
             return {"success": False, "fee_paid": 0, "fee_ppm": 0,
-                    "failure_reason": pay_result.get("failure_reason", "unknown")}
+                    "failure_reason": pay_result.get("failure_reason", "unknown"),
+                    "payment_hash": pay_result.get("payment_hash", "")}
 
     except Exception as e:
         return {"success": False, "fee_paid": 0, "fee_ppm": 0,
-                "failure_reason": str(e)}
+                "failure_reason": str(e), "payment_hash": ""}
 
 
 def execute_rebalance(plan, dry_run=False):
@@ -508,6 +510,8 @@ def execute_rebalance(plan, dry_run=False):
     chunk_amount = remaining  # start with full amount
     min_chunk = 100_000       # never try less than 100k sats
     max_chunks = 10           # safety limit to prevent infinite splitting
+    last_failure_reason = ""
+    succeeded_chunks = 0
 
     for chunk_num in range(1, max_chunks + 1):
         if remaining < min_chunk:
@@ -521,14 +525,27 @@ def execute_rebalance(plan, dry_run=False):
         log.info("rebalance chunk %d: trying %s of %s remaining sats",
                  chunk_num, f"{chunk_amount:,}", f"{remaining:,}")
 
+        chunk_start = time.time()
         attempt = _attempt_single_rebalance(plan, chunk_amount, chunk_fee_limit)
+        chunk_duration = time.time() - chunk_start
 
         if attempt["success"]:
             total_moved += chunk_amount
             total_fees += attempt["fee_paid"]
             remaining -= chunk_amount
+            succeeded_chunks += 1
             log.info("  chunk %d succeeded: %s sats moved, fee %d sats (%.0f ppm)",
                      chunk_num, f"{chunk_amount:,}", attempt["fee_paid"], attempt["fee_ppm"])
+
+            # Persist this chunk as its own row so sync_rebalances can dedup by
+            # payment_hash instead of misattributing it to a "manual" send.
+            db.save_rebalance_attempt(
+                plan["source_chan_id"], plan["target_chan_id"],
+                plan["source_alias"], plan["target_alias"],
+                chunk_amount, attempt["fee_paid"],
+                True, "", chunk_duration,
+                payment_hash=attempt.get("payment_hash") or None,
+            )
 
             # Try another chunk at same size if there's remaining
             if remaining < min_chunk:
@@ -538,12 +555,13 @@ def execute_rebalance(plan, dry_run=False):
         else:
             log.info("  chunk %d failed: %s — halving amount",
                      chunk_num, attempt["failure_reason"])
+            last_failure_reason = attempt["failure_reason"]
             # Halve the amount and retry
             chunk_amount = chunk_amount // 2
             if chunk_amount < min_chunk:
                 log.info("  chunk size %s below minimum %s — giving up",
                          f"{chunk_amount:,}", f"{min_chunk:,}")
-                result["failure_reason"] = attempt["failure_reason"]
+                result["failure_reason"] = last_failure_reason
                 break
 
     duration = time.time() - start
@@ -553,23 +571,22 @@ def execute_rebalance(plan, dry_run=False):
         result["amount"] = total_moved
         result["fee_paid"] = total_fees
         result["fee_ppm"] = total_fees / total_moved * 1_000_000 if total_moved > 0 else 0
-        log.info("rebalance complete: %s→%s moved %s of %s sats in %.1fs, "
+        log.info("rebalance complete: %s→%s moved %s of %s sats in %.1fs across %d chunk(s), "
                  "total fee %d sats (%.0f ppm)",
                  plan["source_alias"], plan["target_alias"],
                  f"{total_moved:,}", f"{plan['amount_sats']:,}",
-                 duration, total_fees, result["fee_ppm"])
+                 duration, succeeded_chunks, total_fees, result["fee_ppm"])
     else:
         log.warning("rebalance failed completely: %s→%s — no sats moved after %d attempts in %.1fs",
                     plan["source_alias"], plan["target_alias"], chunk_num, duration)
-
-    # Log to database
-    db.save_rebalance_attempt(
-        plan["source_chan_id"], plan["target_chan_id"],
-        plan["source_alias"], plan["target_alias"],
-        total_moved if total_moved > 0 else plan["amount_sats"],
-        total_fees,
-        result["success"], result["failure_reason"], duration
-    )
+        result["failure_reason"] = result["failure_reason"] or last_failure_reason
+        # Only log a row for total failures — successful chunks were already saved above.
+        db.save_rebalance_attempt(
+            plan["source_chan_id"], plan["target_chan_id"],
+            plan["source_alias"], plan["target_alias"],
+            plan["amount_sats"], 0,
+            False, result["failure_reason"], duration,
+        )
 
     return result
 

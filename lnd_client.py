@@ -339,6 +339,7 @@ def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
             fee_sat += int(route.get("total_fees", 0))
 
     failure_reason = last_result.get("failure_reason", "") if status != "SUCCEEDED" else ""
+    payment_hash = last_result.get("payment_hash", "")
 
     log.debug("send_payment_v2 result: status=%s fee=%d sats reason=%s",
               status, fee_sat, failure_reason)
@@ -347,6 +348,7 @@ def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
         "status": status,
         "fee_sat": fee_sat,
         "failure_reason": failure_reason,
+        "payment_hash": payment_hash,
     }
 
 

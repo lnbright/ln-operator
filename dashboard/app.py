@@ -176,8 +176,10 @@ def get_dashboard_data():
     data["info"]       = info
     data["lnd_uptime"] = get_lnd_uptime()
 
-    # Channels — enriched with operator DB performance
-    channels_raw, _ = lnd_get("/v1/channels")
+    # Channels — enriched with operator DB performance.
+    # peer_alias_lookup=true asks LND to resolve aliases from its graph view,
+    # otherwise the field comes back empty and the UI falls back to pubkey.
+    channels_raw, _ = lnd_get("/v1/channels?peer_alias_lookup=true")
     raw_channels = channels_raw.get("channels", []) if channels_raw else []
     channels_enriched = []
     for ch in raw_channels:
