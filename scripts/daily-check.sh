@@ -14,14 +14,23 @@ CLAUDE=/usr/bin/claude
 cd "$REPO" || exit 1
 mkdir -p "$(dirname "$LOG")"
 
+# Rotate log at 1MB — keep one previous file. Daily writes are ~5KB,
+# so this caps history at roughly 400 days with one rollover.
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG")" -gt 1048576 ]; then
+  mv "$LOG" "$LOG.1"
+fi
+
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
 {
   echo
   echo "===== daily-check started $(ts) ====="
+  # --max-budget-usd 5 caps API spend per run (insurance against a
+  # runaway loop from a bad prompt change). Typical run is <$2.
   "$CLAUDE" -p "$(cat "$PROMPT")" \
     --dangerously-skip-permissions \
     --model claude-opus-4-7 \
+    --max-budget-usd 5 \
     2>&1
   rc=$?
   echo "===== daily-check finished $(ts) (exit=$rc) ====="

@@ -7,6 +7,9 @@
 *.db-wal
 *.db.bak*
 
+# Local baselines (channel state snapshots) — stays on the Pi
+baselines/
+
 # Python
 venv/
 __pycache__/
