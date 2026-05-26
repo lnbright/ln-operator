@@ -46,6 +46,28 @@ quietly producing wrong numbers. Always check, every day.
   (chan_id_in or chan_id_out matching a self-payment hop within the same
   second). If found, those forwards are double-counted as revenue.
 
+**Rebalance fees paid ↔ intended budget:**
+- For each successful auto rebalance row (`triggered_by='auto'`) in the
+  last 24h, reconstruct the budget that `engine.get_channel_rebalance_budget`
+  would have produced *at the time of the row*:
+    - `last_refill = most recent successful rebalance into the target chan
+       with timestamp < this row's timestamp`
+    - `failures = count of failed auto rebalances into the same target
+       between that prior success and this row`
+    - `budget_at_time = min((last_refill or REBALANCE_DEFAULT_BUDGET_PPM) ×
+       (1 + REBALANCE_BUDGET_ESCALATION_STEP × failures),
+       REBALANCE_MAX_BUDGET_PPM)`
+  Then assert `row.fee_ppm ≤ budget_at_time × 1.1` (the chunk wrapper adds
+  a 10% search buffer). Any overshoot is a bug — LND may have ignored the
+  fee_limit, or our plan passed a stale budget.
+- All successful auto rows must satisfy `fee_ppm ≤ REBALANCE_MAX_BUDGET_PPM`
+  as an absolute floor. Hard fail if violated.
+- Within a single rebalance attempt's chunks (same source→target within a
+  few seconds), per-chunk ppm should cluster. Flag any chunk that paid
+  ≥2× the median of the rest — likely a routing-fee spike that signals
+  the budget needs tightening.
+- Skip `triggered_by='manual'` rows for this check — no intent recorded.
+
 **Fee updates ↔ engine math:**
 - For each `fee_updates` row in the last 24h, reconstruct what
   `engine.compute_fee_target` would have produced given the recorded
