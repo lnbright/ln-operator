@@ -174,25 +174,30 @@ see `logging_config.py`).
 ## How It Works
 
 The pipeline runs four steps in sequence: **adjust_fees → rebalance_channels →
-sync_routing → healthcheck**. See [README.md](README.md) for the full design,
-fee formula, and rebalance-budget tiers. Setup-specific notes:
+sync_routing → healthcheck**. See [README.md](README.md) for the full design
+and the single-signal budget/fee model. Setup-specific notes:
 
 ### Fee Management
-- Formula: `ppm = FEE_MIN_PPM + (FEE_MAX_PPM - FEE_MIN_PPM) × (1 - local_ratio)`
-  with current defaults of 25–250 ppm. Base fee is always 0.
-- Skips LND writes if the new ppm is within 5 ppm of the current value (avoids
-  gossip spam).
+- Sigmoid base (`SIGMOID_MIN_PPM`…`SIGMOID_MAX_PPM`, currently 25-250) on
+  `local_ratio`, plus a slow per-channel market multiplier, plus an outbound
+  floor of `last_refill_ppm × REBALANCE_FEE_MARGIN` (active from the first
+  successful refill). Hard ceiling: `FEE_HARD_CEILING_PPM` (5000). Hysteresis
+  prevents gossip spam.
 - Manual pins (`set_fee` / `clear_fee`) override the formula per-channel and
   are stored in the `fee_overrides` table. Logged with reason `manual pin: N ppm`
-  vs the auto reason `auto: local_ratio=...`. The dashboard's *Recent Fee Updates*
-  card tags each row with a `📌 pin` or `auto` badge in the Source column.
+  vs the auto reason. The dashboard's *Recent Fee Updates* card tags each row
+  with a `📌 pin` or `auto` badge in the Source column.
 
 ### Rebalancing
 - Triggers on channels below 20% local (depleted) and above 80% local (overfull).
-- Per-channel fee budget uses a 3-tier system (discovery / proven / deadweight)
-  driven by channel maturity and earned fees — not a single global cap.
-- Auto-chunks on failure (halves down to 100k sats min). Fallback pairs: if
-  source→target has no route, tries the same source against an alternative target.
+- **Single-signal budget**: `last_refill_ppm × (1 + 0.20 × failures_since_last_success)`,
+  capped at `REBALANCE_MAX_BUDGET_PPM`. Bootstrap from
+  `REBALANCE_DEFAULT_BUDGET_PPM = 500` when no history. Failure escalation
+  handles both bootstrap and upward market drift.
+- Auto-chunks on failure (halves down to 100k sats min). Each successful chunk
+  is logged as its own success row in `rebalance_log` at its actual ppm.
+- Fallback pairs: if source→target has no route, tries the same source against
+  an alternative target.
 - Uses LND's Router `SendPaymentV2` with `outgoing_chan_id` so the route is
   pinned to the intended source channel.
 
@@ -215,16 +220,17 @@ All tuneable values are in `config.py`:
 
 | Setting | Default | What it does |
 |---------|---------|-------------|
-| `FEE_MIN_PPM` | 25 | Floor fee when channel is full |
-| `FEE_MAX_PPM` | 250 | Ceiling fee when channel is depleted |
+| `SIGMOID_MIN_PPM` | 25 | Outbound fee floor (channel full) |
+| `SIGMOID_MAX_PPM` | 250 | Outbound fee ceiling from sigmoid alone (channel depleted) |
+| `FEE_HARD_CEILING_PPM` | 5000 | Absolute outbound fee cap (floor can push above SIGMOID_MAX) |
 | `FEE_BASE_MSAT` | 0 | Base fee (0 is modern best practice) |
 | `REBALANCE_LOW_THRESHOLD` | 0.20 | Rebalance when local drops below 20% |
 | `REBALANCE_HIGH_THRESHOLD` | 0.80 | Rebalance when local exceeds 80% |
 | `REBALANCE_MAX_AMOUNT_RATIO` | 0.50 | Max sats moved per attempt (% of capacity) |
-| `REBALANCE_DISCOVERY_PPM` | 1000 | Fee budget for new (unproven) channels |
-| `REBALANCE_HARD_CAP_PPM` | 1000 | Absolute ceiling for proven channels |
-| `REBALANCE_DEADWEIGHT_PPM` | 150 | Budget for zero-revenue channels |
-| `REBALANCE_DISCOVERY_DAYS` | 15 | Balanced days before a channel is judged |
+| `REBALANCE_DEFAULT_BUDGET_PPM` | 500 | Bootstrap budget when channel has no refill history |
+| `REBALANCE_MAX_BUDGET_PPM` | 5000 | Hard ceiling on what we'll pay to refill |
+| `REBALANCE_BUDGET_ESCALATION_STEP` | 0.20 | Budget +20% per consecutive failure since last success |
+| `REBALANCE_FEE_MARGIN` | 1.3 | Outbound fee floor = `last_refill_ppm × this` |
 | `TREASURY_MIN_RATIO` | 0.025 | Wallet reserve (default 2.5%) |
 | `MIN_CHANNEL_SIZE_SATS` | 1,000,000 | Minimum channel size |
 | `PREFERRED_CHANNEL_SIZE_SATS` | 3,000,000 | Target channel size in `plan` |

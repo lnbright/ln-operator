@@ -215,23 +215,24 @@ CREATE TABLE IF NOT EXISTS fee_overrides (
 );
 
 -- ─── Per-channel slow-moving signals ────────────────────────────
--- Populated by `main.py recompute_signals` (nightly). The 2h fee/rebalance
--- pipeline reads from here instead of recomputing on every run, which keeps
--- the floor stable and prevents hysteresis from fighting jiggling inputs.
+-- Populated by `main.py recompute_signals` (nightly).
 --   market_multiplier    : nudge applied to sigmoid base (e.g. +0.2 → 120%)
---   rebalance_cost_floor : minimum outbound ppm so we don't sell below refill
---   adaptive_cap_ppm     : per-channel rebalance budget ceiling
 --   last_fee_update_ts   : when this channel was last broadcast (hysteresis)
+--   last_local_ratio     : for edge-zone-crossing detection
+-- Vestigial columns (kept to avoid migration; no longer written or read by
+-- engine.py — rebalance budget and fee floor are derived live from rebalance_log):
+--   rebalance_cost_floor_*  : superseded by last_refill_ppm × REBALANCE_FEE_MARGIN
+--   adaptive_cap_*          : superseded by last_refill_ppm + failure escalation
 CREATE TABLE IF NOT EXISTS channel_signals (
     chan_id                       TEXT PRIMARY KEY,
     market_multiplier             REAL    NOT NULL DEFAULT 0.0,
-    rebalance_cost_floor_ppm      INTEGER NOT NULL DEFAULT 0,
-    rebalance_cost_floor_samples  INTEGER NOT NULL DEFAULT 0,
-    rebalance_cost_floor_source   TEXT,         -- 'auto', 'manual_fallback', 'default'
-    adaptive_cap_ppm              INTEGER NOT NULL DEFAULT 0,
-    adaptive_cap_samples          INTEGER NOT NULL DEFAULT 0,
+    rebalance_cost_floor_ppm      INTEGER NOT NULL DEFAULT 0,  -- vestigial
+    rebalance_cost_floor_samples  INTEGER NOT NULL DEFAULT 0,  -- vestigial
+    rebalance_cost_floor_source   TEXT,                         -- vestigial
+    adaptive_cap_ppm              INTEGER NOT NULL DEFAULT 0,   -- vestigial
+    adaptive_cap_samples          INTEGER NOT NULL DEFAULT 0,   -- vestigial
     last_fee_update_ts            INTEGER NOT NULL DEFAULT 0,
-    last_local_ratio              REAL,         -- for edge-zone-crossing detection
+    last_local_ratio              REAL,
     signals_updated_ts            INTEGER NOT NULL DEFAULT 0
 );
 """
@@ -679,6 +680,41 @@ def get_last_forward_ts(chan_id):
             (chan_id, chan_id),
         ).fetchone()
     return row["ts"] if row and row["ts"] else None
+
+
+def get_last_refill_ppm(chan_id):
+    """Return the fee_ppm of the most recent SUCCESSFUL rebalance into this channel.
+
+    Drives both the rebalance budget and the outbound fee floor.
+    Returns None if the channel has never been successfully refilled.
+    """
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT fee_ppm FROM rebalance_log
+            WHERE target_chan_id = ? AND success = 1 AND fee_ppm IS NOT NULL
+            ORDER BY ts DESC LIMIT 1
+        """, (chan_id,)).fetchone()
+    return int(row["fee_ppm"]) if row else None
+
+
+def count_failures_since_last_success(chan_id):
+    """Count failed rebalance attempts into this channel since its last success.
+
+    Returns 0 if no history or the last attempt was a success. Used to
+    escalate the rebalance budget on persistent failure (bootstrap and
+    upward-drift recovery).
+    """
+    with get_conn() as conn:
+        last_ok = conn.execute("""
+            SELECT MAX(ts) AS ts FROM rebalance_log
+            WHERE target_chan_id = ? AND success = 1
+        """, (chan_id,)).fetchone()
+        cutoff = last_ok["ts"] if last_ok and last_ok["ts"] else 0
+        row = conn.execute("""
+            SELECT COUNT(*) AS n FROM rebalance_log
+            WHERE target_chan_id = ? AND success = 0 AND ts > ?
+        """, (chan_id, cutoff)).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def get_sync_state(key, default=None):

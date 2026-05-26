@@ -9,7 +9,7 @@ Data sources:
 - LIVE from LND (on every page load): node status, channel balances, sync state,
   on-chain balance, recent payments and invoices
 - FROM SQLITE (populated by cron): routing fee revenue, rebalance history,
-  fee update log, per-channel profitability, alerts, channel maturity/tier
+  fee update log, per-channel profitability, alerts, channel maturity
 
 The dashboard is read-only — it never modifies LND state or the database.
 Designed to be accessed via Tailscale only (bound to Tailscale IP, not 0.0.0.0).
@@ -142,11 +142,6 @@ def get_channel_perf(chan_id, days30):
     reb_cost_all = reb_all["reb_cost"] if reb_all else 0
     bal_days = (mat["balanced_seconds"] / 86400) if mat else 0
 
-    if bal_days >= 30:
-        tier = "proven" if fee_rev_30 > 0 else "deadweight"
-    else:
-        tier = "discovery"
-
     return {
         "fee_rev":  fee_rev_30,
         "reb_cost": reb_cost_30,
@@ -156,7 +151,6 @@ def get_channel_perf(chan_id, days30):
         "net_all":      fee_rev_all - reb_cost_all,
         "forwards": rev30["forwards"] if rev30 else 0,
         "bal_days": round(bal_days, 1),
-        "tier":     tier,
     }
 
 
@@ -577,7 +571,6 @@ TEMPLATE = """
             <th>Rebal Cost 30d</th>
             <th>Net 30d</th>
             <th>Net Lifetime</th>
-            <th>Tier</th>
             <th>Status</th>
           </tr>
         </thead>
@@ -616,11 +609,6 @@ TEMPLATE = """
             </td>
             <td class="{% if perf.net_all > 0 %}amount-positive{% elif perf.net_all < 0 %}amount-negative{% else %}amount-muted{% endif %}">
               {% if perf.net_all != 0 %}{% if perf.net_all > 0 %}+{% endif %}{{ "{:,}".format(perf.net_all) }}{% else %}—{% endif %}
-            </td>
-            <td>
-              {% if perf.tier == 'proven' %}<span class="badge badge-green">proven</span>
-              {% elif perf.tier == 'deadweight' %}<span class="badge badge-red">dead</span>
-              {% else %}<span class="badge badge-yellow">discovery</span>{% endif %}
             </td>
             <td>
               {% if not ch.active %}<span class="badge badge-red">offline</span>

@@ -16,7 +16,6 @@ SQLite (via db). It writes results back to SQLite for the dashboard and CLI to r
 
 import time
 import math
-import statistics
 from config import (
     REBALANCE_LOW_THRESHOLD, REBALANCE_HIGH_THRESHOLD, REBALANCE_TARGET,
     FEE_BASE_MSAT,
@@ -27,13 +26,9 @@ from config import (
     FEE_HYSTERESIS_EDGE_LOW, FEE_HYSTERESIS_EDGE_HIGH,
     MARKET_MULT_STEP, MARKET_MULT_MIN, MARKET_MULT_MAX,
     MARKET_MULT_BUSY_HOURS, MARKET_MULT_SILENT_DAYS,
-    REBALANCE_FLOOR_WINDOW_DAYS, REBALANCE_FLOOR_MIN_SAMPLES,
-    REBALANCE_FLOOR_MULTIPLIER, REBALANCE_FLOOR_DEFAULT_PPM,
     REBALANCE_MAX_AMOUNT_RATIO,
-    REBALANCE_CAP_DEFAULT_PPM, REBALANCE_CAP_MIN_PPM, REBALANCE_CAP_MAX_PPM,
-    REBALANCE_CAP_MULTIPLIER,
-    REBALANCE_REVENUE_RATIO, REBALANCE_DISCOVERY_PPM,
-    REBALANCE_DEADWEIGHT_PPM, REBALANCE_DISCOVERY_DAYS,
+    REBALANCE_DEFAULT_BUDGET_PPM, REBALANCE_MAX_BUDGET_PPM,
+    REBALANCE_BUDGET_ESCALATION_STEP, REBALANCE_FEE_MARGIN,
     REBALANCE_BALANCED_RATIO, REBALANCE_BALANCED_RATIO_HIGH,
 )
 import lnd_client
@@ -106,14 +101,20 @@ def _edge_zone(local_ratio):
 def compute_fee_target(channel, signals, now):
     """Compute the target outbound fee for a channel + decide whether to broadcast.
 
-    Returns dict with: target_ppm, base_ppm, mult, floor_ppm, source, reason,
-    broadcast (bool), broadcast_reason.
+    The outbound floor is the last successful refill ppm × REBALANCE_FEE_MARGIN
+    (read live from rebalance_log). Activates after the first successful refill;
+    sigmoid alone drives fees before any refill history exists.
+
+    Returns dict with: target_ppm, base_ppm, mult, floor_ppm, source, reason.
     """
+    chan_id = channel["chan_id"]
     local_ratio = channel["local_ratio"]
 
     base = sigmoid_fee_ppm(local_ratio)
     mult = float(signals.get("market_multiplier", 0.0) or 0.0)
-    floor = int(signals.get("rebalance_cost_floor_ppm", 0) or 0)
+
+    last_refill = db.get_last_refill_ppm(chan_id)
+    floor = int(round(last_refill * REBALANCE_FEE_MARGIN)) if last_refill else 0
 
     # Adjusted base with market multiplier. In the low-local defense zone,
     # the multiplier may never push the fee BELOW the sigmoid output — that
@@ -184,7 +185,7 @@ def update_all_fees(dry_run=False):
       1. Pin in fee_overrides? → use pin, done.
       2. base   = sigmoid(local_ratio)
       3. mult   = market_multiplier  (defense zone only allows positive)
-      4. floor  = rebalance_cost_floor_ppm
+      4. floor  = last_refill_ppm × REBALANCE_FEE_MARGIN (0 if never refilled)
       5. target = clamp( max(base*(1+mult), floor), 0, FEE_HARD_CEILING_PPM )
       6. Broadcast only if hysteresis permits.
 
@@ -217,7 +218,8 @@ def update_all_fees(dry_run=False):
         pin = overrides.get(chan_id)
         if pin is not None:
             new_ppm = int(pin["pinned_ppm"])
-            floor = int(signals.get("rebalance_cost_floor_ppm", 0) or 0)
+            last_refill = db.get_last_refill_ppm(chan_id)
+            floor = int(round(last_refill * REBALANCE_FEE_MARGIN)) if last_refill else 0
             if floor and new_ppm < floor:
                 log.warning("fees: %s pin %d ppm is BELOW rebalance floor %d ppm — "
                             "you may be selling below refill cost",
@@ -294,60 +296,6 @@ def update_all_fees(dry_run=False):
 
 # ─── Signal recomputation (nightly job) ──────────────────────────
 
-def compute_rebalance_cost_floor(chan_id):
-    """Return (floor_ppm, samples, source) for this channel.
-
-    Strategy:
-      1. Try auto-only successful rebalances last N days.
-      2. If too few samples, fall back to ALL successful (auto+manual).
-         (LNBiG case: if every refill is manual at market rate, that IS
-         the price signal — refusing to learn from it leaves the channel
-         priced below cost.)
-      3. If still empty, return REBALANCE_FLOOR_DEFAULT_PPM with source='default'.
-
-    Floor = median(samples) × REBALANCE_FLOOR_MULTIPLIER, rounded.
-    """
-    auto = db.get_target_rebalance_ppms(
-        chan_id, days=REBALANCE_FLOOR_WINDOW_DAYS, auto_only=True
-    )
-    if len(auto) >= REBALANCE_FLOOR_MIN_SAMPLES:
-        sample, source = auto, "auto"
-    else:
-        all_ = db.get_target_rebalance_ppms(
-            chan_id, days=REBALANCE_FLOOR_WINDOW_DAYS, auto_only=False
-        )
-        if len(all_) >= REBALANCE_FLOOR_MIN_SAMPLES:
-            sample, source = all_, "manual_fallback"
-        elif all_:
-            # Some data but below the trust threshold. Use it anyway —
-            # better than the global default for a channel that's
-            # actively being rebalanced.
-            sample, source = all_, "manual_fallback"
-        else:
-            return REBALANCE_FLOOR_DEFAULT_PPM, 0, "default"
-
-    median = statistics.median(sample)
-    floor = int(round(median * REBALANCE_FLOOR_MULTIPLIER))
-    return floor, len(sample), source
-
-
-def compute_adaptive_rebalance_cap(chan_id):
-    """Return (cap_ppm, samples) for this channel's rebalance budget ceiling.
-
-    Uses ALL successful rebalances (auto + manual) since manuals are the
-    only signal for channels where auto attempts always fail at the old cap.
-    """
-    sample = db.get_target_rebalance_ppms(
-        chan_id, days=REBALANCE_FLOOR_WINDOW_DAYS, auto_only=False
-    )
-    if not sample:
-        return REBALANCE_CAP_DEFAULT_PPM, 0
-    median = statistics.median(sample)
-    cap = int(round(median * REBALANCE_CAP_MULTIPLIER))
-    cap = max(REBALANCE_CAP_MIN_PPM, min(REBALANCE_CAP_MAX_PPM, cap))
-    return cap, len(sample)
-
-
 def compute_market_multiplier(chan_id, prev_mult):
     """Nudge the per-channel market multiplier based on observed forward activity.
 
@@ -394,34 +342,26 @@ def recompute_all_signals():
         chan_id = ch["chan_id"]
         prev = db.get_channel_signals(chan_id)
 
-        floor_ppm, floor_samples, floor_source = compute_rebalance_cost_floor(chan_id)
-        cap_ppm, cap_samples = compute_adaptive_rebalance_cap(chan_id)
         mult = compute_market_multiplier(chan_id, prev.get("market_multiplier", 0.0))
+        last_refill = db.get_last_refill_ppm(chan_id)
+        failures = db.count_failures_since_last_success(chan_id)
 
         db.upsert_channel_signals(
             chan_id,
             market_multiplier=mult,
-            rebalance_cost_floor_ppm=floor_ppm,
-            rebalance_cost_floor_samples=floor_samples,
-            rebalance_cost_floor_source=floor_source,
-            adaptive_cap_ppm=cap_ppm,
-            adaptive_cap_samples=cap_samples,
             signals_updated_ts=now,
         )
         results.append({
             "chan_id": chan_id,
             "alias": ch.get("peer_alias", ""),
-            "floor_ppm": floor_ppm,
-            "floor_samples": floor_samples,
-            "floor_source": floor_source,
-            "cap_ppm": cap_ppm,
-            "cap_samples": cap_samples,
+            "last_refill_ppm": last_refill,
+            "failures_since_success": failures,
             "mult": mult,
         })
-        log.info("recompute_signals: %s floor=%d ppm (%s, n=%d) cap=%d ppm (n=%d) mult=%+.2f",
+        log.info("recompute_signals: %s last_refill=%s ppm failures=%d mult=%+.2f",
                  ch.get("peer_alias", chan_id[:12]),
-                 floor_ppm, floor_source, floor_samples,
-                 cap_ppm, cap_samples, mult)
+                 last_refill if last_refill is not None else "none",
+                 failures, mult)
 
     return results
 
@@ -429,80 +369,44 @@ def recompute_all_signals():
 # ─── Rebalancing ─────────────────────────────────────────────────
 
 def get_channel_rebalance_budget(chan_id):
-    """Determine the max fee (in ppm) we're willing to pay to rebalance this channel.
+    """Max fee ppm we'll pay to refill this channel.
 
-    Three tiers:
-    1. PROVEN — has 30+ days of balanced time and routing history.
-       Budget = earned_ppm × 0.5 (never pay more than half what it earns).
+    Single-signal model — no tiers, no maturity gates:
 
-    2. DISCOVERY — new channel, or hasn't had enough balanced time to judge.
-       Budget = REBALANCE_DISCOVERY_PPM. Give it a fair shot.
+      budget = (last_refill_ppm or DEFAULT_BUDGET)
+               × (1 + ESCALATION_STEP × failures_since_last_success)
+               capped at REBALANCE_MAX_BUDGET_PPM
 
-    3. DEADWEIGHT — had 30+ balanced days but earned little or nothing.
-       Budget = REBALANCE_DEADWEIGHT_PPM. Minimal life support.
-
-    The tier budget is then capped by the per-channel adaptive cap from
-    channel_signals.adaptive_cap_ppm (computed nightly from observed
-    market price for refilling THIS channel). For channels with no
-    rebalance history the cap defaults to REBALANCE_CAP_DEFAULT_PPM.
-
-    Returns dict with max_fee_ppm and the tier/reasoning for logging.
+    Bootstrap: with no successful refill yet, starts at REBALANCE_DEFAULT_BUDGET_PPM
+    and walks up by ESCALATION_STEP per consecutive failure until a success lands.
+    Post-bootstrap: the same mechanism handles upward market drift — failures at the
+    last-known price escalate the budget until the new price is discovered.
     """
-    maturity = db.get_channel_maturity(chan_id)
-    earned_ppm = db.get_channel_earned_ppm(chan_id, days=30)
-    balanced_days = maturity["balanced_days"]
-    signals = db.get_channel_signals(chan_id)
-    adaptive_cap = int(signals.get("adaptive_cap_ppm") or 0) or REBALANCE_CAP_DEFAULT_PPM
-    cap_n = int(signals.get("adaptive_cap_samples") or 0)
-    cap_note = f"cap {adaptive_cap} ppm (adaptive, n={cap_n})" if cap_n else \
-               f"cap {adaptive_cap} ppm (default, no data)"
+    last_refill = db.get_last_refill_ppm(chan_id)
+    failures = db.count_failures_since_last_success(chan_id)
 
-    if balanced_days >= REBALANCE_DISCOVERY_DAYS:
-        # Channel has had enough balanced time — judge it on performance
-        if earned_ppm > 0:
-            # PROVEN: it routes and earns. Budget based on actual revenue.
-            budget = earned_ppm * REBALANCE_REVENUE_RATIO
-            budget = max(budget, REBALANCE_DEADWEIGHT_PPM)  # floor
-            budget = min(budget, adaptive_cap)              # adaptive ceiling
-            return {
-                "max_fee_ppm": int(budget),
-                "tier": "proven",
-                "reason": f"earns {earned_ppm:.0f} ppm, budget {budget:.0f} ppm "
-                          f"({REBALANCE_REVENUE_RATIO:.0%} of revenue, {cap_note})",
-                "earned_ppm": earned_ppm,
-                "balanced_days": balanced_days,
-            }
-        else:
-            # DEADWEIGHT: had its chance, earned nothing.
-            budget = min(REBALANCE_DEADWEIGHT_PPM, adaptive_cap)
-            return {
-                "max_fee_ppm": int(budget),
-                "tier": "deadweight",
-                "reason": f"{balanced_days:.0f} balanced days, 0 ppm earned — "
-                          f"minimal budget {budget} ppm ({cap_note})",
-                "earned_ppm": 0,
-                "balanced_days": balanced_days,
-            }
+    if last_refill is None:
+        base = REBALANCE_DEFAULT_BUDGET_PPM
+        anchor = "default"
     else:
-        # DISCOVERY: not enough balanced days yet. Give a fair shot — the
-        # baseline is REBALANCE_DISCOVERY_PPM, but if we already have
-        # observed rebalance cost for this target, respect that instead
-        # (otherwise channels like LNBiG, whose market price exceeds
-        # discovery budget, can never auto-rebalance and stay drained).
-        if cap_n > 0:
-            budget = max(REBALANCE_DISCOVERY_PPM, adaptive_cap)
-        else:
-            budget = REBALANCE_DISCOVERY_PPM
-        remaining = REBALANCE_DISCOVERY_DAYS - balanced_days
-        return {
-            "max_fee_ppm": int(budget),
-            "tier": "discovery",
-            "reason": f"{balanced_days:.0f}/{REBALANCE_DISCOVERY_DAYS} balanced days — "
-                      f"discovery budget {budget} ppm "
-                      f"({remaining:.0f} days until judged, {cap_note})",
-            "earned_ppm": earned_ppm,
-            "balanced_days": balanced_days,
-        }
+        base = last_refill
+        anchor = "last_refill"
+
+    budget = base * (1.0 + REBALANCE_BUDGET_ESCALATION_STEP * failures)
+    budget = min(int(round(budget)), REBALANCE_MAX_BUDGET_PPM)
+
+    if failures > 0:
+        reason = (f"{anchor} {base} ppm × (1 + {REBALANCE_BUDGET_ESCALATION_STEP:.0%}"
+                  f" × {failures} fails) → {budget} ppm")
+    else:
+        reason = f"{anchor} {base} ppm → {budget} ppm"
+
+    return {
+        "max_fee_ppm": budget,
+        "reason": reason,
+        "last_refill_ppm": last_refill,
+        "failures_since_success": failures,
+    }
 
 
 def find_rebalance_candidates(channels=None, force=None):
@@ -644,9 +548,9 @@ def plan_rebalances(channels=None, force=None):
             amount = min(remaining_target, source_available)
             max_fee = int(amount * max_fee_ppm / 1_000_000 * 1.1)
 
-            log.info("rebalance plan: %s→%s %s sats [%s, %d ppm cap]",
+            log.info("rebalance plan: %s→%s %s sats [%d ppm cap — %s]",
                      source_ch["peer_alias"], target_ch["peer_alias"],
-                     f"{amount:,}", budget["tier"], max_fee_ppm)
+                     f"{amount:,}", max_fee_ppm, budget["reason"])
 
             plans.append({
                 "source_chan_id": source_ch["chan_id"],
@@ -661,7 +565,6 @@ def plan_rebalances(channels=None, force=None):
                 "amount_sats": amount,
                 "max_fee_sats": max_fee,
                 "max_fee_ppm": max_fee_ppm,
-                "budget_tier": budget["tier"],
                 "budget_reason": budget["reason"],
             })
 
@@ -693,9 +596,9 @@ def plan_rebalances(channels=None, force=None):
             amount = min(target_amount, source_available)
             max_fee = int(amount * max_fee_ppm / 1_000_000 * 1.1)
 
-            log.info("rebalance fallback: %s→%s %s sats [%s, %d ppm cap]",
+            log.info("rebalance fallback: %s→%s %s sats [%d ppm cap — %s]",
                      source_ch["peer_alias"], target_ch["peer_alias"],
-                     f"{amount:,}", budget["tier"], max_fee_ppm)
+                     f"{amount:,}", max_fee_ppm, budget["reason"])
 
             plans.append({
                 "source_chan_id": source_ch["chan_id"],
@@ -710,7 +613,6 @@ def plan_rebalances(channels=None, force=None):
                 "amount_sats": amount,
                 "max_fee_sats": max_fee,
                 "max_fee_ppm": max_fee_ppm,
-                "budget_tier": budget["tier"],
                 "budget_reason": budget["reason"],
                 "is_fallback": True,
             })
@@ -788,15 +690,15 @@ def execute_rebalance(plan, dry_run=False):
     }
 
     if dry_run:
-        log.info("dry run: would rebalance %s→%s %s sats [%s, %d ppm cap]",
+        log.info("dry run: would rebalance %s→%s %s sats [%d ppm cap]",
                  plan["source_alias"], plan["target_alias"],
-                 f"{plan['amount_sats']:,}", plan.get("budget_tier","?"), plan["max_fee_ppm"])
+                 f"{plan['amount_sats']:,}", plan["max_fee_ppm"])
         result["failure_reason"] = "dry_run"
         return result
 
-    log.info("executing rebalance: %s→%s %s sats (max fee %d ppm) [%s]",
+    log.info("executing rebalance: %s→%s %s sats (max fee %d ppm)",
              plan["source_alias"], plan["target_alias"],
-             f"{plan['amount_sats']:,}", plan["max_fee_ppm"], plan.get("budget_tier","?"))
+             f"{plan['amount_sats']:,}", plan["max_fee_ppm"])
     start = time.time()
 
     total_moved = 0
@@ -930,7 +832,7 @@ def get_channel_health_report(channels=None):
         )
         db.update_channel_maturity(ch["chan_id"], is_balanced)
 
-        # Enrich with historical performance and budget tier
+        # Enrich with historical performance and current rebalance budget
         try:
             perf = db.get_channel_performance(ch["chan_id"])
             ch_report["fee_revenue_30d"] = perf["fee_revenue"]
@@ -942,7 +844,6 @@ def get_channel_health_report(channels=None):
 
         try:
             budget = get_channel_rebalance_budget(ch["chan_id"])
-            ch_report["budget_tier"] = budget["tier"]
             ch_report["budget_ppm"] = budget["max_fee_ppm"]
             ch_report["budget_reason"] = budget["reason"]
         except Exception:

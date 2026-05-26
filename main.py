@@ -258,15 +258,15 @@ def cmd_plan(args):
 
 
 def cmd_recompute_signals(args):
-    """Recompute slow per-channel signals (floor, cap, market multiplier).
+    """Refresh slow per-channel signals (market multiplier).
 
-    Designed for a nightly cron. Reads from rebalance_log and forwarding_log,
-    writes to channel_signals. The 2h pipeline reads this table — no need to
-    recompute these on every run.
+    Designed for a nightly cron. Reads from forwarding_log and writes
+    market_multiplier to channel_signals. The rebalance budget and fee floor
+    are derived live from rebalance_log on every 2h pipeline run — no caching.
     """
     log = get_logger("main")
     log.info("recompute_signals: starting")
-    print("\n⚡ LN Operator — Recompute Channel Signals")
+    print("\n⚡ LN Operator — Refresh Channel Signals")
     print("=" * 45)
 
     results = engine.recompute_all_signals()
@@ -275,13 +275,11 @@ def cmd_recompute_signals(args):
         print("No channels found.")
         return
 
-    print(f"\n{'Peer':<24} {'Floor':>10} {'Source':<16} {'Cap':>10} {'Mult':>7}")
-    print("─" * 70)
+    print(f"\n{'Peer':<24} {'Last Refill':>12} {'Failures':>9} {'Mult':>7}")
+    print("─" * 60)
     for r in results:
-        floor_str = f"{r['floor_ppm']} ppm"
-        cap_str   = f"{r['cap_ppm']} ppm"
-        src       = f"{r['floor_source']} (n={r['floor_samples']})"
-        print(f"  {r['alias'][:22]:<22} {floor_str:>10} {src:<16} {cap_str:>10} {r['mult']:+.2f}")
+        refill = f"{r['last_refill_ppm']} ppm" if r['last_refill_ppm'] is not None else "—"
+        print(f"  {r['alias'][:22]:<22} {refill:>12} {r['failures_since_success']:>9} {r['mult']:+.2f}")
     print()
     log.info("recompute_signals: updated %d channels", len(results))
 
@@ -467,15 +465,14 @@ def cmd_rebalance_channels(args):
                 print(f"\n  {len(fallbacks)} fallback pair(s) available if primary fails.")
         print()
 
-        print(f"  Primary plans ({len(primaries)}):") 
+        print(f"  Primary plans ({len(primaries)}):")
         for p in primaries:
-            tier_icon = {"proven": "📊", "discovery": "🔍", "deadweight": "💤"}.get(p.get("budget_tier",""), "•")
             max_fee_sats = int(p["amount_sats"] * p["max_fee_ppm"] / 1_000_000 * 1.1)
             print(f"    {p['source_alias']} ({p['source_local_ratio']:.0%}) "
                   f"→ {p['target_alias']} ({p['target_local_ratio']:.0%})")
             print(f"      Amount:   {p['amount_sats']:,} sats")
             print(f"      Fee cap:  {p['max_fee_ppm']} ppm = {max_fee_sats:,} sats max")
-            print(f"      Tier:     {tier_icon} {p.get('budget_tier','?')} — {p.get('budget_reason','')}")
+            print(f"      Budget:   {p.get('budget_reason','')}")
 
         if fallbacks:
             # Group fallbacks by target
@@ -544,7 +541,7 @@ def cmd_rebalance_channels(args):
             print(f"  ✓ {p['source_alias']} → {p['target_alias']}: "
                   f"{result.get('amount', p['amount_sats']):,} sats moved, "
                   f"fee {result['fee_paid']:,} sats "
-                  f"({result['fee_ppm']:.0f} ppm) [{p.get('budget_tier','?')}]")
+                  f"({result['fee_ppm']:.0f} ppm)")
         else:
             failed_pairs.add((source_id, target_id))
             fallback_available = any(
@@ -650,7 +647,7 @@ def cmd_run(args):
             if result["success"]:
                 print(f"  ✓ {p['source_alias']} → {p['target_alias']}: "
                       f"{p['amount_sats']:,} sats, fee {result['fee_paid']:,} sats "
-                      f"({result['fee_ppm']:.0f} ppm) [{p.get('budget_tier','?')}]")
+                      f"({result['fee_ppm']:.0f} ppm)")
             else:
                 print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
                       f"{result['failure_reason']}")
@@ -1071,7 +1068,7 @@ def main():
         help="chan_id or peer alias (substring match)")
 
     p_signals = subparsers.add_parser("recompute_signals",
-        help="[automated] Recompute slow per-channel signals (floor, adaptive cap, market mult). Designed for a nightly cron.")
+        help="[automated] Refresh slow per-channel signals (market multiplier). Designed for a nightly cron.")
 
     args = parser.parse_args()
 

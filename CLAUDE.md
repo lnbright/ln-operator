@@ -12,12 +12,25 @@
 - Channel open time used as floor to prevent old payment misattribution
 - Fee scoring removed from candidates — local graph fee data too unreliable
 - agent.py exists but plan command doesn't use it (pure local graph)
-- Rebalance auto-chunks on failure (halves down to 100k min)
+- Rebalance auto-chunks on failure (halves down to 100k min). Each successful
+  chunk is its own success row in rebalance_log at its actual ppm.
 - Fallback pairs: if source→target fails, tries source→alternative target
 - Manual fee pins (`fee_overrides` table) suppress auto-fees per channel.
   `engine.update_all_fees` checks the table first; pinned channels use the
   stored ppm with reason `manual pin: N ppm` instead of `calculate_fee_ppm`.
   Set via `main.py set_fee`, cleared via `main.py clear_fee`, shown by `status`.
+- **Single-signal budget + fee floor (no tiers)**: `last_refill_ppm` (most
+  recent successful rebalance into a channel) drives BOTH the rebalance
+  budget AND the outbound fee floor. Budget = `last_refill ×
+  (1 + 0.20 × failures_since_last_success)`, capped at 5000.
+  Outbound floor = `last_refill × 1.3`. Bootstrap from
+  `REBALANCE_DEFAULT_BUDGET_PPM = 500` when no history; failure escalation
+  handles both bootstrap and upward market drift. No PROVEN/DISCOVERY/DEADWEIGHT
+  tiers, no `earned_ppm × revenue_ratio`, no median/window smoothing,
+  no `adaptive_cap_ppm` or `rebalance_cost_floor_ppm` columns (those
+  channel_signals columns are leftover and unused — kept to avoid migration).
+  Knobs: `REBALANCE_DEFAULT_BUDGET_PPM`, `REBALANCE_MAX_BUDGET_PPM`,
+  `REBALANCE_BUDGET_ESCALATION_STEP`, `REBALANCE_FEE_MARGIN`.
 
 ## LND Access
 - REST: https://127.0.0.1:9000
@@ -41,3 +54,4 @@
 
 ## Crontab
 0 */2 * * * cd /home/pi/ln-operator && venv/bin/python3 main.py pipeline 2>&1
+15 3 * * * cd /home/pi/ln-operator && venv/bin/python3 main.py recompute_signals >> logs/signals.log 2>&1
