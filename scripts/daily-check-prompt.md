@@ -27,7 +27,46 @@ Also run:
   that says ERROR or WARNING you don't recognise
 - `make test` — confirm the unit suite still passes
 
-## 2. Diagnose
+## 2. Reconcile data integrity
+
+These are the silent-failure modes — pipelines that look fine but are
+quietly producing wrong numbers. Always check, every day.
+
+**Payments ↔ rebalance_log:**
+- Pull last 24h of successful self-payments from LND (`/v1/payments`,
+  filter where final-hop pubkey == our pubkey). Compare against
+  `rebalance_log` rows. Every self-payment must have a matching row
+  (by `payment_hash`). Flag any LND payment we never logged.
+- For matched rows, confirm `amount_sats` and `fee_sats` agree with the
+  LND payment. Drift here usually means a sync bug.
+- Flag rebalance_log rows with no `payment_hash` that are newer than the
+  legacy backfill cutoff (engine.execute_rebalance has saved hashes since
+  the rebalance chunking change — anything recent without one is suspect).
+- Confirm no `forwarding_log` row is actually a leg of our own rebalance
+  (chan_id_in or chan_id_out matching a self-payment hop within the same
+  second). If found, those forwards are double-counted as revenue.
+
+**Fee updates ↔ engine math:**
+- For each `fee_updates` row in the last 24h, reconstruct what
+  `engine.compute_fee_target` would have produced given the recorded
+  `local_ratio_at_update`, the channel's `market_multiplier` from
+  `channel_signals`, and the `last_refill_ppm` from `rebalance_log` as of
+  that timestamp. The reconstructed `target_ppm` should match the row's
+  `new_ppm` within ±1 ppm (rounding). Any larger drift means either the
+  math changed or the broadcast bypassed the pipeline.
+- For channels in `fee_overrides`, confirm every recent broadcast used the
+  pinned ppm. A non-pin broadcast on a pinned channel is a bug.
+- Cross-check `fee_updates.new_ppm` against the live LND `/v1/fees` for
+  each channel. A mismatch means LND silently ignored an update or we lost
+  state between writing the row and broadcasting.
+- Confirm hysteresis was respected: no two broadcasts within
+  `FEE_HYSTERESIS_COOLDOWN_SEC` for the same channel unless the row's
+  reason mentions snap or edge-crossing.
+
+Report each discrepancy as a one-line `Issues:` entry. Quote actual values
+(`expected X, got Y on chan_id=...`) — vague "data looks off" is useless.
+
+## 3. Diagnose
 
 You're looking for things a human operator would notice as off:
 - Channels that are stuck depleted or overfull and aren't being rebalanced
@@ -50,7 +89,7 @@ handling, anything you'd flag in a normal code review. The loop is:
 If `make test` fails after your edit, revert and report instead of pushing.
 Config tuning (`config.py` knobs) is OUT of scope — those go in Suggestions.
 
-## 3. Suggest (do NOT auto-apply)
+## 4. Suggest (do NOT auto-apply)
 
 Based on the day's data, think about whether to suggest:
 - Tweaks to `config.py` knobs: `REBALANCE_DEFAULT_BUDGET_PPM`,
@@ -65,7 +104,7 @@ Based on the day's data, think about whether to suggest:
 Put these in the summary as `Suggestions:`. Do not edit config.py or open
 channels — these are human decisions.
 
-## 4. Exec summary
+## 5. Exec summary
 
 Compose a summary, ≤10 short lines. Format:
 
@@ -83,7 +122,7 @@ Suggestions:
 - <up to 3 bullets, terse>
 ```
 
-## 5. Deliver
+## 6. Deliver
 
 Print the summary to stdout. The cron wrapper appends stdout to
 `logs/daily-check.log`, which is where the operator reads it. Don't try to
