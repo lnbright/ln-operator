@@ -289,8 +289,28 @@ appear inflated because LND's base fee dominates at low amounts).
 
 ### Fallback Pairs
 
-Source→target fails → try same source with different target. Triggered when
-the source channel has failed on any pair during the run.
+For every depleted target, the planner emits one or more **primary** pairs
+(sources whose surplus sums to the target's deficit) and then **fallback**
+pairs (every other overfull source paired with the same target).
+
+At execution time the run keeps two ledgers:
+
+- `target_deficits` — sats each target still needs.
+- `source_remaining` — sats each source can still send.
+
+Each plan is capped at `min(plan amount, target deficit, source remaining)`
+before being attempted, and both ledgers decrement on success. A fallback
+fires only when its target's deficit is still ≥ 50k *and* its source still
+has ≥ 50k to send — both conditions emerge naturally from the ledgers, no
+separate gating. This means:
+
+- A primary that partially fills its target leaves the deficit open, and
+  the next plan (often a fallback against the same target) picks up where
+  it left off without overshooting.
+- A source already drained by an earlier successful plan auto-skips the
+  rest of its plans, avoiding wasted insufficient-balance attempts.
+- A target fully filled removes itself from contention; remaining
+  fallbacks for it are skipped.
 
 ### Force Mode
 

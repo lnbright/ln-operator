@@ -385,6 +385,103 @@ def _show_rebalance_scenarios(current_force=None):
     print(f"\n  Preview: venv/bin/python3 main.py rebalance_channels --force 0.40 --dry-run")
 
 
+def execute_rebalance_plans(plans, log, executor=None):
+    """Execute the planner's plan list, carrying state across attempts.
+
+    Two ledgers drive every gating decision:
+      - target_deficits: sats each depleted target still needs.
+      - source_remaining: sats each overfull source can still send.
+
+    Each plan is capped at min(plan amount, target deficit, source remaining)
+    before being executed. Successful chunks decrement both ledgers; when
+    either side drops below the 50k minimum the plan is skipped. This means
+    fallbacks fire naturally — they're just later entries in the plan list,
+    tried only when earlier ones didn't drain the deficit.
+
+    executor is engine.execute_rebalance by default; pass in a stub for tests.
+    """
+    if executor is None:
+        executor = engine.execute_rebalance
+
+    MIN_CHUNK = 50_000
+
+    target_deficits = {}
+    source_remaining = {}
+    for p in plans:
+        tid = p["target_chan_id"]
+        sid = p["source_chan_id"]
+        if "target_total_deficit" in p:
+            target_deficits.setdefault(tid, p["target_total_deficit"])
+        else:
+            # legacy plan dict: approximate from summed primary amounts
+            if not p.get("is_fallback"):
+                target_deficits[tid] = target_deficits.get(tid, 0) + p["amount_sats"]
+        if "source_total_surplus" in p:
+            source_remaining.setdefault(sid, p["source_total_surplus"])
+        else:
+            if not p.get("is_fallback"):
+                source_remaining[sid] = source_remaining.get(sid, 0) + p["amount_sats"]
+
+    results = []
+    for p in plans:
+        source_id = p["source_chan_id"]
+        target_id = p["target_chan_id"]
+        deficit = target_deficits.get(target_id, 0)
+        available = source_remaining.get(source_id, 0)
+
+        if deficit < MIN_CHUNK:
+            log.debug("skipping %s→%s — target deficit %s below minimum",
+                      p["source_alias"], p["target_alias"], f"{deficit:,}")
+            continue
+        if available < MIN_CHUNK:
+            log.debug("skipping %s→%s — source surplus %s exhausted",
+                      p["source_alias"], p["target_alias"], f"{available:,}")
+            continue
+
+        attempt_amount = min(p["amount_sats"], deficit, available)
+        if attempt_amount < MIN_CHUNK:
+            continue
+
+        capped = dict(p)
+        capped["amount_sats"] = attempt_amount
+        capped["max_fee_sats"] = int(
+            attempt_amount * p["max_fee_ppm"] / 1_000_000 * 1.1
+        )
+
+        kind = "fallback" if p.get("is_fallback") else "primary"
+        log.info("executing %s: %s→%s capped at %s sats "
+                 "(deficit %s, source %s available)",
+                 kind, p["source_alias"], p["target_alias"],
+                 f"{attempt_amount:,}", f"{deficit:,}", f"{available:,}")
+
+        result = executor(capped, dry_run=False)
+        results.append(result)
+
+        moved = result.get("amount", 0) if result.get("success") else 0
+        if moved > 0:
+            target_deficits[target_id] = max(0, deficit - moved)
+            source_remaining[source_id] = max(0, available - moved)
+            log.info("rebalance succeeded: %s→%s moved %s sats (fee %d sats, %.0f ppm)",
+                     p["source_alias"], p["target_alias"],
+                     f"{moved:,}", result["fee_paid"], result["fee_ppm"])
+            print(f"  ✓ {p['source_alias']} → {p['target_alias']}: "
+                  f"{moved:,} sats moved, "
+                  f"fee {result['fee_paid']:,} sats "
+                  f"({result['fee_ppm']:.0f} ppm)")
+            still_needed = target_deficits[target_id]
+            if still_needed >= MIN_CHUNK:
+                print(f"      {p['target_alias']} still needs {still_needed:,} sats — "
+                      f"continuing with next plan")
+        else:
+            log.warning("rebalance failed %s→%s: %s",
+                        p["source_alias"], p["target_alias"],
+                        result.get("failure_reason", "unknown"))
+            print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
+                  f"{result.get('failure_reason', 'unknown')}")
+
+    return results
+
+
 def cmd_rebalance_channels(args):
     """Check for and execute rebalancing."""
     log = get_logger("main")
@@ -457,14 +554,8 @@ def cmd_rebalance_channels(args):
                 print(f"    • A second depleted channel (to try a different target)")
                 print(f"  If this pair fails, nothing else can be tried this run.")
         else:
-            if num_targets > num_sources:
-                print(f"\n  {num_targets} depleted channels, {num_sources} overfull source(s).")
-                print(f"  {len(fallbacks)} fallback(s): if primary fails, source tries a different target.")
-            elif num_sources > num_targets:
-                print(f"\n  {num_targets} depleted channel(s), {num_sources} overfull sources.")
-                print(f"  {len(fallbacks)} fallback(s): if primary fails, target tries a different source.")
-            else:
-                print(f"\n  {len(fallbacks)} fallback pair(s) available if primary fails.")
+            print(f"\n  {num_targets} depleted channel(s), {num_sources} overfull source(s).")
+            print(f"  {len(fallbacks)} fallback(s) — tried in order until each target's deficit is filled.")
         print()
 
         print(f"  Primary plans ({len(primaries)}):")
@@ -477,25 +568,12 @@ def cmd_rebalance_channels(args):
             print(f"      Budget:   {p.get('budget_reason','')}")
 
         if fallbacks:
-            # Group fallbacks by target
-            from collections import defaultdict
-            fallback_by_target = defaultdict(list)
+            print(f"\n  Fallback plans (each tried only if its target still has a deficit):")
             for fp in fallbacks:
-                fallback_by_target[fp["target_alias"]].append(fp)
-
-            print(f"\n  Fallback plans (tried if primary fails):")
-            for fp in fallbacks:
-                # Find which primary this is a fallback for (same source, different target)
-                primary_for = next(
-                    (p["target_alias"] for p in primaries
-                     if p["source_chan_id"] == fp["source_chan_id"]
-                     and p["target_chan_id"] != fp["target_chan_id"]),
-                    "primary"
-                )
                 print(f"    {fp['source_alias']} ({fp['source_local_ratio']:.0%}) "
-                      f"→ {fp['target_alias']} ({fp['target_local_ratio']:.0%}) "
-                      f"[if {fp['source_alias']}→{primary_for} fails]")
-                print(f"      Amount:   {fp['amount_sats']:,} sats")
+                      f"→ {fp['target_alias']} ({fp['target_local_ratio']:.0%})")
+                print(f"      Amount:   up to {fp['amount_sats']:,} sats "
+                      f"(capped to remaining deficit at run time)")
                 print(f"      Fee cap:  {fp['max_fee_ppm']} ppm")
 
         # Show scenarios if there are depleted channels without fallbacks
@@ -505,62 +583,7 @@ def cmd_rebalance_channels(args):
         return []
 
     print(f"\nExecuting {len(primaries)} primary plan(s) (+ {len(fallbacks)} fallback(s)):\n")
-    results = []
-    satisfied_targets = set()  # target chan_ids successfully rebalanced this run
-    failed_pairs = set()        # (source_chan_id, target_chan_id) that failed
-
-    for p in plans:
-        source_id = p["source_chan_id"]
-        target_id = p["target_chan_id"]
-
-        # Skip if target already got sats this run
-        if target_id in satisfied_targets:
-            log.debug("skipping %s→%s — target already satisfied",
-                      p["source_alias"], p["target_alias"])
-            continue
-
-        # Fallbacks only fire if the source has already failed on a primary plan.
-        # This means: source failed on its primary target, so now try the same source
-        # against an alternative target.
-        if p.get("is_fallback"):
-            source_had_failure = any(src == source_id for src, _ in failed_pairs)
-            if not source_had_failure:
-                log.debug("skipping fallback %s→%s — source %s has not failed yet",
-                          p["source_alias"], p["target_alias"], p["source_alias"])
-                continue
-            log.info("trying fallback: %s→%s (source %s failed on primary, trying alternative target)",
-                     p["source_alias"], p["target_alias"], p["source_alias"])
-
-        result = engine.execute_rebalance(p, dry_run=False)
-        results.append(result)
-
-        if result["success"]:
-            satisfied_targets.add(target_id)
-            log.info("rebalance succeeded: %s→%s moved %s sats (fee %d sats, %.0f ppm)",
-                     p["source_alias"], p["target_alias"],
-                     f"{result.get('amount', p['amount_sats']):,}",
-                     result["fee_paid"], result["fee_ppm"])
-            print(f"  ✓ {p['source_alias']} → {p['target_alias']}: "
-                  f"{result.get('amount', p['amount_sats']):,} sats moved, "
-                  f"fee {result['fee_paid']:,} sats "
-                  f"({result['fee_ppm']:.0f} ppm)")
-        else:
-            failed_pairs.add((source_id, target_id))
-            fallback_available = any(
-                fp.get("is_fallback") and fp["source_chan_id"] == source_id
-                and fp["target_chan_id"] not in satisfied_targets
-                for fp in plans
-            )
-            if fallback_available and not p.get("is_fallback"):
-                log.info("primary failed %s→%s — will try fallback with same source",
-                         p["source_alias"], p["target_alias"])
-                print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
-                      f"{result['failure_reason']} — trying alternative target")
-            else:
-                log.warning("rebalance failed %s→%s: no more alternatives",
-                            p["source_alias"], p["target_alias"])
-                print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
-                      f"{result['failure_reason']}")
+    results = execute_rebalance_plans(plans, log)
 
     # Telegram
     if results and not args.no_telegram:

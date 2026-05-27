@@ -14,7 +14,17 @@
 - agent.py exists but plan command doesn't use it (pure local graph)
 - Rebalance auto-chunks on failure (halves down to 100k min). Each successful
   chunk is its own success row in rebalance_log at its actual ppm.
-- Fallback pairs: if source→target fails, tries source→alternative target
+- Rebalance executor (`main.execute_rebalance_plans`) carries two ledgers:
+  `target_deficits` (sats each depleted target still needs) and `source_remaining`
+  (sats each overfull source can still send). Every plan is capped at
+  `min(plan amount, target deficit, source remaining)` and skipped entirely
+  once either drops below 50k. Fallbacks aren't gated by "did the primary
+  fail" — they're just later plan entries that fire when their target still
+  has a positive deficit. Partial primary success leaves the deficit open
+  for fallbacks; sources exhausted by an earlier success self-skip the rest
+  of their plans. Planner attaches `target_total_deficit` and
+  `source_total_surplus` to each plan dict so the executor needs no extra
+  LND calls.
 - Manual fee pins (`fee_overrides` table) suppress auto-fees per channel.
   `engine.update_all_fees` checks the table first; pinned channels use the
   stored ppm with reason `manual pin: N ppm` instead of `calculate_fee_ppm`.
