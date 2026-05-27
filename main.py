@@ -684,36 +684,6 @@ def cmd_run(args):
         log_main.warning("alert [%s]: %s", a["type"], a["message"])
     print(f"\n✅ Pipeline complete in {elapsed:.1f}s")
 
-    # Telegram summary
-    if not args.dry_run and not args.no_telegram:
-        lines = [f"⚡ *Pipeline — {datetime.now().strftime('%Y-%m-%d %H:%M')}*", ""]
-
-        if fee_updates:
-            applied = sum(1 for u in fee_updates if u.get("applied") is True)
-            lines.append(f"📊 *Fees:* {applied} updated")
-            for u in fee_updates:
-                d = "↑" if u["new_ppm"] > u["old_ppm"] else "↓"
-                lines.append(f"  {d} {u['alias']} {u['old_ppm']}→{u['new_ppm']} ppm")
-        else:
-            lines.append("📊 *Fees:* no changes needed")
-
-        if rebalance_results:
-            ok = sum(1 for r in rebalance_results if r["success"])
-            lines.append(f"🔄 *Rebalance:* {ok}/{len(rebalance_results)} succeeded")
-        else:
-            lines.append(f"🔄 *Rebalance:* {reason}")
-
-        lines.append(f"🔗 *Sync:* {num_events} new event(s)")
-
-        if report["alerts"]:
-            lines.append(f"⚠️ *Alerts: {len(report['alerts'])}*")
-            for a in report["alerts"][:5]:
-                lines.append(f"  • [{a['type']}] {a['message']}")
-        else:
-            lines.append("✅ *Health:* all channels OK")
-
-        telegram_bot.send_message("\n".join(lines))
-
 
 def cmd_status(args):
     """Quick node status summary."""

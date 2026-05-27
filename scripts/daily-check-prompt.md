@@ -139,21 +139,29 @@ channels — these are human decisions.
 
 ## 5. Exec summary
 
-Compose a summary, ≤10 short lines. Format:
+Compose a summary that mirrors the pipeline-run Telegram style: emoji +
+bold section headers, with sub-bullets indented two spaces under `•`.
+Keep it terse — section lines under ~80 chars, ≤3 suggestion bullets.
+
+Format (Markdown — Telegram renders `*bold*`):
 
 ```
-Daily check 2026-MM-DD
+⚡ *Daily Check — 2026-MM-DD*
 
-Flows:    forwarded X sats, earned Y sats (Z ppm avg) across N forwards
-Rebal:    S succeeded / F failed, paid P sats total
-Fees:     K broadcasts (sigmoid: a, floor: b, market: c, pin: d)
-Health:   channels active/total, backup age, tests pass/fail
-Issues:   <one-line per anomaly, "none" if clean>
-Fixed:    <commit hash + one-line, or "nothing">
+📈 *Flows:* X sats forwarded, Y sats earned (Z ppm avg, N forwards)
+🔄 *Rebal:* S/F succeeded, P sats paid
+📊 *Fees:* K broadcasts (sigmoid a, floor b, market c, pin d)
+💚 *Health:* A/T active, backup Hh ago, tests pass/fail
+⚠️ *Issues:* K
+  • <one line per anomaly>
+🔧 *Fixed:* <commit hash + one-line, or "nothing">
 
-Suggestions:
-- <up to 3 bullets, terse>
+💡 *Suggestions:*
+  • <up to 3 bullets, terse>
 ```
+
+If `Issues` is clean, render it as `✅ *Issues:* none` (drop the bullets).
+If `Fixed` is empty, render `🔧 *Fixed:* nothing`.
 
 ## 6. Deliver
 
@@ -164,15 +172,16 @@ stdout (the cron wrapper appends to `logs/daily-check.log` for history).
 venv/bin/python3 -c "
 import sys, telegram_bot
 text = open('/tmp/daily-check-summary.txt').read()
-ok = telegram_bot.send_message(text, parse_mode=None)
+ok = telegram_bot.send_message(text)
 print('[telegram] sent' if ok else '[telegram] FAILED', file=sys.stderr)
 "
 ```
 
 Procedure:
 1. Write the final summary to `/tmp/daily-check-summary.txt`
-2. Run the snippet above to push it to Telegram (parse_mode=None — the
-   summary uses plain text, not Markdown, so we don't fight escaping)
+2. Run the snippet above to push it to Telegram (default parse_mode is
+   Markdown so `*bold*` renders; telegram_bot retries without parse_mode
+   if special characters in aliases or issue text break the parse)
 3. Print the same summary to stdout (the wrapper logs it)
 
 If the Telegram send fails, don't retry — just log `[telegram] FAILED`
