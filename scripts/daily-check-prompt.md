@@ -157,9 +157,26 @@ Suggestions:
 
 ## 6. Deliver
 
-Print the summary to stdout. The cron wrapper appends stdout to
-`logs/daily-check.log`, which is where the operator reads it. Don't try to
-send Telegram — the bot is currently disabled.
+Two destinations: Telegram (the operator reads this on their phone) and
+stdout (the cron wrapper appends to `logs/daily-check.log` for history).
+
+```bash
+venv/bin/python3 -c "
+import sys, telegram_bot
+text = open('/tmp/daily-check-summary.txt').read()
+ok = telegram_bot.send_message(text, parse_mode=None)
+print('[telegram] sent' if ok else '[telegram] FAILED', file=sys.stderr)
+"
+```
+
+Procedure:
+1. Write the final summary to `/tmp/daily-check-summary.txt`
+2. Run the snippet above to push it to Telegram (parse_mode=None — the
+   summary uses plain text, not Markdown, so we don't fight escaping)
+3. Print the same summary to stdout (the wrapper logs it)
+
+If the Telegram send fails, don't retry — just log `[telegram] FAILED`
+and carry on. The stdout log is the source of truth either way.
 
 # Constraints
 
