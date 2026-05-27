@@ -287,7 +287,7 @@ def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
         "fee_limit_sat": str(fee_limit_sat),
         "timeout_seconds": timeout_seconds,
         "allow_self_payment": True,
-        "no_inflight_updates": True,  # only send final result, not intermediate updates
+        "no_inflight_updates": False,
     }
 
     url = f"{LND_REST_URL}/v2/router/send"
@@ -299,7 +299,7 @@ def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
         verify=LND_CERT,
         json=data,
         stream=True,
-        timeout=timeout_seconds + 10,
+        timeout=timeout_seconds + 30,
     )
     r.raise_for_status()
 
