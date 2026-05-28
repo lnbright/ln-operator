@@ -47,6 +47,16 @@ def get_channel_health_report(channels=None):
     if total_cap > 0:
         report["overall_local_ratio"] = round(report["total_local"] / total_cap, 4)
 
+    # Saturated alerts only fire when there's somewhere to push the surplus.
+    # Without a depleted target the rebalancer can't act on the alert, so
+    # repeating it every 2h is pure noise. The channel's status is still
+    # marked "saturated" in the per-channel report — only the Telegram-bound
+    # alert entry is suppressed.
+    any_depleted = any(
+        c["active"] and c["local_ratio"] < REBALANCE_LOW_THRESHOLD
+        for c in channels
+    )
+
     for ch in channels:
         ch_report = {
             "chan_id": ch["chan_id"],
@@ -99,12 +109,13 @@ def get_channel_health_report(channels=None):
             })
         elif ch["local_ratio"] > REBALANCE_HIGH_THRESHOLD:
             ch_report["status"] = "saturated"
-            report["alerts"].append({
-                "type": "channel_saturated",
-                "chan_id": ch["chan_id"],
-                "alias": ch["peer_alias"],
-                "message": f"{ch['peer_alias']} saturated at {ch['local_ratio']:.0%} local",
-            })
+            if any_depleted:
+                report["alerts"].append({
+                    "type": "channel_saturated",
+                    "chan_id": ch["chan_id"],
+                    "alias": ch["peer_alias"],
+                    "message": f"{ch['peer_alias']} saturated at {ch['local_ratio']:.0%} local",
+                })
 
         # Check for repeated rebalance failures regardless of health status
         try:

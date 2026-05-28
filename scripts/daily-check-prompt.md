@@ -148,9 +148,9 @@ Format (Markdown — Telegram renders `*bold*`):
 ```
 ⚡ *Daily Check — 2026-MM-DD*
 
-📈 *Flows:* X sats forwarded, Y sats earned (Z ppm avg, N forwards)
-🔄 *Rebal:* S/F succeeded, P sats paid
-📊 *Fees:* K broadcasts (sigmoid a, floor b, market c, pin d)
+📈 *Flows (24h):* X sats forwarded, Y sats earned (Z ppm avg, N forwards)
+🔄 *Rebal (24h):* S/F succeeded, P sats paid
+📊 *Fees (24h):* K broadcasts (sigmoid a, floor b, market c, pin d)
 💚 *Health:* A/T active, backup Hh ago, tests pass/fail
 ⚠️ *Issues:* K
   • <one line per anomaly>
@@ -159,6 +159,10 @@ Format (Markdown — Telegram renders `*bold*`):
 💡 *Suggestions:*
   • <up to 3 bullets, terse>
 ```
+
+The `(24h)` framing on Flows/Rebal/Fees is load-bearing: those three lines are
+the only ones with a sliding-window scope, and the rest (Health, Issues, Fixed,
+Suggestions) are current-state or session-scoped. Don't drop the labels.
 
 If `Issues` is clean, render it as `✅ *Issues:* none` (drop the bullets).
 If `Fixed` is empty, render `🔧 *Fixed:* nothing`.
