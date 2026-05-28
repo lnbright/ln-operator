@@ -38,11 +38,11 @@ def _headers():
     return {"Grpc-Metadata-macaroon": macaroon_hex}
 
 
-def _get(endpoint, params=None):
+def _get(endpoint, params=None, timeout=30):
     """GET request to LND REST API."""
     url = f"{LND_REST_URL}{endpoint}"
     log.debug("GET %s", endpoint)
-    r = requests.get(url, headers=_headers(), verify=LND_CERT, params=params, timeout=30)
+    r = requests.get(url, headers=_headers(), verify=LND_CERT, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
@@ -234,7 +234,9 @@ def describe_graph(include_unannounced=False):
     Returns nodes and edges.
     """
     params = {"include_unannounced": str(include_unannounced).lower()}
-    return _get("/v1/graph", params)
+    # Full graph dump is multi-MB JSON — on a Pi the serialize+transfer
+    # can comfortably exceed the default 30s.
+    return _get("/v1/graph", params, timeout=300)
 
 
 def get_network_info():
