@@ -170,7 +170,7 @@ main.py healthcheck
 main.py recompute_signals                    # nightly job — refresh slow market signals
 
 # ── MANUAL FEE PINS (override auto-fees on specific channels) ──
-main.py set_fee <alias-or-chan_id> <ppm> [--note "..."]   # pin
+main.py overwrite_fee <alias-or-chan_id> <ppm> [--note "..."]   # pin
 main.py clear_fee <alias-or-chan_id>                      # remove pin
 # Pins are shown by `main.py status` and in the dashboard's
 # Recent Fee Updates card (📌 pin badge on the Source column).
@@ -229,7 +229,7 @@ full pipeline, hysteresis, signals, and corner cases.
 
 ### Manual Fee Pins
 
-The auto-fee formula can be overridden per-channel with `set_fee`. A pinned
+The auto-fee formula can be overridden per-channel with `overwrite_fee`. A pinned
 channel keeps its fixed ppm across every pipeline run until you clear the pin
 with `clear_fee`. Pins are stored in the `fee_overrides` table and are
 honored by both the `pipeline` and `adjust_fees` commands. If a pin is set
@@ -237,7 +237,7 @@ honored by both the `pipeline` and `adjust_fees` commands. If a pin is set
 you're selling outbound below what refilling costs.
 
 ```bash
-main.py set_fee LNBiG 3000 --note "experimenting with high outbound"
+main.py overwrite_fee LNBiG 3000 --note "experimenting with high outbound"
 main.py status              # 📌 next to the pinned channel + details block
 main.py clear_fee LNBiG     # auto resumes on next pipeline run
 ```

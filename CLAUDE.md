@@ -38,7 +38,7 @@
 - Manual fee pins (`fee_overrides` table) suppress auto-fees per channel.
   `engine.update_all_fees` checks the table first; pinned channels use the
   stored ppm with reason `manual pin: N ppm` instead of `calculate_fee_ppm`.
-  Set via `main.py set_fee`, cleared via `main.py clear_fee`, shown by `status`.
+  Set via `main.py overwrite_fee`, cleared via `main.py clear_fee`, shown by `status`.
 - **Single-signal budget + fee floor (no tiers)**: `last_refill_ppm` (most
   recent successful rebalance into a channel) drives BOTH the rebalance
   budget AND the outbound fee floor. Budget = `last_refill ×

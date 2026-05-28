@@ -13,7 +13,7 @@ Usage:
     python main.py plan [--min-channel SATS] [--treasury RATIO] — channel plan
     python main.py status                          — quick node overview
     python main.py history [days]                  — recent activity from database
-    python main.py set_fee <chan> <ppm> [--note]   — pin a channel's outbound fee
+    python main.py overwrite_fee <chan> <ppm> [--note]   — pin a channel's outbound fee
     python main.py clear_fee <chan>                — remove a fee pin (pins are shown by `status`)
 """
 
@@ -856,7 +856,7 @@ def _resolve_channel(needle):
     sys.exit(1)
 
 
-def cmd_set_fee(args):
+def cmd_overwrite_fee(args):
     """Pin a channel's outbound fee rate so the pipeline leaves it alone."""
     log = get_logger("main")
     print("\n⚡ LN Operator — Pin Channel Fee")
@@ -891,7 +891,7 @@ def cmd_set_fee(args):
         FEE_BASE_MSAT, FEE_BASE_MSAT, ch["local_ratio"],
         f"manual pin{f': {args.note}' if args.note else ''}",
     )
-    log.info("set_fee: pinned %s at %d ppm (was %d ppm)",
+    log.info("overwrite_fee: pinned %s at %d ppm (was %d ppm)",
              ch["peer_alias"], args.ppm, old_ppm)
 
     print(f"  ✓ Pinned {ch['peer_alias']}: {old_ppm} → {args.ppm} ppm")
@@ -1037,13 +1037,13 @@ def main():
         choices=["path", "timer", "manual"],
         help="What triggered this backup run (recorded in DB)")
 
-    p_setfee = subparsers.add_parser("set_fee",
+    p_overwritefee = subparsers.add_parser("overwrite_fee",
         help="[feature]   Pin a channel's outbound fee — pipeline will leave it alone")
-    p_setfee.add_argument("channel",
+    p_overwritefee.add_argument("channel",
         help="chan_id or peer alias (substring match)")
-    p_setfee.add_argument("ppm", type=int,
+    p_overwritefee.add_argument("ppm", type=int,
         help="Fee rate in ppm to pin (e.g. 100)")
-    p_setfee.add_argument("--note", default="",
+    p_overwritefee.add_argument("--note", default="",
         help="Optional note recorded with the pin")
 
     p_clearfee = subparsers.add_parser("clear_fee",
@@ -1082,8 +1082,8 @@ def main():
         cmd_history(args)
     elif args.command == "backup":
         cmd_backup(args)
-    elif args.command == "set_fee":
-        cmd_set_fee(args)
+    elif args.command == "overwrite_fee":
+        cmd_overwrite_fee(args)
     elif args.command == "clear_fee":
         cmd_clear_fee(args)
     elif args.command == "recompute_signals":

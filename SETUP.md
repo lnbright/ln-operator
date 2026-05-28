@@ -139,7 +139,7 @@ venv/bin/python3 main.py plan                   # channel investment planner
 venv/bin/python3 main.py history 30             # recent activity from DB
 
 # Manual fee pins (override auto-fees per channel)
-venv/bin/python3 main.py set_fee LNBiG 3000 --note "..."
+venv/bin/python3 main.py overwrite_fee LNBiG 3000 --note "..."
 venv/bin/python3 main.py clear_fee LNBiG
 
 # Individual pipeline steps (debug)
@@ -183,7 +183,7 @@ and the single-signal budget/fee model. Setup-specific notes:
   floor of `last_refill_ppm × REBALANCE_FEE_MARGIN` (active from the first
   successful refill). Hard ceiling: `FEE_HARD_CEILING_PPM` (5000). Hysteresis
   prevents gossip spam.
-- Manual pins (`set_fee` / `clear_fee`) override the formula per-channel and
+- Manual pins (`overwrite_fee` / `clear_fee`) override the formula per-channel and
   are stored in the `fee_overrides` table. Logged with reason `manual pin: N ppm`
   vs the auto reason. The dashboard's *Recent Fee Updates* card tags each row
   with a `📌 pin` or `auto` badge in the Source column.
