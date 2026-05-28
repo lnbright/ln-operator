@@ -333,10 +333,21 @@ def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
     fee_sat = 0
 
     if status == "SUCCEEDED":
-        # Sum fees across all HTLCs
-        for htlc in last_result.get("htlcs", []):
-            route = htlc.get("route", {})
-            fee_sat += int(route.get("total_fees", 0))
+        # Prefer the canonical Payment.fee_sat — LND populates it from
+        # SUCCEEDED HTLCs only. Falling back to summing HTLC route fees
+        # overcounts when LND retried failed shards: every attempt's route
+        # shows up in last_result.htlcs and adds its quoted fee to the total
+        # even though only the succeeded HTLC actually settled.
+        fee_sat = int(last_result.get("fee_sat") or 0)
+        if fee_sat == 0:
+            fee_msat = int(last_result.get("fee_msat") or 0)
+            if fee_msat:
+                fee_sat = fee_msat // 1000
+            else:
+                for htlc in last_result.get("htlcs", []):
+                    if htlc.get("status") != "SUCCEEDED":
+                        continue
+                    fee_sat += int(htlc.get("route", {}).get("total_fees", 0))
 
     failure_reason = last_result.get("failure_reason", "") if status != "SUCCEEDED" else ""
     payment_hash = last_result.get("payment_hash", "")
