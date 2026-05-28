@@ -146,18 +146,31 @@ def cmd_plan(args):
     print(f"\n  {'─'*40}")
 
     try:
+        print("  1) Retrieving network graph from LND (multi-MB dump, it may take 30-60s)...", flush=True)
         state = advisor._gather_node_state()
         candidates = advisor._fetch_candidates_from_graph(state)
         candidates = advisor._enrich_with_1ml_aliases(candidates)
+
+        n_hub = sum(1 for c in candidates if c.get("tier_hint") == "hub")
+        n_mid = sum(1 for c in candidates if c.get("tier_hint") == "mid-tier")
+        n_sml = sum(1 for c in candidates if c.get("tier_hint") == "small")
+        print(f"     → {len(candidates)} candidates after tier filter "
+              f"({n_hub} hub, {n_mid} mid-tier, {n_sml} small).", flush=True)
+
+        print("  2) Ranking by centrality (channels + capacity, log-normalised)...", flush=True)
         scored = advisor._score_candidates(candidates, state)  # stage 1: centrality
 
         # Portfolio context — informational only, doesn't drive what's shown
         portfolio = advisor._classify_existing_portfolio(state["channels"], scored)
-        print(f"  Existing portfolio: {portfolio['hub_count']} hub connection(s), "
+        print(f"     Existing portfolio: {portfolio['hub_count']} hub connection(s), "
               f"{portfolio['mid_tier_count']} mid-tier connection(s)")
 
         # Stage 2: enrich top N per tier with live LND calls, rerank by diversity
+        print(f"  3) Enriching top {advisor.ENRICH_PER_TIER}/tier with live LND calls "
+              f"and reranking by diversity vs. 2-hop horizon...", flush=True)
         hubs, mid_tier, small = advisor._rerank_tiers_by_diversity(scored, state)
+
+        print(f"  4) Presenting top {advisor.SHOW_PER_TIER}/tier...", flush=True)
 
         log.info("plan candidates: %d hub, %d mid-tier, %d small (after diversity rerank)",
                  len(hubs), len(mid_tier), len(small))

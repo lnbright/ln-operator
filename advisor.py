@@ -649,6 +649,8 @@ def _rerank_tiers_by_diversity(candidates, state):
         prefilter = bucket[:ENRICH_PER_TIER]
         log.info("enriching %d %s candidates with live graph data...",
                  len(prefilter), tier_name)
+        print(f"    {tier_name:<8} tier: enriching {len(prefilter)} candidates "
+              f"(get_node_info per peer)...", flush=True)
         _enrich_candidates_with_graph_data(prefilter, state)
         prefilter.sort(
             key=lambda c: (c.get("diversity_score_computed") or 0),
