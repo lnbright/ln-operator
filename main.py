@@ -877,8 +877,20 @@ def cmd_overwrite_fee(args):
             old_ppm = int(item.get("fee_per_mil", 0))
             break
 
+    # Warn at pin time if the proposed ppm sits below the engine's rebalance
+    # floor (last successful refill × REBALANCE_FEE_MARGIN). The engine still
+    # honours the pin — this is just so the operator sees the trade-off at
+    # the moment they make the decision, not buried in a 2h pipeline log.
+    from config import FEE_BASE_MSAT, REBALANCE_FEE_MARGIN
+    last_refill = db.get_last_refill_ppm(ch["chan_id"])
+    floor = int(round(last_refill * REBALANCE_FEE_MARGIN)) if last_refill else 0
+    if floor and args.ppm < floor:
+        print(f"  ⚠️  pin {args.ppm} ppm is BELOW the rebalance floor of "
+              f"{floor} ppm (last refill {last_refill:.0f} × "
+              f"{REBALANCE_FEE_MARGIN:.2f}). You may be selling outbound "
+              f"below refill cost.")
+
     # Apply on LND immediately so the pin takes effect now
-    from config import FEE_BASE_MSAT
     try:
         lnd_client.update_channel_policy(cp, FEE_BASE_MSAT, args.ppm)
     except Exception as e:
