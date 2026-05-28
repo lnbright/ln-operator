@@ -126,12 +126,11 @@ MAX_CHANNEL_SIZE_SATS = 16_777_215       # LND wumbo max
 ANCHOR_RESERVE_PER_CHANNEL = 10_000
 ANCHOR_RESERVE_MAX = 100_000             # LND's hard cap
 
-# Candidate scoring (must sum to 1.0)
+# Candidate ranking is two-stage and tier-segmented — see advisor.py.
+# Stage 1: centrality (channels + capacity, log-normalised) prefilters within each tier.
+# Stage 2: diversity (% of candidate's peers not already in your graph) reranks the survivors.
 # Fee is displayed but not scored — local graph fee data is unreliable.
-PEER_SCORE_WEIGHTS = {
-    "diversity":  0.50,   # new reach: % of their peers not already in your graph
-    "centrality": 0.50,   # network importance: channels + capacity (log-normalised)
-}
+# No weights — the stages are sequential, not blended.
 
 
 # ─── External Fallbacks ─────────────────────────────────────────

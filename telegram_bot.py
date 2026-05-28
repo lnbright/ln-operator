@@ -1,15 +1,14 @@
 """
 LN Operator — Telegram Notifications
 
-Sends cron run summaries and alerts to a Telegram chat. Used by the automated
-cron job only — the interactive investment advisor does NOT send to Telegram
-(you're already looking at the terminal when you run it).
+Sends alerts and the once-a-day exec summary to a Telegram chat. Routine
+per-run pings (fee updates, rebalance reports) were removed by design — the
+daily summary aggregates them and the dashboard has live state. Telegram is
+reserved for things you'd actually want to look at on your phone.
 
 What gets sent:
-- Fee update summaries (which channels changed, old→new ppm)
-- Rebalance reports (success/failure, fees paid)
-- Health alerts (depleted channels, offline peers)
-- Cron run summaries (combined overview of all three)
+- Health alerts (depleted channels, offline peers, repeated rebalance failures)
+- Daily exec summary (see scripts/daily-check)
 
 Handles Telegram's 4096 character limit by splitting long messages.
 If formatting fails (Markdown issues), retries without formatting.
@@ -111,37 +110,6 @@ def format_investment_plan(plan):
         lines.append("🤖 *Agent notes:*")
         lines.append(plan["agent_summary"])
 
-    return "\n".join(lines)
-
-
-def format_fee_update_report(updates):
-    """Format fee update results as a Telegram message."""
-    if not updates:
-        return "⚡ *Fee Update* — no changes needed."
-
-    lines = ["⚡ *Fee Policy Updated*", ""]
-    for u in updates:
-        direction = "📈" if u["new_ppm"] > u["old_ppm"] else "📉"
-        lines.append(
-            f"  {direction} `{u['alias']}`: {u['old_ppm']} → {u['new_ppm']} ppm "
-            f"(local: {u['local_ratio']:.0%})"
-        )
-    return "\n".join(lines)
-
-
-def format_rebalance_report(results):
-    """Format rebalance results as a Telegram message."""
-    if not results:
-        return "⚡ *Rebalance Check* — all channels healthy."
-
-    lines = ["⚡ *Rebalance Report*", ""]
-    for r in results:
-        emoji = "✅" if r["success"] else "❌"
-        lines.append(f"  {emoji} `{r['target_alias']}`: {r['amount']:,} sats")
-        if r["success"]:
-            lines.append(f"      Fee: {r['fee_paid']:,} sats ({r['fee_ppm']:.0f} ppm)")
-        else:
-            lines.append(f"      _{r.get('failure_reason', 'unknown')}_")
     return "\n".join(lines)
 
 

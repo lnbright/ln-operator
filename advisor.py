@@ -6,8 +6,14 @@ All data comes from the local LND graph — no external API dependencies.
 
 Key functions used by main.py plan command:
 - _gather_node_state(): pulls live data from LND (channels, balances, graph)
-- _fetch_candidates_from_graph(): builds candidate list from local LND graph
-- _score_candidates(): scores by channel count, diversity, centrality
+- _fetch_candidates_from_graph(): builds candidate list from local LND graph,
+  assigns tier_hint by absolute channel count (hub / mid-tier / small)
+- _score_candidates(): stage-1 centrality prefilter (channels + capacity,
+  log-normalised). Sorts the list but does not rerank within tiers.
+- _rerank_tiers_by_diversity(): stage-2 — within each tier, takes the top
+  ENRICH_PER_TIER by centrality, fetches live graph data per candidate to
+  compute diversity (% of their peers not already in our graph), then
+  reranks by diversity and returns top SHOW_PER_TIER per tier.
 - _classify_existing_portfolio(): classifies existing channels as hub or mid-tier
 - _calculate_treasury(): calculates reserve (treasury % + anchor reserve + open fees)
 - _check_fee_environment(): gets fee rate from LND, falls back to mempool.space
@@ -27,9 +33,21 @@ import requests
 from config import (
     TREASURY_MIN_RATIO, TREASURY_MONTHS_RESERVE,
     MIN_CHANNEL_SIZE_SATS, PREFERRED_CHANNEL_SIZE_SATS, MAX_CHANNEL_SIZE_SATS,
-    PEER_SCORE_WEIGHTS, MEMPOOL_API, ONEML_API,
+    MEMPOOL_API, ONEML_API,
     ANCHOR_RESERVE_PER_CHANNEL, ANCHOR_RESERVE_MAX,
 )
+
+# ─── Tier thresholds (absolute channel counts) ──────────────────
+# Candidates are bucketed by their channel count in the public graph.
+# A diversifying small node and a diversifying hub answer different
+# questions, so they're ranked independently inside their own tier.
+HUB_MIN_CHANNELS = 100   # well-connected routing hubs
+MID_MIN_CHANNELS = 30    # serious mid-tier routing nodes
+SMALL_MIN_CHANNELS = 10  # modest operators; below this, treated as noise and dropped
+
+# Two-stage ranking budget — see _rerank_tiers_by_diversity.
+ENRICH_PER_TIER = 30  # candidates per tier sent through live graph enrichment
+SHOW_PER_TIER = 10    # final candidates surfaced per tier after diversity rerank
 import lnd_client
 import db
 from logging_config import get_logger
@@ -77,8 +95,10 @@ def build_investment_plan(total_sats):
     scored_candidates = _score_candidates(external_candidates, state)
 
     # 6b. Enrich top candidates with live graph data (diversity, fees, reachability)
+    # Cap at ENRICH_PER_TIER × 3 so this legacy path can't fan out into thousands
+    # of LND calls if resurrected. New plan flow uses _rerank_tiers_by_diversity.
     log.info("enriching top candidates with graph data...")
-    scored_candidates = _enrich_candidates_with_graph_data(scored_candidates, state)
+    _enrich_candidates_with_graph_data(scored_candidates[:ENRICH_PER_TIER * 3], state)
 
     # 7. Allocate budget across actions
     actions, not_recommended = _allocate_budget(
@@ -340,9 +360,10 @@ def _fetch_candidates_from_graph(state):
 
     Traverses the full network graph to:
     1. Build a map of every node with their channel count and total capacity
-    2. Rank them by channel count to determine hub vs mid-tier
-    3. Filter out nodes we're already connected to and ourselves
-    4. Assign network_rank and tier_hint based on channel count rank
+    2. Filter out nodes we're already connected to and ourselves
+    3. Assign network_rank (by channel count) for display
+    4. Assign tier_hint by absolute channel count (HUB_MIN / MID_MIN / SMALL_MIN)
+    5. Drop nodes below SMALL_MIN_CHANNELS as noise
 
     Returns a list of candidate dicts sorted by channel count descending.
     The graph is already stored locally by LND — no external API needed.
@@ -398,17 +419,20 @@ def _fetch_candidates_from_graph(state):
         log.info("graph: %d total nodes, %d active (have channels), %d excluded (existing peers)",
                  len(nodes_raw), len(active_nodes), len(state["existing_peers"]))
 
-        # Assign network rank and tier based on channel count rank
-        # Top 50 = hubs, 51-250 = mid-tier, 251-500 = small
-        for i, node in enumerate(active_nodes[:500]):
-            rank = i + 1
-            if rank <= 50:
+        # Assign network rank (by channel count, for display) and tier_hint
+        # (by absolute channel count, so classification is stable regardless of
+        # how many nodes the local graph happens to know about).
+        for i, node in enumerate(active_nodes):
+            ch = node["channel_count"]
+            if ch >= HUB_MIN_CHANNELS:
                 tier = "hub"
-            elif rank <= 250:
+            elif ch >= MID_MIN_CHANNELS:
                 tier = "mid-tier"
-            else:
+            elif ch >= SMALL_MIN_CHANNELS:
                 tier = "small"
-            node["network_rank"] = rank
+            else:
+                continue  # drop sub-SMALL nodes as noise
+            node["network_rank"] = i + 1
             node["tier_hint"] = tier
             # avg_channel_size is a quality metric — larger avg = more serious routing partner
             # Note: local graph capacity may be incomplete for distant nodes;
@@ -424,10 +448,12 @@ def _fetch_candidates_from_graph(state):
             )
             candidates.append(node)
 
-        log.info("graph candidates: %d hubs (rank 1-50), %d mid-tier (rank 51-250), %d small (rank 251-500)",
-                 sum(1 for c in candidates if c["tier_hint"] == "hub"),
+        log.info("graph candidates: %d hub (>=%d ch), %d mid-tier (%d-%d ch), %d small (%d-%d ch)",
+                 sum(1 for c in candidates if c["tier_hint"] == "hub"), HUB_MIN_CHANNELS,
                  sum(1 for c in candidates if c["tier_hint"] == "mid-tier"),
-                 sum(1 for c in candidates if c["tier_hint"] == "small"))
+                 MID_MIN_CHANNELS, HUB_MIN_CHANNELS - 1,
+                 sum(1 for c in candidates if c["tier_hint"] == "small"),
+                 SMALL_MIN_CHANNELS, MID_MIN_CHANNELS - 1)
 
     except Exception as e:
         log.warning("graph candidate fetch failed: %s", e)
@@ -505,63 +531,60 @@ def _fetch_external_candidates(state):
 
 
 def _enrich_candidates_with_graph_data(candidates, state):
-    """Pull per-candidate graph data from LND for richer scoring and agent context.
+    """Pull live per-candidate graph data from LND.
 
-    For each top candidate, fetches:
-    - Their peer list (to compute diversity: how many peers we don't share)
-    - Their fee policies (average fee rate on their channels)
-    - Whether they're reachable (have a known address)
+    For each candidate, fetches:
+    - Their peer list (to compute diversity: how many of their peers are new to us)
+    - Their fee policies (average outbound fee rate across their channels)
+    - Whether they have a clearnet address
 
-    This is expensive (one API call per candidate) so we only do it for the
-    top N candidates that will actually appear in the plan.
+    Sets c["graph_data"] and c["diversity_score_computed"] in place.
+    One get_node_info call per candidate — slow, so callers should prefilter
+    (see _rerank_tiers_by_diversity).
     """
     our_peers = state["existing_peers"]
-    enriched = []
+    our_pubkey = state["pubkey"]
 
-    for c in candidates[:10]:  # enrich shortlisted 10 — graph calls are slow
+    for c in candidates:
         try:
             node_info = lnd_client.get_node_info(c["pubkey"], include_channels=True)
             node = node_info.get("node", {})
             channels = node_info.get("channels", [])
 
-            # Compute diversity: what fraction of their peers are new to us?
             their_peers = set()
             total_fee_rate = 0
             fee_count = 0
 
             for ch in channels:
-                # Find the peer on the other end
                 n1 = ch.get("node1_pub", "")
                 n2 = ch.get("node2_pub", "")
                 peer_pk = n2 if n1 == c["pubkey"] else n1
                 if peer_pk:
                     their_peers.add(peer_pk)
 
-                # Average fee rate from their policy
                 policy = ch.get("node1_policy") if n1 == c["pubkey"] else ch.get("node2_policy")
                 if policy and policy.get("fee_rate_milli_msat"):
-                    total_fee_rate += int(policy["fee_rate_milli_msat"]) / 1000  # convert to ppm
+                    total_fee_rate += int(policy["fee_rate_milli_msat"]) / 1000
                     fee_count += 1
 
-            # Diversity: fraction of their peers we're not already connected to
             if their_peers:
-                new_peers = their_peers - our_peers - {state["pubkey"]}
+                new_peers = their_peers - our_peers - {our_pubkey}
                 diversity = len(new_peers) / len(their_peers)
+                new_peer_count = len(new_peers)
             else:
                 diversity = 0.5
+                new_peer_count = 0
 
             avg_fee_ppm = int(total_fee_rate / fee_count) if fee_count > 0 else 0
 
-            # Is the node reachable?
             addresses = node.get("addresses", [])
             has_clearnet = any(
-                not a.get("addr", "").endswith(".onion")
-                for a in addresses
+                not a.get("addr", "").endswith(".onion") for a in addresses
             )
 
             c["graph_data"] = {
                 "their_peer_count": len(their_peers),
-                "new_peers_to_us": len(their_peers - our_peers - {state["pubkey"]}),
+                "new_peers_to_us": new_peer_count,
                 "diversity_score": round(diversity, 3),
                 "avg_fee_ppm": avg_fee_ppm,
                 "has_clearnet": has_clearnet,
@@ -572,94 +595,101 @@ def _enrich_candidates_with_graph_data(candidates, state):
         except Exception as e:
             log.debug("could not enrich %s with graph data: %s", c.get("alias", "?"), e)
             c["graph_data"] = None
+            c["diversity_score_computed"] = None
 
-        enriched.append(c)
+    return candidates
 
-    # Return enriched + any remaining un-enriched candidates
-    enriched_pubkeys = {c["pubkey"] for c in enriched}
-    for c in candidates[15:]:
-        if c["pubkey"] not in enriched_pubkeys:
-            enriched.append(c)
 
-    return enriched
+def _rerank_tiers_by_diversity(candidates, state):
+    """Two-stage tier-segmented ranking.
+
+    Stage 1 (cheap): _score_candidates already ranked the full list by centrality.
+    Within each tier we take the top ENRICH_PER_TIER as the prefilter.
+
+    Stage 2 (slow): for each prefiltered candidate, fetch live graph data from
+    LND to compute diversity (% of their peers we don't already share). Rerank
+    each tier by diversity descending and return the top SHOW_PER_TIER.
+
+    Why tiered: a small node's peers are obscure leaves, so it tends to score
+    very high on diversity; a hub's peers overlap heavily with yours, so it
+    scores low. A single global diversity ranking would just surface backwater
+    nodes. Per-tier ranking asks the right question — "the most diversifying
+    hub I could add", "the most diversifying mid-tier", "the most diversifying
+    small node" — independently.
+
+    Returns (hubs, mid_tier, small), each ≤ SHOW_PER_TIER long, sorted by diversity.
+    """
+    hubs, mid_tier, small = _split_candidates_by_tier(candidates)
+
+    result = []
+    for tier_name, bucket in (("hub", hubs), ("mid-tier", mid_tier), ("small", small)):
+        prefilter = bucket[:ENRICH_PER_TIER]
+        log.info("enriching %d %s candidates with live graph data...",
+                 len(prefilter), tier_name)
+        _enrich_candidates_with_graph_data(prefilter, state)
+        prefilter.sort(
+            key=lambda c: (c.get("diversity_score_computed") or 0),
+            reverse=True,
+        )
+        result.append(prefilter[:SHOW_PER_TIER])
+
+    return tuple(result)
 
 
 def _score_candidates(candidates, state):
-    """Score and rank candidate peers.
-    
-    Score components (from config.PEER_SCORE_WEIGHTS):
-    - capacity: total node capacity (bigger = better connected)
-    - channels: number of channels (more = more routing paths)
-    - uptime: estimated from graph data (not always available)
-    - centrality: how many paths go through them
-    - diversity: how much they improve YOUR connectivity
+    """First-stage scoring: centrality only. Acts as prefilter within each tier.
+
+    Centrality = log-normalised mean of channel count and total capacity, so
+    well-connected, high-capacity nodes rank high inside their own bucket.
+
+    Diversity is the final ranking signal but it requires a live LND call per
+    candidate, so it's deferred to _rerank_tiers_by_diversity — which uses
+    centrality to pick which candidates are worth the round-trip.
+
+    Sets c["centrality"] on each candidate and sorts the list by it descending.
+    Fee rate is shown elsewhere but not scored (local graph fee data is unreliable).
     """
     if not candidates:
         return []
 
-    # Normalize capacity and channel counts for scoring
-    max_capacity = max(c["capacity"] for c in candidates) if candidates else 1
-    max_channels = max(c["channel_count"] for c in candidates) if candidates else 1
-
-    # Normalisation maximums
     max_channels = max(c.get("channel_count", 0) for c in candidates) or 1
     max_capacity = max(c.get("capacity", 0) for c in candidates) or 1
-    for c in candidates:
-        scores = {}
 
-        # Centrality proxy — combination of channels and capacity normalised
-        # Captures network importance: well-connected, high-capacity nodes score high
+    for c in candidates:
         ch = c.get("channel_count", 0)
         cap = c.get("capacity", 0)
         ch_score = math.log(1 + ch) / math.log(1 + max_channels) if ch > 0 else 0
         cap_score = math.log(1 + cap) / math.log(1 + max_capacity) if cap > 0 else 0
-        scores["centrality"] = (ch_score + cap_score) / 2
-
-        # Diversity — what % of their peers are new to you
-        # Most important metric for a small node — maximises your reach
-        if c.get("diversity_score_computed") is not None:
-            scores["diversity"] = c["diversity_score_computed"]
-        else:
-            scores["diversity"] = 0.5  # placeholder until graph enrichment runs
+        centrality = (ch_score + cap_score) / 2
 
         # Penalise previously unreliable peers from DB history
         peer_hist = db.get_peer_history(c["pubkey"])
         if peer_hist:
             for record in peer_hist:
                 if record["action"] == "closed" and "unreliable" in (record["reason"] or ""):
-                    scores["centrality"] *= 0.5
+                    centrality *= 0.5
                     c["history_note"] = f"Previously closed: {record['reason']}"
 
-        # Weighted final score — two metrics only
-        # Fee rate is displayed but not scored (local graph data too unreliable)
-        w = PEER_SCORE_WEIGHTS
-        c["score"] = round(
-            scores["diversity"]   * w["diversity"] +
-            scores["centrality"]  * w["centrality"],
-            4
-        )
-        c["score_breakdown"] = scores
+        c["centrality"] = round(centrality, 4)
 
-    candidates.sort(key=lambda c: c["score"], reverse=True)
+    candidates.sort(key=lambda c: c["centrality"], reverse=True)
     if candidates:
-        log.debug("top candidate: %s (score %.2f, %d channels)", 
-                  candidates[0].get("alias","?"), candidates[0]["score"], candidates[0].get("channel_count",0))
+        log.debug("top centrality: %s (%.2f, %d channels)",
+                  candidates[0].get("alias", "?"),
+                  candidates[0]["centrality"],
+                  candidates[0].get("channel_count", 0))
     return candidates
 
 
-# ─── Hub/mid-tier classification ────────────────────────────────
-# A hub is defined by absolute channel count, not relative rank.
-# This is intentional — we want classification to be stable regardless
-# of how many nodes your local graph knows about.
-# Hub classification threshold — nodes in the top N by channel count are "hubs"
-HUB_CHANNEL_THRESHOLD = 100   # nodes with 100+ channels are considered hubs
+# ─── Tier-based candidate ranking ───────────────────────────────
+# Tiers are defined by absolute channel count (HUB_MIN_CHANNELS,
+# MID_MIN_CHANNELS, SMALL_MIN_CHANNELS at the top of this module), so
+# classification stays stable regardless of how many nodes the local
+# graph happens to know about.
 
 
 def _classify_existing_portfolio(channels, candidates):
     """Classify existing channels as hub or mid-tier connections.
-
-    A hub is a node with 100+ channels (well-connected, high-traffic corridor).
-    Mid-tier nodes have fewer channels but may offer good diversity.
 
     Existing peers are excluded from candidates so we can't use the candidates
     list to look up their channel counts. Instead we call LND directly for each
@@ -675,25 +705,18 @@ def _classify_existing_portfolio(channels, candidates):
         if not pk:
             continue
 
-        # Look up channel count from LND graph for this existing peer
         channel_count = 0
         try:
             node_info = lnd_client.get_node_info(pk, include_channels=False)
             channel_count = int(node_info.get("num_channels", 0))
-            log.debug("existing peer %s has %d channels in graph",
-                      ch.get("peer_alias", pk[:12]), channel_count)
         except Exception as e:
             log.warning("could not get graph info for existing peer %s: %s",
                         ch.get("peer_alias", pk[:12]), e)
 
-        if channel_count >= HUB_CHANNEL_THRESHOLD:
+        if channel_count >= HUB_MIN_CHANNELS:
             hub_pubkeys.add(pk)
-            log.debug("existing peer %s classified as hub (%d channels)",
-                      ch.get("peer_alias", pk[:12]), channel_count)
         else:
             mid_tier_pubkeys.add(pk)
-            log.debug("existing peer %s classified as mid-tier (%d channels)",
-                      ch.get("peer_alias", pk[:12]), channel_count)
 
     return {
         "hub_count": len(hub_pubkeys),
@@ -703,42 +726,28 @@ def _classify_existing_portfolio(channels, candidates):
 
 
 def _split_candidates_by_tier(candidates):
-    """Split scored candidates into hub, mid-tier, and small lists.
+    """Split candidates into hub, mid-tier, and small lists by tier_hint.
 
-    hub      = rank 1-50   (500+ channels)
-    mid-tier = rank 51-250 (20-499 channels)
-    small    = rank 251-500
-
-    Returns (hubs, mid_tier, small) lists, each sorted by score descending.
+    Each list is sorted by centrality descending — that's the prefilter signal
+    used to decide which candidates are worth enriching with live graph data.
     """
-    hubs = []
-    mid_tier = []
-    small = []
+    hubs, mid_tier, small = [], [], []
 
     for c in candidates:
-        tier_hint = c.get("tier_hint")
-
-        if tier_hint == "hub":
+        tier = c.get("tier_hint")
+        if tier == "hub":
             hubs.append(c)
-        elif tier_hint == "mid-tier":
+        elif tier == "mid-tier":
             mid_tier.append(c)
-        elif tier_hint == "small":
+        elif tier == "small":
             small.append(c)
-        else:
-            # No tier hint — classify by channel count
-            if c.get("channel_count", 0) >= HUB_CHANNEL_THRESHOLD:
-                hubs.append(c)
-            elif c.get("channel_count", 0) >= 20:
-                mid_tier.append(c)
-            else:
-                small.append(c)
+        # candidates without a tier_hint are dropped — _fetch_candidates_from_graph
+        # filters sub-SMALL nodes out before we get here.
 
-    # Within each tier, sort by score
-    hubs.sort(key=lambda c: c["score"], reverse=True)
-    mid_tier.sort(key=lambda c: c["score"], reverse=True)
-    small.sort(key=lambda c: c["score"], reverse=True)
+    for bucket in (hubs, mid_tier, small):
+        bucket.sort(key=lambda c: c.get("centrality", 0), reverse=True)
 
-    log.debug("tier split: %d hubs, %d mid-tier, %d small candidates",
+    log.debug("tier split: %d hub, %d mid-tier, %d small",
               len(hubs), len(mid_tier), len(small))
     return hubs, mid_tier, small
 

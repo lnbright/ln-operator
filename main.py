@@ -25,6 +25,7 @@ from datetime import datetime
 
 import db
 import engine
+from config import REBALANCE_LOW_THRESHOLD
 from logging_config import setup_logging, get_logger
 import advisor
 import telegram_bot
@@ -135,43 +136,39 @@ def cmd_plan(args):
         log.info("plan: %d channel(s) at %s sats each (deployable %s)",
                  best_num, f"{best_channel_size:,}", f"{bd['deployable']:,}")
 
-    # ── Step 4: Score and show top 10 candidates (portfolio-aware) ─
+    # ── Step 4: Tier-segmented candidates (centrality prefilter → diversity rerank) ─
+    # Two-stage ranking — see advisor._rerank_tiers_by_diversity. Each tier is
+    # ranked independently because a small node's peers are obscure leaves
+    # (high diversity) while a hub's peers overlap heavily with yours (low
+    # diversity); a single global ranking would just surface backwater nodes.
+    # Runs only on demand here — the live graph enrichment (one LND call per
+    # candidate) is too slow for the 2h pipeline.
     print(f"\n  {'─'*40}")
 
     try:
         state = advisor._gather_node_state()
         candidates = advisor._fetch_candidates_from_graph(state)
         candidates = advisor._enrich_with_1ml_aliases(candidates)
-        scored = advisor._score_candidates(candidates, state)
+        scored = advisor._score_candidates(candidates, state)  # stage 1: centrality
 
-        # Apply portfolio strategy — show 10 from recommended tier + 10 from next tier
+        # Portfolio context — informational only, doesn't drive what's shown
         portfolio = advisor._classify_existing_portfolio(state["channels"], scored)
-        hub_count = portfolio["hub_count"]
-        hubs, mid_tier, small = advisor._split_candidates_by_tier(scored)
+        print(f"  Existing portfolio: {portfolio['hub_count']} hub connection(s), "
+              f"{portfolio['mid_tier_count']} mid-tier connection(s)")
 
-        if hub_count == 0:
-            primary_pool = hubs[:10]
-            secondary_pool = mid_tier[:10]
-            primary_label = "Recommended: hubs (build routing backbone first)"
-            secondary_label = "Also consider: mid-tier nodes"
-        elif hub_count == 1:
-            primary_pool = hubs[:10]
-            secondary_pool = mid_tier[:10]
-            primary_label = "Recommended: hubs (1 hub — add more for redundancy)"
-            secondary_label = "Also consider: mid-tier nodes"
-        else:
-            primary_pool = mid_tier[:10]
-            secondary_pool = small[:10]
-            primary_label = f"Recommended: mid-tier ({hub_count} hubs already — diversify)"
-            secondary_label = "Also consider: smaller nodes (rank 251-500)"
+        # Stage 2: enrich top N per tier with live LND calls, rerank by diversity
+        hubs, mid_tier, small = advisor._rerank_tiers_by_diversity(scored, state)
 
-        log.info("plan candidates: hub_count=%d, showing %d primary + %d secondary",
-                 hub_count, len(primary_pool), len(secondary_pool))
+        log.info("plan candidates: %d hub, %d mid-tier, %d small (after diversity rerank)",
+                 len(hubs), len(mid_tier), len(small))
 
         def _print_candidates(pool, label):
-            print(f"  {label}:\n")
+            print(f"\n  {label}:\n")
             for i, c in enumerate(pool, 1):
-                tier = c.get("tier_hint", "?")
+                gd = c.get("graph_data") or {}
+                div = gd.get("diversity_score")
+                div_str = f"{div:.0%}" if div is not None else "  n/a"
+
                 avg = c.get("avg_channel_size", 0)
                 avg_str = f"{avg//1_000_000}M" if avg >= 1_000_000 else f"{avg//1_000}k" if avg >= 1_000 else str(avg)
                 fee = c.get("avg_fee_ppm", 0)
@@ -180,22 +177,24 @@ def cmd_plan(args):
                 alias = c.get("alias", "")
                 pubkey = c.get("pubkey", "unknown")
                 no_alias = not alias or alias == pubkey[:len(alias)]
-
                 display_name = alias[:26] if not no_alias else pubkey[:26]
 
-                print(f"  {i:2}. {display_name:<26} | score {c['score']:.3f} "
-                      f"| rank {c.get('network_rank','?'):>3} "
+                print(f"  {i:2}. {display_name:<26} | div {div_str:>4} "
                       f"| {c['channel_count']:>4} ch "
                       f"| avg {avg_str:>5} "
                       f"| fee {fee_str:>8} "
-                      f"| {tier}")
+                      f"| rank #{c.get('network_rank','?')}")
                 if no_alias:
                     print(f"      pk: {pubkey}")
 
-        _print_candidates(primary_pool, primary_label)
-        if secondary_pool:
-            print()
-            _print_candidates(secondary_pool, secondary_label)
+        tier_labels = [
+            (hubs,     f"Hubs (≥{advisor.HUB_MIN_CHANNELS} channels) — top {len(hubs)} by diversity"),
+            (mid_tier, f"Mid-tier ({advisor.MID_MIN_CHANNELS}-{advisor.HUB_MIN_CHANNELS - 1} channels) — top {len(mid_tier)} by diversity"),
+            (small,    f"Small ({advisor.SMALL_MIN_CHANNELS}-{advisor.MID_MIN_CHANNELS - 1} channels) — top {len(small)} by diversity"),
+        ]
+        for pool, label in tier_labels:
+            if pool:
+                _print_candidates(pool, label)
     except Exception as e:
         log.error("could not fetch candidates: %s", e)
         print(f"  Error fetching candidates: {e}")
@@ -311,11 +310,6 @@ def cmd_adjust_fees(args):
                 f"(local: {u['local_ratio']:.0%}){status}"
             )
 
-        # Telegram
-        if not args.dry_run and not args.no_telegram:
-            msg = telegram_bot.format_fee_update_report(updates)
-            telegram_bot.send_message(msg)
-
     return updates
 
 
@@ -326,10 +320,10 @@ def _show_rebalance_scenarios(current_force=None):
     can't auto-rebalance (no overfull channels above 80%).
     Only shows if there are depleted channels that need help.
     """
-    channels = engine.lnd_client.get_channels()
-    channels = engine.lnd_client.resolve_aliases(channels)
+    channels = lnd_client.get_channels()
+    channels = lnd_client.resolve_aliases(channels)
     active = [c for c in channels if c["active"]]
-    depleted = [c for c in active if c["local_ratio"] < engine.REBALANCE_LOW_THRESHOLD]
+    depleted = [c for c in active if c["local_ratio"] < REBALANCE_LOW_THRESHOLD]
 
     if not depleted:
         return  # nothing to suggest
@@ -515,15 +509,15 @@ def cmd_rebalance_channels(args):
         # ── Channel status overview ───────────────────────────────────
         # Show ALL channels with their rebalance status so the operator
         # understands why certain channels are ignored
-        channels_all = engine.lnd_client.get_channels()
-        channels_all = engine.lnd_client.resolve_aliases(channels_all)
+        channels_all = lnd_client.get_channels()
+        channels_all = lnd_client.resolve_aliases(channels_all)
         print(f"\n  Channel status:")
         for ch in channels_all:
             ratio = ch["local_ratio"]
             alias = ch["peer_alias"]
             if not ch["active"]:
                 status = "⚫ offline"
-            elif ratio < engine.REBALANCE_LOW_THRESHOLD:
+            elif ratio < REBALANCE_LOW_THRESHOLD:
                 status = f"🔴 depleted ({ratio:.0%} local) — rebalance target"
             elif ratio > engine.REBALANCE_HIGH_THRESHOLD:
                 status = f"🔵 overfull ({ratio:.0%} local) — rebalance source"
@@ -584,11 +578,6 @@ def cmd_rebalance_channels(args):
 
     print(f"\nExecuting {len(primaries)} primary plan(s) (+ {len(fallbacks)} fallback(s)):\n")
     results = execute_rebalance_plans(plans, log)
-
-    # Telegram
-    if results and not args.no_telegram:
-        msg = telegram_bot.format_rebalance_report(results)
-        telegram_bot.send_message(msg)
 
     return results
 

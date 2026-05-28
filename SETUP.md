@@ -255,15 +255,16 @@ All tuneable values are in `config.py`:
 |------|---------|
 | `main.py` | CLI entry point — all commands |
 | `config.py` | All settings + `.env` loader |
-| `engine.py` | Fee management, rebalancing, monitoring, routing sync |
-| `advisor.py` | Peer scoring, diversity / centrality, candidate discovery |
+| `engine/` | Channel-management package — `fees`, `rebalance_planner`, `rebalance_executor`, `sync`, `monitor` |
+| `advisor.py` | Peer ranking — tier-segmented, centrality prefilter → diversity rerank |
 | `agent.py` | Optional Claude API helper (not used by current `plan`) |
 | `lnd_client.py` | LND REST API client |
 | `db.py` | SQLite schema, migrations, query helpers |
-| `telegram_bot.py` | Telegram message formatting + sending |
+| `telegram_bot.py` | Telegram message formatting + sending (alerts + daily summary only) |
 | `backup.py` | Off-site `channel.backup` rsync + DB logging |
 | `logging_config.py` | Rotating log setup |
 | `dashboard/app.py` | Flask web dashboard (port 4000) |
-| `lnd-dashboard.service` | systemd unit for the dashboard |
-| `lnd-channel-backup.*` | systemd path/timer/service units for off-site backup |
+| `services/` | systemd unit files — copy to `/etc/systemd/system/`, then `systemctl daemon-reload` |
+| `scripts/` | Operator-facing helpers (e.g. `daily-check`) |
+| `tests/` | Unit tests (`python -m unittest discover tests`) |
 | `ln_operator.db` | SQLite database (created on first run) |

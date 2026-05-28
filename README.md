@@ -35,9 +35,11 @@ alerts for depleted channels, offline peers, and repeated rebalance failures.
 
 Reads your on-chain wallet balance from LND and calculates how many channels you
 can afford after deducting anchor reserves, treasury, and on-chain fees. Shows the
-top 20 candidate peers from your local graph scored by centrality and diversity,
-split by tier (hub / mid-tier / small) based on your existing portfolio. Offers to
-generate a deposit address with QR code at the end.
+top 10 candidate peers per tier (hub / mid-tier / small) using a two-stage rank:
+centrality (channels + capacity) prefilters within each tier, then a live LND
+graph call computes diversity (% of their peers you don't already share) and
+reranks. Runs only on demand — the per-candidate graph calls are too slow for
+the pipeline. Offers to generate a deposit address with QR code at the end.
 
 No external API dependencies — everything from your own LND node.
 
@@ -61,17 +63,26 @@ their inbound fees).
 ln-operator/
 ├── main.py              CLI entry — commands, display, orchestration
 ├── config.py            All tuneable settings
-├── engine.py            Fees, rebalancing, health monitoring, routing sync
-├── advisor.py           Peer scoring, graph analysis, candidate discovery
+├── engine/              Channel-management engine (package)
+│   ├── fees.py             Sigmoid + hysteresis + market-mult recompute
+│   ├── rebalance_planner.py  Budget, candidate selection, plan generation
+│   ├── rebalance_executor.py Per-plan execution with chunked retry
+│   ├── sync.py             Forwarding + manual-rebalance pull from LND
+│   └── monitor.py          Channel health report + alerts
+├── advisor.py           Peer ranking (tier-segmented, centrality → diversity)
 ├── agent.py             Claude API (optional) — web search for peer research
 ├── lnd_client.py        LND REST API client
 ├── db.py                SQLite schema, migrations, queries
-├── telegram_bot.py      Telegram notifications
+├── telegram_bot.py      Telegram notifications (alerts + daily summary)
 ├── logging_config.py    Rotating log setup
+├── backup.py            Off-site channel.backup rsync
 ├── requirements.txt     Python dependencies
 ├── dashboard/
 │   └── app.py           Flask web dashboard (port 4000)
-├── .env                 Secrets (not committed)
+├── services/            systemd unit files (dashboard + channel-backup)
+├── scripts/             Operator helpers (daily-check, etc.)
+├── tests/               Unit tests (pytest / unittest)
+├── .env.example         Template — copy to .env, fill in
 └── ln_operator.db       SQLite database (created on first run)
 ```
 
@@ -96,17 +107,15 @@ venv/bin/pip install -r requirements.txt
 ### 3. Environment file
 
 ```bash
-cat > .env << 'EOF'
-LND_REST_URL=https://127.0.0.1:9000
-LND_CERT=/home/lnd/tls.cert
-LND_MACAROON=/home/lnd/data/chain/bitcoin/mainnet/admin.macaroon
-
-# Optional
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
-EOF
+cp .env.example .env
 chmod 600 .env
+$EDITOR .env       # fill in the keys you need
 ```
+
+`.env.example` is the source of truth for every env key the codebase reads
+(LND, Claude API, Telegram, backup destination, DB path, dashboard bind).
+Only `LND_*` is strictly required — everything else is optional and falls
+back to a documented default.
 
 ### 4. LND file access
 
@@ -183,7 +192,7 @@ main.py backup [--trigger path|timer|manual]   # rsync channel.backup to BACKUP_
 ### Dashboard
 
 ```bash
-venv/bin/python3 dashboard/app.py    # or install lnd-dashboard.service
+venv/bin/python3 dashboard/app.py    # or install services/lnd-dashboard.service
 ```
 
 Access at `http://YOUR_IP:4000`. No auth — use Tailscale or LAN only.
@@ -331,9 +340,24 @@ Open fees                 -250 sats  (1 × 1 sat/vB × 250 vB)
 Deployable             3,400,056 sats → 1 channel at 3,400,056 sats
 ```
 
-Candidates scored by **diversity** (50%) and **centrality** (50%).
-Avg outbound fee shown for reference. Three tiers: hub (rank 1-50),
-mid-tier (51-250), small (251-500). Portfolio strategy selects the tier.
+Two-stage tier-segmented ranking. Tiers are absolute channel-count
+buckets — **hub** (≥100 channels), **mid-tier** (30-99), **small** (10-29);
+anything below 10 is dropped as noise. Within each tier:
+
+1. **Centrality** (log-normalised mean of channel count + total capacity)
+   prefilters the top 30 candidates — cheap, derived from the local graph.
+2. **Diversity** (fraction of the candidate's peers that aren't already in
+   your graph) is computed via a live `get_node_info` call per prefiltered
+   candidate, then used to rerank. Top 10 per tier are surfaced.
+
+Why tiered: a small node's peers are obscure leaves (high diversity by
+default) and a hub's peers overlap heavily with yours (low diversity). A
+single global ranking would just surface backwater nodes. Per-tier ranking
+asks the right question — "the most diversifying hub", "the most
+diversifying mid-tier", "the most diversifying small" — independently.
+
+Avg outbound fee is shown for reference but not scored — local graph fee
+data is unreliable.
 
 ---
 

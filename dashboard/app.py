@@ -15,7 +15,7 @@ The dashboard is read-only — it never modifies LND state or the database.
 Designed to be accessed via Tailscale only (bound to Tailscale IP, not 0.0.0.0).
 
 Run: python3 dashboard/app.py
-Or install as systemd service — see lnd-dashboard.service.
+Or install as systemd service — see services/lnd-dashboard.service.
 """
 
 import os

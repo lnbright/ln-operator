@@ -11,6 +11,16 @@
 - Manual rebalances synced from LND payments by detecting circular self-payments
 - Channel open time used as floor to prevent old payment misattribution
 - Fee scoring removed from candidates — local graph fee data too unreliable
+- **Peer ranking is two-stage and tier-segmented (no weighted blending)**:
+  candidates are bucketed by absolute channel count — hub (≥100 ch),
+  mid-tier (30-99), small (10-29). Sub-SMALL nodes dropped as noise.
+  Within each tier: centrality (log-normalised channels + capacity) acts
+  as a cheap prefilter to pick the top `ENRICH_PER_TIER` (30); then
+  `get_node_info` is called per candidate to compute diversity (% of
+  their peers not already in our graph), which is the actual ranking
+  signal. Top `SHOW_PER_TIER` (10) per tier are surfaced. Live LND calls
+  make this slow (~90 round-trips) — runs only in `main.py plan`,
+  never in the 2h pipeline. Constants live in `advisor.py`.
 - agent.py exists but plan command doesn't use it (pure local graph)
 - Rebalance auto-chunks on failure (halves down to 100k min). Each successful
   chunk is its own success row in rebalance_log at its actual ppm.
@@ -55,9 +65,10 @@
 - fee_overrides table: chan_id (PK), pinned_ppm, set_at, note — manual fee pins
 
 ## Services
-- Dashboard: systemd lnd-dashboard.service, port 4000
+- Dashboard: systemd lnd-dashboard.service, port 4000. Unit file at services/lnd-dashboard.service.
 - Channel backup: systemd lnd-channel-backup.path (inotify on channel.backup) +
   lnd-channel-backup.timer (2h heartbeat), both triggering lnd-channel-backup@{path,timer}.service.
+  Unit files at services/lnd-channel-backup.{path,timer,@.service}.
   Destination configured via BACKUP_* keys in .env. Attempts logged in backup_log table;
   dashboard shows freshness badge.
 - Pipeline: cron every 2 hours
