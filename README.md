@@ -37,8 +37,9 @@ Reads your on-chain wallet balance from LND and calculates how many channels you
 can afford after deducting anchor reserves, treasury, and on-chain fees. Shows the
 top 10 candidate peers per tier (hub / mid-tier / small) using a two-stage rank:
 centrality (channels + capacity) prefilters within each tier, then a live LND
-graph call computes diversity (% of their peers you don't already share) and
-reranks. Runs only on demand — the per-candidate graph calls are too slow for
+graph call computes diversity (% of their peers that sit outside your 2-hop
+reachable set — i.e. would actually expand your graph horizon) and reranks.
+Runs only on demand — the per-candidate graph calls are too slow for
 the pipeline. Offers to generate a deposit address with QR code at the end.
 
 No external API dependencies — everything from your own LND node.
@@ -346,15 +347,28 @@ anything below 10 is dropped as noise. Within each tier:
 
 1. **Centrality** (log-normalised mean of channel count + total capacity)
    prefilters the top 30 candidates — cheap, derived from the local graph.
-2. **Diversity** (fraction of the candidate's peers that aren't already in
-   your graph) is computed via a live `get_node_info` call per prefiltered
-   candidate, then used to rerank. Top 10 per tier are surfaced.
+2. **Diversity** (fraction of the candidate's peers that sit **outside your
+   2-hop reachable set** — i.e. would actually expand your graph horizon,
+   not just add another edge into nodes you can already reach through an
+   existing peer) is computed via a live `get_node_info` call per
+   prefiltered candidate, then used to rerank. Top 10 per tier are
+   surfaced. The 2-hop set is built once from the local `describe_graph()`
+   edges, so this costs no extra LND round-trips.
 
-Why tiered: a small node's peers are obscure leaves (high diversity by
-default) and a hub's peers overlap heavily with yours (low diversity). A
-single global ranking would just surface backwater nodes. Per-tier ranking
-asks the right question — "the most diversifying hub", "the most
-diversifying mid-tier", "the most diversifying small" — independently.
+Why 2-hop, not direct-peer overlap: if "already in your graph" means just
+your direct peers, the metric collapses when your channel count is low —
+almost everyone scores near 100% diversity because almost no candidate
+shares a *direct* edge with you. Measuring against the 2-hop horizon
+preserves discrimination at any node size: a hub whose peers are mostly
+other hubs you can already reach in 2 hops scores low; a curated small
+node with peers genuinely off your map scores high.
+
+Why tiered: a small node's peers are often obscure leaves outside your
+horizon (high diversity by default) and a hub's peers tend to be other
+hubs you can already reach (low diversity). A single global ranking
+would just surface backwater nodes. Per-tier ranking asks the right
+question — "the most diversifying hub", "the most diversifying mid-tier",
+"the most diversifying small" — independently.
 
 Avg outbound fee is shown for reference but not scored — local graph fee
 data is unreliable.

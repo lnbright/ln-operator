@@ -12,8 +12,9 @@ Key functions used by main.py plan command:
   log-normalised). Sorts the list but does not rerank within tiers.
 - _rerank_tiers_by_diversity(): stage-2 — within each tier, takes the top
   ENRICH_PER_TIER by centrality, fetches live graph data per candidate to
-  compute diversity (% of their peers not already in our graph), then
-  reranks by diversity and returns top SHOW_PER_TIER per tier.
+  compute diversity (% of their peers that sit outside our 2-hop reachable
+  set, i.e. would genuinely expand our graph horizon), then reranks by
+  diversity and returns top SHOW_PER_TIER per tier.
 - _classify_existing_portfolio(): classifies existing channels as hub or mid-tier
 - _calculate_treasury(): calculates reserve (treasury % + anchor reserve + open fees)
 - _check_fee_environment(): gets fee rate from LND, falls back to mempool.space
@@ -410,6 +411,24 @@ def _fetch_candidates_from_graph(state):
                             node_map[pk]["fee_ppm_sum"] += fee_rate
                             node_map[pk]["fee_ppm_count"] += 1
 
+        # Build 2-hop reachable set from the same edge list: our direct peers
+        # plus every node sharing a public channel with one of our peers. This
+        # is the "graph horizon" diversity is measured against — see
+        # _enrich_candidates_with_graph_data.
+        our_peers_pk = state["existing_peers"]
+        reachable_2hop = set(our_peers_pk)
+        for edge in edges_raw:
+            n1 = edge.get("node1_pub", "")
+            n2 = edge.get("node2_pub", "")
+            if n1 in our_peers_pk:
+                reachable_2hop.add(n2)
+            if n2 in our_peers_pk:
+                reachable_2hop.add(n1)
+        reachable_2hop.discard(state["pubkey"])
+        state["reachable_2hop"] = reachable_2hop
+        log.info("2-hop reachable graph: %d nodes (from %d direct peers)",
+                 len(reachable_2hop), len(our_peers_pk))
+
         # Filter out nodes with zero channels (likely inactive/phantom nodes)
         active_nodes = [n for n in node_map.values() if n["channel_count"] > 0]
 
@@ -534,7 +553,8 @@ def _enrich_candidates_with_graph_data(candidates, state):
     """Pull live per-candidate graph data from LND.
 
     For each candidate, fetches:
-    - Their peer list (to compute diversity: how many of their peers are new to us)
+    - Their peer list (to compute diversity: how many of their peers sit
+      outside our 2-hop reachable set, i.e. would actually expand our graph)
     - Their fee policies (average outbound fee rate across their channels)
     - Whether they have a clearnet address
 
@@ -542,7 +562,7 @@ def _enrich_candidates_with_graph_data(candidates, state):
     One get_node_info call per candidate — slow, so callers should prefilter
     (see _rerank_tiers_by_diversity).
     """
-    our_peers = state["existing_peers"]
+    reachable = state["reachable_2hop"]
     our_pubkey = state["pubkey"]
 
     for c in candidates:
@@ -568,7 +588,7 @@ def _enrich_candidates_with_graph_data(candidates, state):
                     fee_count += 1
 
             if their_peers:
-                new_peers = their_peers - our_peers - {our_pubkey}
+                new_peers = their_peers - reachable - {our_pubkey}
                 diversity = len(new_peers) / len(their_peers)
                 new_peer_count = len(new_peers)
             else:
@@ -584,7 +604,7 @@ def _enrich_candidates_with_graph_data(candidates, state):
 
             c["graph_data"] = {
                 "their_peer_count": len(their_peers),
-                "new_peers_to_us": new_peer_count,
+                "new_peers_beyond_2hop": new_peer_count,
                 "diversity_score": round(diversity, 3),
                 "avg_fee_ppm": avg_fee_ppm,
                 "has_clearnet": has_clearnet,
@@ -607,14 +627,17 @@ def _rerank_tiers_by_diversity(candidates, state):
     Within each tier we take the top ENRICH_PER_TIER as the prefilter.
 
     Stage 2 (slow): for each prefiltered candidate, fetch live graph data from
-    LND to compute diversity (% of their peers we don't already share). Rerank
-    each tier by diversity descending and return the top SHOW_PER_TIER.
+    LND to compute diversity (% of their peers that sit outside our 2-hop
+    reachable set — i.e. would actually expand our graph horizon, not just
+    add another edge into nodes we can already reach). Rerank each tier by
+    diversity descending and return the top SHOW_PER_TIER.
 
-    Why tiered: a small node's peers are obscure leaves, so it tends to score
-    very high on diversity; a hub's peers overlap heavily with yours, so it
-    scores low. A single global diversity ranking would just surface backwater
-    nodes. Per-tier ranking asks the right question — "the most diversifying
-    hub I could add", "the most diversifying mid-tier", "the most diversifying
+    Why tiered: a small node's peers are often obscure leaves outside our
+    horizon, so it tends to score high; a hub's peers are mostly other hubs
+    we can already reach in 2 hops through any existing peer, so it scores
+    low. A single global diversity ranking would just surface backwater nodes.
+    Per-tier ranking asks the right question — "the most diversifying hub I
+    could add", "the most diversifying mid-tier", "the most diversifying
     small node" — independently.
 
     Returns (hubs, mid_tier, small), each ≤ SHOW_PER_TIER long, sorted by diversity.

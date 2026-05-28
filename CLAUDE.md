@@ -17,10 +17,17 @@
   Within each tier: centrality (log-normalised channels + capacity) acts
   as a cheap prefilter to pick the top `ENRICH_PER_TIER` (30); then
   `get_node_info` is called per candidate to compute diversity (% of
-  their peers not already in our graph), which is the actual ranking
-  signal. Top `SHOW_PER_TIER` (10) per tier are surfaced. Live LND calls
-  make this slow (~90 round-trips) — runs only in `main.py plan`,
-  never in the 2h pipeline. Constants live in `advisor.py`.
+  their peers that sit **outside our 2-hop reachable set** — i.e. would
+  actually expand our graph horizon, not just add another edge into
+  nodes already reachable through any existing peer). The 2-hop set is
+  built once from the local `describe_graph()` edges in
+  `_fetch_candidates_from_graph` and stashed on `state["reachable_2hop"]`.
+  Using only direct peers (`state["existing_peers"]`) instead skewed the
+  metric heavily toward hubs when our channel count was low — almost
+  every candidate's peers were "new" by that definition. Top
+  `SHOW_PER_TIER` (10) per tier are surfaced. Live LND calls make this
+  slow (~90 round-trips) — runs only in `main.py plan`, never in the 2h
+  pipeline. Constants live in `advisor.py`.
 - agent.py exists but plan command doesn't use it (pure local graph)
 - Rebalance auto-chunks on failure (halves down to 100k min). Each successful
   chunk is its own success row in rebalance_log at its actual ppm.
