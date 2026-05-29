@@ -371,6 +371,9 @@ def _fetch_candidates_from_graph(state):
     """
     log.info("fetching candidates from local LND graph...")
     candidates = []
+    # Set a safe default so downstream consumers (e.g. _rerank_tiers_by_diversity)
+    # don't KeyError if describe_graph() times out before we build the real set.
+    state.setdefault("reachable_2hop", set())
 
     try:
         graph = lnd_client.describe_graph()
