@@ -47,9 +47,22 @@ No external API dependencies — everything from your own LND node.
 ### Dashboard — Web Interface
 
 Single-page Flask app showing live LND data and historical SQLite data:
-node status, channel health with balance bars and profit/loss, daily revenue
-chart, rebalance history (auto + manual), fee updates, alerts, payments,
-and invoices.
+node status, watchtower health, channel health with balance bars and
+profit/loss, daily revenue chart, rebalance history (auto + manual),
+fee updates, alerts, payments, and invoices.
+
+The channel table shows local and remote outbound fees side-by-side,
+pulled per-channel from `/v1/graph/edge/{chan_id}` so you can see at a
+glance whether a peer is undercharging or overcharging relative to you.
+
+The watchtower card reports tower count, deactivated count, lifetime
+backups delivered, pending/failed counters, and an overall health
+badge. It requires `wtclient.active=1` in `lnd.conf` (LND only reads
+the config at startup, so add it then restart `lnd`); otherwise the
+card shows "wtclient disabled" in red. Note that
+`active_session_candidate` is LND's admin flag, not a liveness probe —
+a tower may still be backing up state on existing sessions even when
+flagged inactive.
 
 ### Status — CLI Overview
 
