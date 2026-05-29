@@ -204,27 +204,21 @@ If `Fixed` is empty, render `🔧 *Fixed:* nothing`.
 
 ## 6. Deliver
 
-Two destinations: Telegram (the operator reads this on their phone) and
-stdout (the cron wrapper appends to `logs/daily-check.log` for history).
+**Do NOT send Telegram yourself.** The cron wrapper (`scripts/daily-check.sh`)
+owns delivery: after you exit it reads `/tmp/daily-check-summary.txt`, appends
+a `💸 *Run:*` line with this run's actual cost / duration / token count (parsed
+from the JSON result — you can't know these mid-run), and sends the combined
+message to Telegram via `telegram_bot.send_message` (Markdown `*bold*`, with a
+no-parse_mode retry if special characters break the parse). It logs the
+delivered message to `logs/daily-check.log`.
 
-```bash
-venv/bin/python3 -c "
-import sys, telegram_bot
-text = open('/tmp/daily-check-summary.txt').read()
-ok = telegram_bot.send_message(text)
-print('[telegram] sent' if ok else '[telegram] FAILED', file=sys.stderr)
-"
-```
-
-Procedure:
+So your only delivery jobs:
 1. Write the final summary to `/tmp/daily-check-summary.txt`
-2. Run the snippet above to push it to Telegram (default parse_mode is
-   Markdown so `*bold*` renders; telegram_bot retries without parse_mode
-   if special characters in aliases or issue text break the parse)
-3. Print the same summary to stdout (the wrapper logs it)
+2. Print the same summary to stdout
 
-If the Telegram send fails, don't retry — just log `[telegram] FAILED`
-and carry on. The stdout log is the source of truth either way.
+Don't add a cost/duration line yourself — the wrapper appends it. If you're
+ever run by hand (outside the wrapper) no Telegram is sent, which is fine: the
+file and stdout are the source of truth.
 
 # Constraints
 
