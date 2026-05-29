@@ -64,6 +64,16 @@ card shows "wtclient disabled" in red. Note that
 a tower may still be backing up state on existing sessions even when
 flagged inactive.
 
+Health badge: **red** when wtclient is disabled, no towers are
+configured, or any backup has permanently failed; **yellow** when
+towers exist but none are active (all deactivated) or the status read
+errors; **green** otherwise. Pending is shown as a number but does not
+affect the badge — a transient `pending=1` is normal when a session
+fills its 1024-update cap and LND negotiates a fresh one, so it is not
+treated as a fault. Multiple towers can be configured for failover, but
+LND assigns each backup to a single tower rather than mirroring every
+update to all of them.
+
 ### Status — CLI Overview
 
 Node summary with per-channel balance bars and fee rates (your fees, their fees,
