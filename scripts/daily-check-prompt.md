@@ -48,6 +48,19 @@ Also run:
   any CRT, repeated `[ERR] LNWL`/`[ERR] CHDB` (wallet/db), `unable to sync`,
   chain-backend errors, channel force-close / breach mentions, repeated
   `failed to send` to the watchtower.
+  - **Known-benign, do NOT raise as an issue (and do NOT mis-attribute):**
+    `[ERR] WTCL: (anchor) SessionQueue(<hex>) unable to dial tower ... socks
+    connect ... .onion:9911: ... TTL expired` / `general SOCKS server
+    failure`. These are *transient Tor circuit failures* dialing our **active
+    onion watchtower** over `127.0.0.1:9050` — LND retries on the next state
+    update and succeeds (confirm the backup counter is still climbing via
+    `/v2/watchtower/client/stats` `num_backups`). They are expected because
+    `tor.streamisolation=true` forces a fresh circuit per dial. The `<hex>`
+    in `SessionQueue(...)` is a **session id, not a tower pubkey** — never
+    describe these as a "dead/deactivated tower being dialed". The
+    deactivated WG tower (`10.8.0.2`) does NOT appear in dial attempts. Only
+    flag watchtower trouble if `num_failed_backups > 0`, the backup counter
+    has stalled for many hours, or a NON-Tor dial error appears.
 - **Peer-side fees** — for each active channel, fetch our outbound fee vs
   the peer's outbound fee from `/v1/graph/edge/{chan_id}` (numeric scid;
   match `our_pubkey` against node1_pub/node2_pub, read
