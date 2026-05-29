@@ -260,22 +260,54 @@ def get_dashboard_data():
 
 
 def get_watchtower_status():
-    """Read the wtclient tower list. Returns a dict with:
-      count        — number of towers configured (active or not)
-      active_count — towers with at least one active session
-      enabled      — False if LND was built/started without wtclient
+    """Read wtclient state. Returns a dict with:
+      count        — total towers configured (incl. deactivated)
+      active_count — towers with active_session_candidate=true
+                     (LND will open new sessions with them)
+      inactive_count — total - active
+      num_backups  — lifetime state updates successfully backed up
+      pending      — backups queued, not yet sent
+      failed       — backups that failed permanently
+      enabled      — False iff wtclient subsystem is off (501 on /stats)
       error        — non-None on unexpected failures
-    The wtclient subsystem is gated behind `wtclient.active=1` in lnd.conf;
-    when off, LND returns 501 Not Implemented and we surface that as red.
+
+    Endpoint note: `/v2/watchtower/client/towers` returns 501 on this LND
+    build (REST gateway quirk), but `/v2/watchtower/client` (no suffix)
+    and `/v2/watchtower/client/stats` work. We use the working pair.
+
+    Health rationale (set by the template, not here):
+      red    — wtclient disabled / no towers / failed > 0
+      yellow — towers configured but 0 active (existing sessions still
+               back up, but no new sessions can be opened once they fill),
+               OR pending > 0 (queue building)
+      green  — ≥1 active tower, 0 failed, 0 pending
+    `active_session_candidate` is an *administrative* flag (set by
+    lncli wtclient activate/deactivate), not a liveness probe — a
+    deactivated tower can still be exchanging state updates on its
+    existing sessions until they exhaust.
     """
-    code, data, err = lnd_get_status("/v2/watchtower/client/towers")
-    if code == 501:
-        return {"count": 0, "active_count": 0, "enabled": False, "error": None}
-    if err:
-        return {"count": 0, "active_count": 0, "enabled": True, "error": err}
-    towers = data.get("towers", []) if data else []
-    active = sum(1 for t in towers if t.get("active_session_candidate"))
-    return {"count": len(towers), "active_count": active, "enabled": True, "error": None}
+    blank = {"count": 0, "active_count": 0, "inactive_count": 0,
+             "num_backups": 0, "pending": 0, "failed": 0,
+             "enabled": True, "error": None}
+
+    code_s, stats, err_s = lnd_get_status("/v2/watchtower/client/stats")
+    if code_s == 501:
+        return {**blank, "enabled": False}
+    if err_s:
+        return {**blank, "error": err_s}
+
+    blank["num_backups"] = int(stats.get("num_backups", 0) or 0)
+    blank["pending"]     = int(stats.get("num_pending_backups", 0) or 0)
+    blank["failed"]      = int(stats.get("num_failed_backups", 0) or 0)
+
+    towers_resp, err_t = lnd_get("/v2/watchtower/client")
+    if not towers_resp or err_t:
+        return {**blank, "error": err_t or "tower list unavailable"}
+    towers = towers_resp.get("towers", []) or []
+    blank["count"]          = len(towers)
+    blank["active_count"]   = sum(1 for t in towers if t.get("active_session_candidate"))
+    blank["inactive_count"] = blank["count"] - blank["active_count"]
+    return blank
 
 
 def get_remote_fee_ppm(chan_id, our_pubkey):
@@ -554,20 +586,40 @@ TEMPLATE = """
   <!-- Watchtowers -->
   {% if data.watchtowers is defined %}
   {% set wt = data.watchtowers %}
-  {% set wt_zero = (wt.count == 0) %}
+  {#
+    Health rule:
+      red    — wtclient off / no towers configured / failed_backups > 0
+      yellow — towers configured but 0 active (existing sessions still
+               back up but no new ones can be opened), OR pending > 0
+      green  — ≥1 active tower, 0 failed, 0 pending
+    'active_session_candidate' is LND's admin flag; not a liveness probe.
+  #}
+  {% set wt_red    = (not wt.enabled) or (wt.enabled and wt.count == 0) or (wt.failed > 0) %}
+  {% set wt_yellow = (not wt_red) and (wt.active_count == 0 or wt.pending > 0 or wt.error) %}
+  {% set wt_green  = (not wt_red) and (not wt_yellow) %}
   <div class="grid-1">
     <div class="card">
       <div class="card-title">Watchtowers</div>
       <div class="stat-row">
-        <span class="stat-label">Connected</span>
-        <span class="stat-value {% if wt_zero %}red{% else %}green{% endif %}" style="font-size:18px;font-weight:700;">
-          {{ wt.count }}
+        <span class="stat-label">Active</span>
+        <span class="stat-value {% if wt.active_count == 0 %}red{% else %}green{% endif %}" style="font-size:18px;font-weight:700;">
+          {{ wt.active_count }}
         </span>
       </div>
-      {% if wt.enabled and wt.count > 0 %}
       <div class="stat-row">
-        <span class="stat-label">Active session candidates</span>
-        <span class="stat-value {% if wt.active_count == 0 %}red{% else %}green{% endif %}">{{ wt.active_count }}</span>
+        <span class="stat-label">Configured (incl. deactivated)</span>
+        <span class="stat-value">
+          {{ wt.count }}{% if wt.inactive_count > 0 %} <span style="color:var(--muted);font-size:11px;">({{ wt.inactive_count }} deactivated)</span>{% endif %}
+        </span>
+      </div>
+      {% if wt.enabled and not wt.error %}
+      <div class="stat-row">
+        <span class="stat-label">Backups delivered (lifetime)</span>
+        <span class="stat-value">{{ "{:,}".format(wt.num_backups) }}</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Pending / failed</span>
+        <span class="stat-value {% if wt.failed > 0 %}red{% elif wt.pending > 0 %}{% endif %}">{{ wt.pending }} / {{ wt.failed }}</span>
       </div>
       {% endif %}
       <div class="stat-row">
@@ -575,8 +627,11 @@ TEMPLATE = """
         <span>
           {% if not wt.enabled %}<span class="badge badge-red">wtclient disabled</span>
           {% elif wt.error %}<span class="badge badge-yellow" title="{{ wt.error }}">error</span>
-          {% elif wt_zero %}<span class="badge badge-red">no towers</span>
-          {% else %}<span class="badge badge-green">connected</span>{% endif %}
+          {% elif wt.count == 0 %}<span class="badge badge-red">no towers</span>
+          {% elif wt.failed > 0 %}<span class="badge badge-red" title="permanent backup failures recorded">failed backups</span>
+          {% elif wt.active_count == 0 %}<span class="badge badge-yellow" title="towers exist but all deactivated — existing sessions still work until they fill, then no new ones will open">deactivated</span>
+          {% elif wt.pending > 0 %}<span class="badge badge-yellow" title="backups queued, not yet delivered">queue building</span>
+          {% else %}<span class="badge badge-green">healthy</span>{% endif %}
         </span>
       </div>
     </div>
