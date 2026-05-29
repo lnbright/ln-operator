@@ -33,8 +33,27 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
 
 Also run:
 - `venv/bin/python3 main.py status` — current channel state
-- `tail -200 logs/*.log` — look for stack traces, repeated errors, anything
-  that says ERROR or WARNING you don't recognise
+- `tail -200 logs/*.log` — the tool's own logs (pipeline / signals /
+  daily-check). Look for stack traces, repeated errors, anything that says
+  ERROR or WARNING you don't recognise.
+- **Skim LND's own logs** (the node, not the tool):
+  `journalctl -u lnd --since "24 hours ago" --no-pager | grep -E "\[(ERR|CRT)\]"`
+  (`pi` is in the `adm` group, so no sudo needed). LND log levels are
+  TRC/DBG/INF/WRN/ERR/CRT — focus on **ERR and CRT**. Expect dozens of ERR
+  lines on a busy node; most are benign and recurring (failed HTLCs, peer
+  disconnects, gossip hiccups). Don't list them individually — **group by
+  subsystem + message shape, count occurrences, and only surface the
+  recurring or unfamiliar ones**. Pull WRN only if a specific warning
+  pattern is both frequent and unexplained. Things that genuinely matter:
+  any CRT, repeated `[ERR] LNWL`/`[ERR] CHDB` (wallet/db), `unable to sync`,
+  chain-backend errors, channel force-close / breach mentions, repeated
+  `failed to send` to the watchtower.
+- **Peer-side fees** — for each active channel, fetch our outbound fee vs
+  the peer's outbound fee from `/v1/graph/edge/{chan_id}` (numeric scid;
+  match `our_pubkey` against node1_pub/node2_pub, read
+  `fee_rate_milli_msat` on each policy — same source the dashboard's
+  local/remote columns use; these are *not* in the DB). Use this to inform
+  Diagnose/Suggest below — it's analysis input, not a reconcile check.
 - `make test` — confirm the unit suite still passes
 
 ## 2. Reconcile data integrity
@@ -106,7 +125,23 @@ You're looking for things a human operator would notice as off:
   not catching up?)
 - Fee floors that look wrong vs the most recent successful refill ppm
 - Inactive/offline channels still being chosen as rebalance sources
+- **Local vs peer fee asymmetry** (from the graph-edge fees gathered above):
+    - Peer charges *much more outbound toward us* than we charge them
+      (remote_ppm ≫ local_ppm): pushing liquidity to us is expensive for
+      the network, which can explain a channel that drains and won't refill
+      cheaply — cross-reference with that channel's rebalance cost ppm.
+    - We charge *far more than the peer* (local_ppm ≫ remote_ppm) on a
+      channel that still forwards heavily: we may have room to hold or raise
+      and capture more, or flow is one-directional and the fee is moot.
+    - We undercharge badly (local_ppm near zero while the peer charges a
+      healthy rate on a well-used channel): likely leaving revenue on the
+      table — flag for Suggest.
+  Only call out asymmetries that line up with observed flow or rebalance
+  pain; a lopsided fee on a dead channel isn't worth a line.
 - DB write errors, LND REST errors, anything that bypassed the normal flow
+- LND-side problems from the journal scan (see §1): recurring ERR/CRT,
+  wallet/db errors, sync or chain-backend issues, anything force-close or
+  breach related
 - Test failures or import errors
 - Anything else that catches your eye and doesn't fit the patterns above
 
