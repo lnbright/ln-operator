@@ -278,9 +278,11 @@ def get_watchtower_status():
     Health rationale (set by the template, not here):
       red    — wtclient disabled / no towers / failed > 0
       yellow — towers configured but 0 active (existing sessions still
-               back up, but no new sessions can be opened once they fill),
-               OR pending > 0 (queue building)
-      green  — ≥1 active tower, 0 failed, 0 pending
+               back up, but no new sessions can be opened once they fill)
+      green  — ≥1 active tower, 0 failed
+    Pending does NOT affect the badge — a transient pending=1 during session
+    rollover (current session hits max-updates, LND negotiates a new one) is
+    normal. It's surfaced as a number only.
     `active_session_candidate` is an *administrative* flag (set by
     lncli wtclient activate/deactivate), not a liveness probe — a
     deactivated tower can still be exchanging state updates on its
@@ -590,12 +592,15 @@ TEMPLATE = """
     Health rule:
       red    — wtclient off / no towers configured / failed_backups > 0
       yellow — towers configured but 0 active (existing sessions still
-               back up but no new ones can be opened), OR pending > 0
-      green  — ≥1 active tower, 0 failed, 0 pending
+               back up but no new ones can be opened)
+      green  — ≥1 active tower, 0 failed
+    Pending is shown as a number but does NOT affect the badge: a transient
+    pending=1 during session rollover (current session hits max-updates and
+    LND negotiates a new one) is normal, not a fault.
     'active_session_candidate' is LND's admin flag; not a liveness probe.
   #}
   {% set wt_red    = (not wt.enabled) or (wt.enabled and wt.count == 0) or (wt.failed > 0) %}
-  {% set wt_yellow = (not wt_red) and (wt.active_count == 0 or wt.pending > 0 or wt.error) %}
+  {% set wt_yellow = (not wt_red) and (wt.active_count == 0 or wt.error) %}
   {% set wt_green  = (not wt_red) and (not wt_yellow) %}
   <div class="grid-1">
     <div class="card">
@@ -619,7 +624,7 @@ TEMPLATE = """
       </div>
       <div class="stat-row">
         <span class="stat-label">Pending / failed</span>
-        <span class="stat-value {% if wt.failed > 0 %}red{% elif wt.pending > 0 %}{% endif %}">{{ wt.pending }} / {{ wt.failed }}</span>
+        <span class="stat-value {% if wt.failed > 0 %}red{% endif %}">{{ wt.pending }} / {{ wt.failed }}</span>
       </div>
       {% endif %}
       <div class="stat-row">
@@ -630,7 +635,6 @@ TEMPLATE = """
           {% elif wt.count == 0 %}<span class="badge badge-red">no towers</span>
           {% elif wt.failed > 0 %}<span class="badge badge-red" title="permanent backup failures recorded">failed backups</span>
           {% elif wt.active_count == 0 %}<span class="badge badge-yellow" title="towers exist but all deactivated — existing sessions still work until they fill, then no new ones will open">deactivated</span>
-          {% elif wt.pending > 0 %}<span class="badge badge-yellow" title="backups queued, not yet delivered">queue building</span>
           {% else %}<span class="badge badge-green">healthy</span>{% endif %}
         </span>
       </div>
