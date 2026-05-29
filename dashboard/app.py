@@ -57,14 +57,28 @@ def get_macaroon_header():
     with open(LND_MACAROON, "rb") as f:
         return {"Grpc-Metadata-macaroon": f.read().hex()}
 
-def lnd_get(path):
+def lnd_get(path, timeout=5):
     """GET request to LND REST API. Returns (dict, None) or (None, error)."""
     try:
         r = requests.get(f"{LND_REST_URL}{path}", headers=get_macaroon_header(),
-                         verify=LND_CERT, timeout=5)
+                         verify=LND_CERT, timeout=timeout)
         return r.json(), None
     except Exception as e:
         return None, str(e)
+
+
+def lnd_get_status(path, timeout=5):
+    """Like lnd_get but also returns the HTTP status code so callers can
+    distinguish 'wtclient disabled' (501) from generic errors.
+    Returns (status_code, dict_or_none, error_or_none)."""
+    try:
+        r = requests.get(f"{LND_REST_URL}{path}", headers=get_macaroon_header(),
+                         verify=LND_CERT, timeout=timeout)
+        if r.status_code != 200:
+            return r.status_code, None, f"HTTP {r.status_code}"
+        return r.status_code, r.json(), None
+    except Exception as e:
+        return 0, None, str(e)
 
 def get_lnd_uptime():
     """Find the lnd process and calculate how long it's been running."""
@@ -175,6 +189,7 @@ def get_dashboard_data():
     # otherwise the field comes back empty and the UI falls back to pubkey.
     channels_raw, _ = lnd_get("/v1/channels?peer_alias_lookup=true")
     raw_channels = channels_raw.get("channels", []) if channels_raw else []
+    our_pubkey = info.get("identity_pubkey", "")
     channels_enriched = []
     for ch in raw_channels:
         chan_id   = ch.get("chan_id", "")
@@ -182,8 +197,13 @@ def get_dashboard_data():
         local     = int(ch.get("local_balance", 0))
         ch["perf"]      = get_channel_perf(chan_id, days30)
         ch["local_pct"] = round(local / capacity * 100, 1) if capacity > 0 else 0
+        local_ppm, remote_ppm = get_remote_fee_ppm(chan_id, our_pubkey)
+        ch["local_fee_ppm"]  = local_ppm
+        ch["remote_fee_ppm"] = remote_ppm
         channels_enriched.append(ch)
     data["channels"] = channels_enriched
+
+    data["watchtowers"] = get_watchtower_status()
 
     invoices, _     = lnd_get("/v1/invoices?reversed=true&num_max_invoices=10")
     data["invoices"] = list(reversed(invoices.get("invoices", []))) if invoices else []
@@ -237,6 +257,55 @@ def get_dashboard_data():
 
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return data
+
+
+def get_watchtower_status():
+    """Read the wtclient tower list. Returns a dict with:
+      count        — number of towers configured (active or not)
+      active_count — towers with at least one active session
+      enabled      — False if LND was built/started without wtclient
+      error        — non-None on unexpected failures
+    The wtclient subsystem is gated behind `wtclient.active=1` in lnd.conf;
+    when off, LND returns 501 Not Implemented and we surface that as red.
+    """
+    code, data, err = lnd_get_status("/v2/watchtower/client/towers")
+    if code == 501:
+        return {"count": 0, "active_count": 0, "enabled": False, "error": None}
+    if err:
+        return {"count": 0, "active_count": 0, "enabled": True, "error": err}
+    towers = data.get("towers", []) if data else []
+    active = sum(1 for t in towers if t.get("active_session_candidate"))
+    return {"count": len(towers), "active_count": active, "enabled": True, "error": None}
+
+
+def get_remote_fee_ppm(chan_id, our_pubkey):
+    """Look up a channel's edge in LND's graph and return the *peer's*
+    outbound fee_rate_milli_msat. Returns (local_ppm, remote_ppm) where
+    local is our own outbound policy and remote is the peer's. Either
+    value is None if the policy isn't published yet (new/private channel).
+    """
+    edge, _ = lnd_get(f"/v1/graph/edge/{chan_id}", timeout=5)
+    if not edge:
+        return None, None
+    n1 = edge.get("node1_pub", "")
+    n2 = edge.get("node2_pub", "")
+    p1 = edge.get("node1_policy") or {}
+    p2 = edge.get("node2_policy") or {}
+
+    def ppm(policy):
+        if not policy:
+            return None
+        v = policy.get("fee_rate_milli_msat")
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    if our_pubkey == n1:
+        return ppm(p1), ppm(p2)
+    if our_pubkey == n2:
+        return ppm(p2), ppm(p1)
+    return None, None
 
 
 def get_backup_status(now):
@@ -482,6 +551,38 @@ TEMPLATE = """
     </div>
   </div>
 
+  <!-- Watchtowers -->
+  {% if data.watchtowers is defined %}
+  {% set wt = data.watchtowers %}
+  {% set wt_zero = (wt.count == 0) %}
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">Watchtowers</div>
+      <div class="stat-row">
+        <span class="stat-label">Connected</span>
+        <span class="stat-value {% if wt_zero %}red{% else %}green{% endif %}" style="font-size:18px;font-weight:700;">
+          {{ wt.count }}
+        </span>
+      </div>
+      {% if wt.enabled and wt.count > 0 %}
+      <div class="stat-row">
+        <span class="stat-label">Active session candidates</span>
+        <span class="stat-value {% if wt.active_count == 0 %}red{% else %}green{% endif %}">{{ wt.active_count }}</span>
+      </div>
+      {% endif %}
+      <div class="stat-row">
+        <span class="stat-label">Status</span>
+        <span>
+          {% if not wt.enabled %}<span class="badge badge-red">wtclient disabled</span>
+          {% elif wt.error %}<span class="badge badge-yellow" title="{{ wt.error }}">error</span>
+          {% elif wt_zero %}<span class="badge badge-red">no towers</span>
+          {% else %}<span class="badge badge-green">connected</span>{% endif %}
+        </span>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Node Balance -->
   <div class="grid-1">
     <div class="card">
@@ -567,6 +668,8 @@ TEMPLATE = """
             <th style="width:18%">Balance</th>
             <th>Capacity</th>
             <th>Sent / Received</th>
+            <th>Local Fee</th>
+            <th>Remote Fee</th>
             <th>Revenue 30d</th>
             <th>Rebal Cost 30d</th>
             <th>Net 30d</th>
@@ -597,6 +700,12 @@ TEMPLATE = """
             <td style="font-size:10px;color:var(--muted);">
               ↑ {{ "{:,}".format(ch.total_satoshis_sent | int) }}<br>
               ↓ {{ "{:,}".format(ch.total_satoshis_received | int) }}
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }} <span style="color:var(--muted);font-size:9px;">ppm</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.remote_fee_ppm is not none %}{{ ch.remote_fee_ppm }} <span style="color:var(--muted);font-size:9px;">ppm</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>
             <td class="{% if perf.fee_rev > 0 %}amount-positive{% else %}amount-muted{% endif %}">
               {% if perf.fee_rev > 0 %}+{{ "{:,}".format(perf.fee_rev) }}{% else %}—{% endif %}
