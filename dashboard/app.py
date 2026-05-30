@@ -401,7 +401,7 @@ TEMPLATE = """
   }
   .wrap { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
   header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 40px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
-  .logo { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 28px; letter-spacing: -0.5px; }
+  .logo { font-family: 'Syne', sans-serif; font-weight: 600; font-size: 28px; letter-spacing: -0.5px; }
   .logo span { color: var(--accent); }
   .node-alias { font-size: 13px; color: var(--muted); margin-top: 4px; }
   .timestamp { font-size: 11px; color: var(--muted); text-align: right; }
