@@ -26,7 +26,7 @@
   metric heavily toward hubs when our channel count was low — almost
   every candidate's peers were "new" by that definition. Top
   `SHOW_PER_TIER` (10) per tier are surfaced. Live LND calls make this
-  slow (~90 round-trips) — runs only in `main.py plan`, never in the 2h
+  slow (~90 round-trips) — runs only in `ln-operator plan`, never in the 2h
   pipeline. Constants live in `advisor.py`.
 - agent.py exists but plan command doesn't use it (pure local graph)
 - Rebalance auto-chunks on failure (halves down to 100k min). Each successful
@@ -45,7 +45,7 @@
 - Manual fee pins (`fee_overrides` table) suppress auto-fees per channel.
   `engine.update_all_fees` checks the table first; pinned channels use the
   stored ppm with reason `manual pin: N ppm` instead of `calculate_fee_ppm`.
-  Set via `main.py overwrite_fee`, cleared via `main.py clear_fee`, shown by `status`.
+  Set via `ln-operator overwrite_fee`, cleared via `ln-operator clear_fee`, shown by `status`.
 - **Single-signal budget + fee floor (no tiers)**: `last_refill_ppm` (most
   recent successful rebalance into a channel) drives BOTH the rebalance
   budget AND the outbound fee floor. Budget = `last_refill ×
@@ -81,5 +81,5 @@
 - Pipeline: cron every 2 hours
 
 ## Crontab
-0 */2 * * * cd /home/pi/ln-operator && venv/bin/python3 main.py pipeline 2>&1
-15 3 * * * cd /home/pi/ln-operator && venv/bin/python3 main.py recompute_signals >> logs/signals.log 2>&1
+0 */2 * * * cd /home/pi/ln-operator && ./ln-operator pipeline 2>&1
+15 3 * * * cd /home/pi/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1

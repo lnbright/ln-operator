@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# ln-operator — CLI wrapper for the LN Operator toolkit.
+#
+# Resolves its own real location (following symlinks) so it works from any
+# directory and from cron, then runs main.py inside the project virtualenv.
+# Install globally with:  sudo ln -s "$PWD/ln-operator" /usr/local/bin/ln-operator
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec "$HERE/venv/bin/python3" "$HERE/main.py" "$@"

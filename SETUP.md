@@ -114,7 +114,7 @@ on every run, so any future schema additions migrate automatically.
 ### 6. Test it
 
 ```bash
-venv/bin/python3 main.py status
+ln-operator status
 ```
 
 You should see your node info, channel list with balance bars, and on-chain balance.
@@ -130,26 +130,26 @@ summary:
 cd /home/pi/ln-operator
 
 # Automated pipeline (fees → rebalance → sync → healthcheck)
-venv/bin/python3 main.py pipeline
-venv/bin/python3 main.py pipeline --dry-run
+ln-operator pipeline
+ln-operator pipeline --dry-run
 
 # Interactive
-venv/bin/python3 main.py status                 # node + channel overview
-venv/bin/python3 main.py plan                   # channel investment planner
-venv/bin/python3 main.py history 30             # recent activity from DB
+ln-operator status                 # node + channel overview
+ln-operator plan                   # channel investment planner
+ln-operator history 30             # recent activity from DB
 
 # Manual fee pins (override auto-fees per channel)
-venv/bin/python3 main.py overwrite_fee LNBiG 3000 --note "..."
-venv/bin/python3 main.py clear_fee LNBiG
+ln-operator overwrite_fee LNBiG 3000 --note "..."
+ln-operator clear_fee LNBiG
 
 # Individual pipeline steps (debug)
-venv/bin/python3 main.py adjust_fees [--dry-run]
-venv/bin/python3 main.py rebalance_channels [--dry-run] [--force RATIO]
-venv/bin/python3 main.py sync_routing
-venv/bin/python3 main.py healthcheck
+ln-operator adjust_fees [--dry-run]
+ln-operator rebalance_channels [--dry-run] [--force RATIO]
+ln-operator sync_routing
+ln-operator healthcheck
 
 # Skip Telegram on any pipeline command
-venv/bin/python3 main.py --no-telegram pipeline
+ln-operator --no-telegram pipeline
 ```
 
 ---
@@ -162,7 +162,7 @@ crontab -e
 
 ```cron
 # LN Operator — full pipeline every 2 hours
-0 */2 * * * cd /home/pi/ln-operator && venv/bin/python3 main.py pipeline 2>&1
+0 */2 * * * cd /home/pi/ln-operator && ./ln-operator pipeline 2>&1
 ```
 
 `config.py` reads `.env` via `python-dotenv` automatically, so no `source .env`

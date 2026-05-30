@@ -85,6 +85,7 @@ their inbound fees).
 
 ```
 ln-operator/
+├── ln-operator          CLI wrapper — run from anywhere (symlink to /usr/local/bin)
 ├── main.py              CLI entry — commands, display, orchestration
 ├── config.py            All tuneable settings
 ├── engine/              Channel-management engine (package)
@@ -155,8 +156,8 @@ sudo chmod g+x /home/lnd /home/lnd/data /home/lnd/data/chain \
 
 ```bash
 venv/bin/python3 db.py
-venv/bin/python3 main.py sync_routing
-venv/bin/python3 main.py status
+ln-operator sync_routing
+ln-operator status
 ```
 
 ### 6. Optional: QR codes in plan command
@@ -169,48 +170,57 @@ sudo apt install qrencode
 
 ## Usage
 
+All commands run through the `ln-operator` wrapper, which executes `main.py`
+inside the project virtualenv from any directory. To call it globally:
+
+```bash
+sudo ln -s "$PWD/ln-operator" /usr/local/bin/ln-operator
+```
+
+Without the symlink, run it from the repo as `./ln-operator <command>`.
+
 ```bash
 # ── AUTOMATED ──────────────────────────────────────────────
-main.py pipeline                             # fees → rebalance → sync → health
-main.py pipeline --dry-run                   # preview only
+ln-operator pipeline                             # fees → rebalance → sync → health
+ln-operator pipeline --dry-run                   # preview only
 
 # ── PLANNING ───────────────────────────────────────────────
-main.py plan                                 # reads wallet, shows candidates
-main.py plan --min-channel 3000000           # override min channel size
-main.py plan --treasury 0.01                 # override treasury ratio
-main.py status                               # balance bars + fee rates
-main.py history [days]                       # activity from database
+ln-operator plan                                 # reads wallet, shows candidates
+ln-operator plan --min-channel 3000000           # override min channel size
+ln-operator plan --treasury 0.01                 # override treasury ratio
+ln-operator status                               # balance bars + fee rates
+ln-operator history [days]                       # activity from database
 
 # ── REBALANCING ────────────────────────────────────────────
-main.py rebalance_channels                   # auto (20/80 thresholds)
-main.py rebalance_channels --dry-run         # channel status + scenarios
-main.py rebalance_channels --force           # target 50% on all
-main.py rebalance_channels --force 0.4       # target 40% on all
+ln-operator rebalance_channels                   # auto (20/80 thresholds)
+ln-operator rebalance_channels --dry-run         # channel status + scenarios
+ln-operator rebalance_channels --force           # target 50% on all
+ln-operator rebalance_channels --force 0.4       # target 40% on all
 
 # ── INDIVIDUAL STEPS ──────────────────────────────────────
-main.py adjust_fees [--dry-run]
-main.py sync_routing
-main.py healthcheck
-main.py recompute_signals                    # nightly job — refresh slow market signals
+ln-operator adjust_fees [--dry-run]
+ln-operator sync_routing
+ln-operator healthcheck
+ln-operator recompute_signals                    # nightly job — refresh slow market signals
 
 # ── MANUAL FEE PINS (override auto-fees on specific channels) ──
-main.py overwrite_fee <alias-or-chan_id> <ppm> [--note "..."]   # pin
-main.py clear_fee <alias-or-chan_id>                      # remove pin
-# Pins are shown by `main.py status` and in the dashboard's
+ln-operator overwrite_fee <alias-or-chan_id> <ppm> [--note "..."]   # pin
+ln-operator clear_fee <alias-or-chan_id>                      # remove pin
+# Pins are shown by `ln-operator status` and in the dashboard's
 # Recent Fee Updates card (📌 pin badge on the Source column).
 
 # ── OFF-SITE BACKUP (run by systemd, not invoked manually) ──
-main.py backup [--trigger path|timer|manual]   # rsync channel.backup to BACKUP_SSH_HOST
+ln-operator backup [--trigger path|timer|manual]   # rsync channel.backup to BACKUP_SSH_HOST
 ```
 
 ### Crontab
 
 ```
 # Fast loop — fees, rebalances, sync, healthcheck
-0 */2 * * * cd /path/to/ln-operator && venv/bin/python3 main.py pipeline 2>&1
+0 */2 * * * cd /path/to/ln-operator && ./ln-operator pipeline 2>&1
 
 # Nightly — refresh slow market signals (market multiplier per channel)
-15 3 * * * cd /path/to/ln-operator && venv/bin/python3 main.py recompute_signals >> logs/signals.log 2>&1
+15 3 * * * cd /path/to/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1
 ```
 
 ### Dashboard
@@ -261,9 +271,9 @@ honored by both the `pipeline` and `adjust_fees` commands. If a pin is set
 you're selling outbound below what refilling costs.
 
 ```bash
-main.py overwrite_fee LNBiG 3000 --note "experimenting with high outbound"
-main.py status              # 📌 next to the pinned channel + details block
-main.py clear_fee LNBiG     # auto resumes on next pipeline run
+ln-operator overwrite_fee LNBiG 3000 --note "experimenting with high outbound"
+ln-operator status              # 📌 next to the pinned channel + details block
+ln-operator clear_fee LNBiG     # auto resumes on next pipeline run
 ```
 
 The dashboard's *Recent Fee Updates* card tags each row as `auto` or `📌 pin`
@@ -522,7 +532,7 @@ Nightly (cron, separate line):
 Suggested cron line for the nightly job:
 
 ```
-15 3 * * * cd /path/to/ln-operator && venv/bin/python3 main.py recompute_signals >> logs/signals.log 2>&1
+15 3 * * * cd /path/to/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1
 ```
 
 ### The four layers
@@ -603,8 +613,8 @@ real market price within ~9 cron cycles (18h at 2h cron) for a 2300-ppm peer.
 sqlite3 ln_operator.db "SELECT target_chan_id, fee_ppm, ts FROM rebalance_log \
   WHERE success=1 ORDER BY target_chan_id, ts DESC;"
 
-main.py recompute_signals       # manual trigger; prints per-channel signal table
-main.py adjust_fees --dry-run   # see what would change without broadcasting
+ln-operator recompute_signals       # manual trigger; prints per-channel signal table
+ln-operator adjust_fees --dry-run   # see what would change without broadcasting
 ```
 
 ---

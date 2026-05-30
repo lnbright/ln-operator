@@ -4,17 +4,17 @@ LN Operator — Main CLI
 Channel management cron jobs and investment advisor.
 
 Usage:
-    python main.py pipeline [--dry-run]            — run full pipeline (for crontab)
-    python main.py adjust_fees [--dry-run]         — adjust channel fee rates
-    python main.py rebalance_channels [--dry-run]  — rebalance depleted/overfull channels
-    python main.py sync_routing                    — sync routing events from LND
-    python main.py healthcheck                     — check channel health + fire alerts
-    python main.py backup [--trigger ...]          — push channel.backup off-site (called by systemd)
-    python main.py plan [--min-channel SATS] [--treasury RATIO] — channel plan
-    python main.py status                          — quick node overview
-    python main.py history [days]                  — recent activity from database
-    python main.py overwrite_fee <chan> <ppm> [--note]   — pin a channel's outbound fee
-    python main.py clear_fee <chan>                — remove a fee pin (pins are shown by `status`)
+    ln-operator pipeline [--dry-run]            — run full pipeline (for crontab)
+    ln-operator adjust_fees [--dry-run]         — adjust channel fee rates
+    ln-operator rebalance_channels [--dry-run]  — rebalance depleted/overfull channels
+    ln-operator sync_routing                    — sync routing events from LND
+    ln-operator healthcheck                     — check channel health + fire alerts
+    ln-operator backup [--trigger ...]          — push channel.backup off-site (called by systemd)
+    ln-operator plan [--min-channel SATS] [--treasury RATIO] — channel plan
+    ln-operator status                          — quick node overview
+    ln-operator history [days]                  — recent activity from database
+    ln-operator overwrite_fee <chan> <ppm> [--note]   — pin a channel's outbound fee
+    ln-operator clear_fee <chan>                — remove a fee pin (pins are shown by `status`)
 """
 
 import sys
@@ -389,7 +389,7 @@ def _show_rebalance_scenarios(current_force=None):
             delta_str = f"({delta:+.0%})" if abs(delta) > 0.005 else ""
             print(f"    {alias:<25} {current:.0%} → {end:.0%} {delta_str:<8} {direction}")
 
-    print(f"\n  Preview: venv/bin/python3 main.py rebalance_channels --force 0.40 --dry-run")
+    print(f"\n  Preview: ln-operator rebalance_channels --force 0.40 --dry-run")
 
 
 def execute_rebalance_plans(plans, log, executor=None):
@@ -792,7 +792,7 @@ def cmd_status(args):
                 set_at = datetime.fromtimestamp(pin["set_at"]).strftime("%Y-%m-%d %H:%M")
                 note = pin.get("note") or ""
                 print(f"  {alias[:21]:<22} {pin['pinned_ppm']:>5} ppm  {set_at:<18} {note}")
-            print(f"  Clear with: main.py clear_fee <alias-or-chan_id>")
+            print(f"  Clear with: ln-operator clear_fee <alias-or-chan_id>")
 
     except Exception as e:
         print(f"  Error connecting to LND: {e}")
@@ -940,7 +940,7 @@ def cmd_clear_fee(args):
 
     log.info("clear_fee: removed pin on %s", ch["peer_alias"])
     print(f"  ✓ Pin removed from {ch['peer_alias']}.")
-    print(f"  Run 'main.py adjust_fees' to recompute now, or wait for the next pipeline run.")
+    print(f"  Run 'ln-operator adjust_fees' to recompute now, or wait for the next pipeline run.")
 
 
 def _display_plan(plan):
@@ -1001,6 +1001,7 @@ def _balance_bar(ratio, width=20):
 
 def main():
     parser = argparse.ArgumentParser(
+        prog="ln-operator",
         description="LN Operator — Lightning Node Channel Management",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -1010,7 +1011,7 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command",
         metavar="command",
-        help="See 'main.py <command> --help' for details")
+        help="See 'ln-operator <command> --help' for details")
 
     # ── AUTOMATED — full pipeline, designed for crontab ──────────
     p_pipeline = subparsers.add_parser("pipeline",

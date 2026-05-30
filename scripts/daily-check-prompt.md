@@ -32,7 +32,7 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
 - **backup_log** — verify the channel.backup heartbeat is fresh (<3h old)
 
 Also run:
-- `venv/bin/python3 main.py status` — current channel state
+- `ln-operator status` — current channel state
 - `tail -200 logs/*.log` — the tool's own logs (pipeline / signals /
   daily-check). Look for stack traces, repeated errors, anything that says
   ERROR or WARNING you don't recognise.
