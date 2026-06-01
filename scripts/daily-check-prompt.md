@@ -30,6 +30,23 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
 - **channel_signals** — current market_multiplier per channel; flag any
   pinned at MIN/MAX
 - **backup_log** — verify the channel.backup heartbeat is fresh (<3h old)
+- **forward_fail_log** — forwards we DROPPED in the last 24h, captured live by
+  the `htlc_monitor` daemon (LND persists these nowhere else). This is routing
+  demand we failed to serve. Aggregate by `chan_out` (the channel that lacked
+  capacity) and by `chan_in→chan_out` pair: count, total `amount_msat`, and the
+  `failure_detail` mix. The two details that matter:
+    - `INSUFFICIENT_BALANCE` — the outgoing channel was too depleted to forward.
+      This is lost routing revenue AND a hard rebalance signal: cross-reference
+      with `rebalance_log` (did we fail to refill that same channel?) and the
+      depleted-channel list. Quantify it — "Xm sats of forwards dropped on
+      <peer> for empty channel, Y attempts" is exactly the kind of line that
+      should drive Suggestions.
+    - `FEE_INSUFFICIENT` — the sender under-paid our outbound fee. If frequent on
+      a healthy channel, our fee may have just risen above what routes will bear;
+      note it against that channel's recent fee_updates.
+  If the table is empty, first check the daemon is actually up
+  (`systemctl is-active lnd-htlc-monitor` — `pi` can read this) before assuming
+  zero dropped forwards; a stopped daemon means a blind window, not a clean day.
 
 Also run:
 - `ln-operator status` — current channel state

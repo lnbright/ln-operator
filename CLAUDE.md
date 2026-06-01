@@ -68,6 +68,11 @@
 ## Database
 - SQLite at /home/pi/ln-operator/ln_operator.db
 - forwarding_log and rebalance_log store numeric scid as chan_id
+- forward_fail_log: forwards we DROPPED (insufficient liquidity, fee too low, etc.),
+  captured live by the htlc_monitor daemon. LND persists these nowhere — the event
+  stream is live-only with no replay — so any daemon downtime is a data gap, not a
+  clean day. chan_out = the channel that lacked capacity; failure_detail
+  INSUFFICIENT_BALANCE = lost revenue + rebalance signal.
 - rebalance_log has payment_hash and triggered_by columns (migration added)
 - fee_overrides table: chan_id (PK), pinned_ppm, set_at, note — manual fee pins
 
@@ -78,6 +83,10 @@
   Unit files at services/lnd-channel-backup.{path,timer,@.service}.
   Destination configured via BACKUP_* keys in .env. Attempts logged in backup_log table;
   dashboard shows freshness badge.
+- HTLC failure monitor: systemd lnd-htlc-monitor.service (always-on, Restart=always).
+  Subscribes to LND's SubscribeHtlcEvents stream and records dropped forwards into
+  forward_fail_log. Unit file at services/lnd-htlc-monitor.service. Run loop in
+  htlc_monitor.py, entrypoint `ln-operator monitor_htlcs`.
 - Pipeline: cron every 2 hours
 
 ## Crontab

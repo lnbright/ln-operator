@@ -269,6 +269,12 @@ def cmd_plan(args):
 
 
 
+def cmd_monitor_htlcs(args):
+    """Run the always-on HTLC failure monitor (blocks; for systemd)."""
+    import htlc_monitor
+    htlc_monitor.run()
+
+
 def cmd_recompute_signals(args):
     """Refresh slow per-channel signals (market multiplier).
 
@@ -1080,6 +1086,9 @@ def main():
     p_signals = subparsers.add_parser("recompute_signals",
         help="[automated] Refresh slow per-channel signals (market multiplier). Designed for a nightly cron.")
 
+    p_monitor = subparsers.add_parser("monitor_htlcs",
+        help="[automated] Long-running: record dropped forwards from LND's HTLC event stream (systemd)")
+
     args = parser.parse_args()
 
     # Initialise logging
@@ -1114,6 +1123,8 @@ def main():
         cmd_clear_fee(args)
     elif args.command == "recompute_signals":
         cmd_recompute_signals(args)
+    elif args.command == "monitor_htlcs":
+        cmd_monitor_htlcs(args)
     else:
         parser.print_help()
 

@@ -126,6 +126,33 @@ CREATE TABLE IF NOT EXISTS forwarding_log (
     fee_earned_sats  INTEGER NOT NULL
 );
 
+-- ─── Failed forwards (routing demand we could not serve) ───────
+-- Populated by the always-on `htlc_monitor` daemon from LND's
+-- SubscribeHtlcEvents stream. LND persists these NOWHERE — the stream is
+-- live-only with no replay — so this table is the sole record of forwards
+-- we dropped (depleted outbound liquidity, fee too low, expiry, etc.).
+-- Gaps appear for any window the daemon was down. failure_detail is the
+-- useful field: INSUFFICIENT_BALANCE = a channel that was too empty to
+-- forward (lost revenue + a rebalance signal); FEE_INSUFFICIENT = sender
+-- under-paid our fee. chan_out is the channel that lacked the liquidity.
+CREATE TABLE IF NOT EXISTS forward_fail_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    ts_ns            TEXT,                -- LND event timestamp (ns, kept as string)
+    chan_in          TEXT,                -- incoming scid ("0" if not yet known)
+    chan_out         TEXT,                -- outgoing scid we failed to forward through
+    alias_in         TEXT,                -- best-effort alias, resolved at write time
+    alias_out        TEXT,
+    htlc_in          TEXT,
+    htlc_out         TEXT,
+    event_type       TEXT,                -- usually FORWARD
+    amount_msat      INTEGER NOT NULL DEFAULT 0,
+    wire_failure     TEXT,                -- e.g. TEMPORARY_CHANNEL_FAILURE
+    failure_detail   TEXT,                -- e.g. INSUFFICIENT_BALANCE
+    failure_string   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_forward_fail_ts ON forward_fail_log(ts);
+
 -- ─── Sync state (persists last-seen LND index between runs) ─────
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
@@ -303,6 +330,28 @@ def save_forwarding_events(events: list[dict]):
                 ev["chan_in"], ev["chan_out"],
                 ev["amount_in"], ev["amount_out"], ev["fee_earned"]
             ))
+
+
+def save_forward_failure(row: dict):
+    """Record one forward we failed to route (from the htlc_monitor daemon).
+
+    `row` is the dict produced by htlc_monitor.parse_link_failure, plus the
+    resolved alias_in/alias_out the caller fills in. Single insert per failed
+    HTLC — volume is low (only failures), so no batching needed."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO forward_fail_log
+            (ts_ns, chan_in, chan_out, alias_in, alias_out, htlc_in, htlc_out,
+             event_type, amount_msat, wire_failure, failure_detail, failure_string)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            row.get("ts_ns", ""), row.get("chan_in", ""), row.get("chan_out", ""),
+            row.get("alias_in", ""), row.get("alias_out", ""),
+            row.get("htlc_in", ""), row.get("htlc_out", ""),
+            row.get("event_type", ""), int(row.get("amount_msat", 0)),
+            row.get("wire_failure", ""), row.get("failure_detail", ""),
+            row.get("failure_string", ""),
+        ))
 
 
 def save_investment_plan(total_sats, treasury, deployable, plan_dict, agent_summary=""):
