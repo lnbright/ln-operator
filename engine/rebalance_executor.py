@@ -142,6 +142,7 @@ def execute_rebalance(plan, dry_run=False):
                 chunk_amount, attempt["fee_paid"],
                 True, "", chunk_duration,
                 payment_hash=attempt.get("payment_hash") or None,
+                budget_ppm=plan["max_fee_ppm"],
             )
 
             # Try another chunk at same size if there's remaining
@@ -183,6 +184,7 @@ def execute_rebalance(plan, dry_run=False):
             plan["source_alias"], plan["target_alias"],
             plan["amount_sats"], 0,
             False, result["failure_reason"], duration,
+            budget_ppm=plan["max_fee_ppm"],
         )
 
     return result

@@ -28,13 +28,18 @@ from config import DB_PATH
 
 
 def _migrate_rebalance_log():
-    """Add payment_hash and triggered_by columns if missing (migration)."""
+    """Add payment_hash, triggered_by, budget_ppm columns if missing (migration)."""
     with get_conn() as conn:
         cols = [row["name"] for row in conn.execute("PRAGMA table_info(rebalance_log)")]
         if "payment_hash" not in cols:
             conn.execute("ALTER TABLE rebalance_log ADD COLUMN payment_hash TEXT")
         if "triggered_by" not in cols:
             conn.execute("ALTER TABLE rebalance_log ADD COLUMN triggered_by TEXT DEFAULT 'auto'")
+        # budget_ppm: the max-fee ppm cap we attempted with. On a FAILED row this
+        # is the only record of how hard we tried (fee_ppm is 0 — nothing paid);
+        # on a success it's the cap vs the actual fee_ppm. NULL for synced manual rows.
+        if "budget_ppm" not in cols:
+            conn.execute("ALTER TABLE rebalance_log ADD COLUMN budget_ppm REAL")
 
 
 def init_db():
@@ -302,19 +307,23 @@ def save_fee_update(chan_id, peer_alias, old_ppm, new_ppm, old_base, new_base,
 
 def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
                            amount, fee_paid, success, failure_reason="",
-                           duration=0.0, payment_hash=None):
-    """Log a rebalance attempt."""
+                           duration=0.0, payment_hash=None, budget_ppm=None):
+    """Log a rebalance attempt.
+
+    budget_ppm is the max-fee ppm cap the attempt was made under (from the
+    planner). Stored on both successes and failures so the dashboard can show
+    what we were willing to pay even when the payment failed and fee_ppm is 0."""
     fee_ppm = (fee_paid / amount * 1_000_000) if amount > 0 and fee_paid else 0
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO rebalance_log
             (source_chan_id, target_chan_id, source_alias, target_alias,
              amount_sats, fee_paid_sats, fee_ppm, success, failure_reason,
-             duration_seconds, payment_hash, triggered_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto')
+             duration_seconds, payment_hash, triggered_by, budget_ppm)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?)
         """, (source_chan, target_chan, source_alias, target_alias,
               amount, fee_paid, fee_ppm, int(success), failure_reason, duration,
-              payment_hash))
+              payment_hash, budget_ppm))
 
 
 def save_forwarding_events(events: list[dict]):

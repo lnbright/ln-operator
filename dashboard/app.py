@@ -237,7 +237,7 @@ def get_dashboard_data():
 
     data["rebalances"] = db_all("""
         SELECT ts, source_alias, target_alias, amount_sats,
-               fee_paid_sats, fee_ppm, success, failure_reason,
+               fee_paid_sats, fee_ppm, success, failure_reason, budget_ppm,
                COALESCE(triggered_by, 'auto') as triggered_by
         FROM rebalance_log ORDER BY ts DESC LIMIT 10
     """)
@@ -1104,7 +1104,9 @@ TEMPLATE = """
             <td>{{ r.source_alias[:10] }} → {{ r.target_alias[:10] }}</td>
             <td>{{ "{:,}".format(r.amount_sats) }}</td>
             <td class="{% if r.success %}amount-negative{% else %}amount-muted{% endif %}">
-              {% if r.success %}-{{ "{:,}".format(r.fee_paid_sats) }} <span style="color:var(--muted)">({{ r.fee_ppm | int }}ppm)</span>{% else %}—{% endif %}
+              {% if r.success %}-{{ "{:,}".format(r.fee_paid_sats) }} <span style="color:var(--muted)">({{ r.fee_ppm | int }}ppm)</span>
+              {% elif r.budget_ppm %}<span style="color:var(--muted)" title="max-fee budget we tried with — nothing was paid (failed)">≤{{ r.budget_ppm | int }}ppm</span>
+              {% else %}—{% endif %}
             </td>
             <td>{% if r.success %}<span class="badge badge-green">✓</span>{% else %}<span class="badge badge-red" title="{{ r.failure_reason }}">✗</span>{% endif %}</td>
             <td>{% if r.triggered_by == 'manual' %}<span class="badge badge-blue">manual</span>{% else %}<span class="badge badge-muted">auto</span>{% endif %}</td>
