@@ -25,7 +25,7 @@ from datetime import datetime
 
 import db
 import engine
-from config import REBALANCE_LOW_THRESHOLD
+from config import REBALANCE_LOW_THRESHOLD, REBALANCE_HIGH_THRESHOLD
 from logging_config import setup_logging, get_logger
 import advisor
 import telegram_bot
@@ -538,7 +538,7 @@ def cmd_rebalance_channels(args):
                 status = "⚫ offline"
             elif ratio < REBALANCE_LOW_THRESHOLD:
                 status = f"🔴 depleted ({ratio:.0%} local) — rebalance target"
-            elif ratio > engine.REBALANCE_HIGH_THRESHOLD:
+            elif ratio > REBALANCE_HIGH_THRESHOLD:
                 status = f"🔵 overfull ({ratio:.0%} local) — rebalance source"
             else:
                 status = f"🟢 healthy ({ratio:.0%} local) — not rebalanced"
