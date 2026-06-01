@@ -20,6 +20,7 @@ Or install as systemd service — see services/lnd-dashboard.service.
 
 import os
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import requests
@@ -254,6 +255,7 @@ def get_dashboard_data():
     """)
 
     data["backup"] = get_backup_status(now)
+    data["fwd_fail"] = get_forward_failures(now, channels_enriched)
 
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return data
@@ -370,6 +372,89 @@ def get_backup_status(now):
         "status":       status,
         "last_attempt": last_attempt,
         "last_success": last_success,
+    }
+
+
+def service_is_active(unit):
+    """Return 'active' / 'inactive' / 'unknown' for a systemd unit.
+
+    `pi` can query unit state without sudo. Any error (systemctl missing,
+    permission) degrades to 'unknown' rather than breaking the page."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        return out if out in ("active", "inactive", "failed", "activating") else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def get_forward_failures(now, channels):
+    """Forwards we DROPPED in the last 24h (from forward_fail_log), framed as
+    potentially-lost revenue rather than a bare count.
+
+    Splits by cause because the remedy differs:
+      - liquidity (INSUFFICIENT_BALANCE): channel too empty to forward —
+        recoverable by rebalancing. We estimate the lost fee as
+        dropped_sats × our outbound ppm on the channel that ran dry.
+      - fee (FEE_INSUFFICIENT): sender under-paid our fee — not a liquidity
+        problem, shown separately so it isn't mistaken for one.
+      - other: expiry / unknown wire failures, counted but not actioned.
+
+    Also reports the htlc_monitor daemon's liveness: an empty table with a dead
+    daemon is a blind spot, not a clean day."""
+    day_ago = now - 86400
+    rows = db_all("""
+        SELECT chan_out, alias_out, failure_detail,
+               COUNT(*) AS n, COALESCE(SUM(amount_msat), 0) AS msat
+        FROM forward_fail_log
+        WHERE ts > ?
+        GROUP BY chan_out, failure_detail
+    """, (day_ago,))
+
+    # our outbound fee ppm per channel, to value the dropped liquidity flow
+    ppm_by_chan = {str(ch.get("chan_id", "")): ch.get("local_fee_ppm") or 0
+                   for ch in channels}
+
+    total_n = liq_n = fee_n = other_n = 0
+    total_sats = liq_sats = 0
+    est_lost_fee = 0.0
+    per_chan = {}  # chan_out -> {alias, sats, n} for liquidity failures
+
+    for r in rows:
+        n = r["n"]
+        sats = (r["msat"] or 0) // 1000
+        total_n += n
+        total_sats += sats
+        detail = r["failure_detail"] or ""
+        if detail == "INSUFFICIENT_BALANCE":
+            liq_n += n
+            liq_sats += sats
+            est_lost_fee += sats * (ppm_by_chan.get(str(r["chan_out"]), 0) / 1_000_000)
+            agg = per_chan.setdefault(r["chan_out"],
+                                      {"alias": r["alias_out"] or r["chan_out"], "sats": 0, "n": 0})
+            agg["sats"] += sats
+            agg["n"] += n
+        elif detail == "FEE_INSUFFICIENT":
+            fee_n += n
+        else:
+            other_n += n
+
+    top = max(per_chan.values(), key=lambda x: x["sats"], default=None)
+    last_event = db_one("SELECT ts FROM forward_fail_log ORDER BY ts DESC LIMIT 1")
+
+    return {
+        "service":        service_is_active("lnd-htlc-monitor"),
+        "total_n":        total_n,
+        "total_sats":     total_sats,
+        "liq_n":          liq_n,
+        "liq_sats":       liq_sats,
+        "fee_n":          fee_n,
+        "other_n":        other_n,
+        "est_lost_fee":   int(round(est_lost_fee)),
+        "top":            top,
+        "last_event_ts":  last_event["ts"] if last_event else None,
     }
 
 
@@ -833,6 +918,75 @@ TEMPLATE = """
       <div class="stat-row">
         <span class="stat-label">Last error ({{ bk.last_attempt.ts | format_age }})</span>
         <span class="stat-value red" style="max-width:75%;">{{ bk.last_attempt.error or '—' }}</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Forwarding Failures — Lost-Revenue Watch -->
+  {% if data.fwd_fail %}
+  {% set ff = data.fwd_fail %}
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">Forwarding Failures — Lost-Revenue Watch (24h)</div>
+      {#
+        Service badge tracks the htlc_monitor daemon. These events are live-only
+        (LND persists them nowhere), so a dead daemon = a blind window, NOT a
+        clean day — that's why an inactive service is flagged red even at 0.
+      #}
+      <div class="stat-row">
+        <span class="stat-label">Monitor service</span>
+        <span>
+          {% if ff.service == 'active' %}<span class="badge badge-green" title="lnd-htlc-monitor running — stream subscribed">alive &amp; polling</span>
+          {% elif ff.service == 'unknown' %}<span class="badge badge-muted" title="could not query systemctl">unknown</span>
+          {% else %}<span class="badge badge-red" title="lnd-htlc-monitor not running — failures going uncaptured">{{ ff.service }} — not capturing</span>{% endif %}
+        </span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Dropped forwards</span>
+        <span class="stat-value {% if ff.total_n > 0 %}yellow{% endif %}">
+          {{ ff.total_n }} {% if ff.total_n %}<span style="color:var(--muted);font-size:11px;">({{ "{:,}".format(ff.total_sats) }} sats of flow)</span>{% endif %}
+        </span>
+      </div>
+      {% if ff.liq_n > 0 %}
+      <div class="stat-row">
+        <span class="stat-label">↳ Empty-channel (recoverable)</span>
+        <span class="stat-value red">{{ ff.liq_n }} drops · {{ "{:,}".format(ff.liq_sats) }} sats</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Est. lost routing fees</span>
+        <span class="stat-value red" style="font-weight:700;" title="dropped sats × our outbound ppm on the starved channel">~{{ "{:,}".format(ff.est_lost_fee) }} sats</span>
+      </div>
+      {% if ff.top %}
+      <div class="stat-row">
+        <span class="stat-label">Worst channel</span>
+        <span class="stat-value">{{ ff.top.alias }} <span style="color:var(--muted);font-size:11px;">({{ "{:,}".format(ff.top.sats) }} sats over {{ ff.top.n }} drops — refill it)</span></span>
+      </div>
+      {% endif %}
+      {% endif %}
+      {% if ff.fee_n > 0 %}
+      <div class="stat-row">
+        <span class="stat-label">↳ Fee-too-low (our fee &gt; route)</span>
+        <span class="stat-value">{{ ff.fee_n }} <span style="color:var(--muted);font-size:11px;">— sender under-paid; not a liquidity issue</span></span>
+      </div>
+      {% endif %}
+      {% if ff.other_n > 0 %}
+      <div class="stat-row">
+        <span class="stat-label">↳ Other (expiry / misc)</span>
+        <span class="stat-value" style="color:var(--muted)">{{ ff.other_n }}</span>
+      </div>
+      {% endif %}
+      {% if ff.total_n == 0 %}
+      <div class="stat-row">
+        <span class="stat-label">{% if ff.service == 'active' %}Clean — no forwards dropped in 24h{% else %}No data{% endif %}</span>
+        <span class="stat-value {% if ff.service == 'active' %}green{% else %}red{% endif %}">{% if ff.service == 'active' %}✓{% else %}service down{% endif %}</span>
+      </div>
+      {% endif %}
+      {% if ff.last_event_ts %}
+      <div class="stat-row">
+        <span class="stat-label">Last drop captured</span>
+        <span class="stat-value" style="color:var(--muted)">{{ ff.last_event_ts | format_age }}</span>
       </div>
       {% endif %}
     </div>
