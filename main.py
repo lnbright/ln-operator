@@ -25,7 +25,7 @@ from datetime import datetime
 
 import db
 import engine
-from config import REBALANCE_LOW_THRESHOLD, REBALANCE_HIGH_THRESHOLD
+from config import REBALANCE_LOW_THRESHOLD, REBALANCE_HIGH_THRESHOLD, REBALANCE_MAX_AMOUNT_RATIO
 from logging_config import setup_logging, get_logger
 import advisor
 import telegram_bot
@@ -378,7 +378,7 @@ def _show_rebalance_scenarios(current_force=None):
 
             if current > target:
                 give = min(int(capacity * (current - target)),
-                           int(capacity * engine.REBALANCE_MAX_AMOUNT_RATIO))
+                           int(capacity * REBALANCE_MAX_AMOUNT_RATIO))
                 end = current - (give / capacity)
                 direction = "↓ gives sats"
             elif current < target:
