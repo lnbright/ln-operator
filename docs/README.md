@@ -1,0 +1,21 @@
+# LN Operator — Documentation
+
+Deep-dive reference for the bits that don't belong in the top-level README.
+Start at the [project README](../README.md) for install, usage, and the
+dashboard tour.
+
+## Fees
+- [Fee Formula](fee-formula.md) — the layered outbound-fee calculation + manual pins
+- [Fee Engine Internals](fee-engine-internals.md) — cadence, the four layers, hysteresis, corner cases
+
+## Liquidity
+- [Rebalance Budget](rebalance-budget.md) — single-signal budget, failure escalation, chunking, fallback pairs
+- [Plan Command](plan-command.md) — tier-segmented peer ranking (centrality → diversity)
+
+## Reference
+- [Configuration](configuration.md) — every `config.py` knob and its default
+- [Data Flow](data-flow.md) — how LND data lands in SQLite and feeds each consumer
+- [Alerts](alerts.md) — alert types and triggers
+- [Logging](logging.md) — log location and rotation
+- [Channel Backup](channel-backup.md) — off-site `channel.backup` push
+- [Known Limitations](known-limitations.md)
