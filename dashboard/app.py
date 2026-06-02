@@ -26,7 +26,7 @@ from pathlib import Path
 import requests
 import urllib3
 import psutil
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request
 from datetime import datetime
 
 try:
@@ -256,6 +256,8 @@ def get_dashboard_data():
 
     data["backup"] = get_backup_status(now)
     data["fwd_fail"] = get_forward_failures(now, channels_enriched)
+    data["sat_flow"] = get_sat_flow(now, channels_enriched,
+                                    request.args.get("flow_window", "30"))
 
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return data
@@ -458,6 +460,94 @@ def get_forward_failures(now, channels):
     }
 
 
+# Selectable windows for the sat-flow card. key -> (label, days; None = all time)
+SAT_FLOW_WINDOWS = {"30": ("30d", 30), "7": ("7d", 7), "all": ("all time", None)}
+
+
+def get_sat_flow(now, channels, window_key="30"):
+    """Routing-flow map: where sats come IN and where they go OUT, over a
+    selectable window (30d / 7d / all time).
+
+    Reads forwarding_log (every successfully-routed HTLC carries chan_in +
+    chan_out). Returns three views of the same flow:
+      - pairs:   in→out peer pairs ranked by sats routed (the actual routes)
+      - sources: total sats received per inbound peer (where liquidity enters)
+      - sinks:   total sats sent per outbound peer (where liquidity leaves)
+    chan_in/chan_out are scids; we map them to peer aliases via the live channel
+    list. Scids with no current channel (closed since) fall back to the raw id —
+    most visible under 'all time'."""
+    if window_key not in SAT_FLOW_WINDOWS:
+        window_key = "30"
+    label, days = SAT_FLOW_WINDOWS[window_key]
+
+    if days is None:
+        rows = db_all("""
+            SELECT chan_in, chan_out,
+                   COUNT(*)             AS n,
+                   SUM(amount_out_sats) AS sats,
+                   SUM(fee_earned_sats) AS fee
+            FROM forwarding_log
+            GROUP BY chan_in, chan_out
+        """)
+    else:
+        rows = db_all("""
+            SELECT chan_in, chan_out,
+                   COUNT(*)             AS n,
+                   SUM(amount_out_sats) AS sats,
+                   SUM(fee_earned_sats) AS fee
+            FROM forwarding_log
+            WHERE ts > ?
+            GROUP BY chan_in, chan_out
+        """, (now - days * 86400,))
+
+    alias_by_chan = {str(ch.get("chan_id", "")): (ch.get("peer_alias")
+                     or (ch.get("remote_pubkey", "") or "")[:10] or str(ch.get("chan_id", "")))
+                     for ch in channels}
+
+    def alias(scid):
+        return alias_by_chan.get(str(scid), str(scid))
+
+    pairs = []
+    sources = {}  # chan_in  -> {alias, sats, n}
+    sinks   = {}  # chan_out -> {alias, sats, n}
+    total_sats = total_n = total_fee = 0
+
+    for r in rows:
+        sats = int(r["sats"] or 0)
+        n    = int(r["n"] or 0)
+        fee  = int(r["fee"] or 0)
+        total_sats += sats
+        total_n    += n
+        total_fee  += fee
+        pairs.append({
+            "in_alias":  alias(r["chan_in"]),
+            "out_alias": alias(r["chan_out"]),
+            "sats": sats, "n": n, "fee": fee,
+        })
+        si = sources.setdefault(r["chan_in"],  {"alias": alias(r["chan_in"]),  "sats": 0, "n": 0})
+        si["sats"] += sats; si["n"] += n
+        so = sinks.setdefault(r["chan_out"], {"alias": alias(r["chan_out"]), "sats": 0, "n": 0})
+        so["sats"] += sats; so["n"] += n
+
+    pairs.sort(key=lambda x: x["sats"], reverse=True)
+    sources_list = sorted(sources.values(), key=lambda x: x["sats"], reverse=True)
+    sinks_list   = sorted(sinks.values(),   key=lambda x: x["sats"], reverse=True)
+
+    return {
+        "window_key":  window_key,
+        "window_label": label,
+        "total_sats":  total_sats,
+        "total_n":     total_n,
+        "total_fee":   total_fee,
+        "pairs":       pairs[:15],
+        "max_pair":    pairs[0]["sats"] if pairs else 0,
+        "sources":     sources_list[:8],
+        "sinks":       sinks_list[:8],
+        "max_source":  sources_list[0]["sats"] if sources_list else 0,
+        "max_sink":    sinks_list[0]["sats"] if sinks_list else 0,
+    }
+
+
 # ─── Template ────────────────────────────────────────────────────
 
 TEMPLATE = """
@@ -555,6 +645,11 @@ TEMPLATE = """
   .chart-bar { width: 100%; background: var(--accent); opacity: 0.7; min-height: 2px; }
   .chart-bar:hover { opacity: 1; }
   .chart-lbl { font-size: 8px; color: var(--muted); margin-top: 4px; white-space: nowrap; }
+
+  /* Sat-flow card */
+  .flow-select { margin-left: auto; background: var(--surface); color: var(--text); border: 1px solid var(--border); font-family: 'Space Mono', monospace; font-size: 10px; padding: 3px 6px; cursor: pointer; text-transform: none; letter-spacing: 0; }
+  .flow-row { margin-bottom: 9px; }
+  .flow-row-top { display: flex; justify-content: space-between; font-size: 11px; gap: 8px; margin-bottom: 3px; }
 
   .empty-state { padding: 24px; text-align: center; color: var(--muted); font-size: 12px; }
   .error-card { background: rgba(255,77,109,0.08); border: 1px solid rgba(255,77,109,0.3); padding: 20px; margin-bottom: 16px; color: var(--red); font-size: 13px; }
@@ -1060,6 +1155,71 @@ TEMPLATE = """
       {% endif %}
     </div>
   </div>
+
+  <!-- Sat Flow — routing map (in→out) -->
+  {% if data.sat_flow %}
+  {% set sf = data.sat_flow %}
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">
+        Sat Flow — Where Sats Route ({{ sf.window_label }})
+        <select class="flow-select" onchange="location=this.value">
+          <option value="?flow_window=30"  {% if sf.window_key=='30'  %}selected{% endif %}>Last 30d</option>
+          <option value="?flow_window=7"   {% if sf.window_key=='7'   %}selected{% endif %}>Last 7d</option>
+          <option value="?flow_window=all" {% if sf.window_key=='all' %}selected{% endif %}>All time</option>
+        </select>
+      </div>
+      {% if sf.pairs %}
+      <div style="font-size:11px;color:var(--muted);margin-bottom:14px;">
+        {{ "{:,}".format(sf.total_sats) }} sats routed across
+        {{ "{:,}".format(sf.total_n) }} forwards ·
+        <span style="color:var(--green)">{{ "{:,}".format(sf.total_fee) }} sats earned</span>
+      </div>
+
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>In (source)</th><th>Out (destination)</th><th style="width:30%">Sats routed</th><th>Fwds</th><th>Fee</th></tr></thead>
+        <tbody>
+          {% for p in sf.pairs %}
+          <tr>
+            <td class="truncate">{{ p.in_alias }}</td>
+            <td class="truncate" style="color:var(--accent)">→ {{ p.out_alias }}</td>
+            <td>
+              {{ "{:,}".format(p.sats) }}
+              <div class="balance-bar"><div class="balance-bar-fill bar-healthy" style="width:{{ ((p.sats / sf.max_pair) * 100) | round | int if sf.max_pair else 0 }}%"></div></div>
+            </td>
+            <td class="amount-muted">{{ p.n }}</td>
+            <td class="amount-positive">{{ "{:,}".format(p.fee) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table></div>
+
+      <div class="grid-2" style="margin-top:18px;margin-bottom:0;">
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;">↓ Inbound — where sats come from</div>
+          {% for s in sf.sources %}
+          <div class="flow-row">
+            <div class="flow-row-top"><span class="truncate">{{ s.alias }}</span><span class="amount-muted">{{ "{:,}".format(s.sats) }}</span></div>
+            <div class="balance-bar"><div class="balance-bar-fill bar-saturated" style="width:{{ ((s.sats / sf.max_source) * 100) | round | int if sf.max_source else 0 }}%"></div></div>
+          </div>
+          {% endfor %}
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;">↑ Outbound — where sats go to</div>
+          {% for s in sf.sinks %}
+          <div class="flow-row">
+            <div class="flow-row-top"><span class="truncate">{{ s.alias }}</span><span class="amount-muted">{{ "{:,}".format(s.sats) }}</span></div>
+            <div class="balance-bar"><div class="balance-bar-fill" style="width:{{ ((s.sats / sf.max_sink) * 100) | round | int if sf.max_sink else 0 }}%;background:var(--accent)"></div></div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% else %}
+      <div class="empty-state">No routing flows in this window yet</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
 
   <!-- ── Operator sections ─────────────────────────────────────── -->
 

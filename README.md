@@ -8,6 +8,40 @@ Built for home node operators running LND on a Raspberry Pi or similar hardware.
 
 ---
 
+## Dashboard
+
+A single-page Flask app (port 4000, no auth — Tailscale/LAN only) giving
+real-time visibility into node health, liquidity, routing, and profit/loss.
+
+**Sat Flow — where routed sats come from and go to** (in→out pairs by volume,
+plus inbound/outbound rankings; 30d / 7d / all-time selector):
+
+![Sat Flow card](docs/screenshots/03-sat-flow.png)
+
+**At-a-glance node health** — sync, channels, Bitcoin backend, watchtowers:
+
+![Node overview](docs/screenshots/01-overview.png)
+
+**Total funds controlled + per-channel health** — balance bars, your/their
+fees, 30d revenue, rebalance cost, and net P/L per channel:
+
+![Balance and channel details](docs/screenshots/02-balance-channels.png)
+
+**Routing events + daily fee revenue:**
+
+![Routing events and daily revenue](docs/screenshots/04-routing-revenue.png)
+
+**Rebalance history (auto + manual) + recent fee updates:**
+
+![Rebalance history and fee updates](docs/screenshots/05-rebalance-fees.png)
+
+**Forwarding-failure lost-revenue watch** — dropped forwards split by cause,
+with estimated lost fees on empty channels (a rebalance signal):
+
+![Forwarding failures](docs/screenshots/06-forwarding-failures.png)
+
+---
+
 ## What It Does
 
 ### Pipeline — Automated Channel Management
@@ -48,12 +82,23 @@ No external API dependencies — everything from your own LND node.
 
 Single-page Flask app showing live LND data and historical SQLite data:
 node status, watchtower health, channel health with balance bars and
-profit/loss, daily revenue chart, rebalance history (auto + manual),
-fee updates, alerts, payments, and invoices.
+profit/loss, daily revenue chart, sat-flow routing map, rebalance history
+(auto + manual), fee updates, forwarding-failure lost-revenue watch,
+alerts, payments, and invoices.
 
 The channel table shows local and remote outbound fees side-by-side,
 pulled per-channel from `/v1/graph/edge/{chan_id}` so you can see at a
 glance whether a peer is undercharging or overcharging relative to you.
+
+The **Sat Flow** card answers "where do routed sats come from and where do
+they go?" It reads `forwarding_log` (every routed HTLC records both the
+inbound and outbound channel) and shows three views of the same data over a
+selectable window (30d / 7d / all time): the top in→out peer **pairs**
+ranked by volume routed (with a bar, forward count, and fee earned), plus
+ranked **inbound** (where liquidity enters) and **outbound** (where it
+leaves) bar-lists. Channel ids are resolved to peer aliases from the live
+channel list; channels closed since a flow occurred show as raw scids, most
+visible under "all time".
 
 The watchtower card reports tower count, deactivated count, lifetime
 backups delivered, pending/failed counters, and an overall health

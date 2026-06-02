@@ -20,3 +20,12 @@ __pycache__/
 # Logs
 cron.log
 *.log
+
+# Screenshots / images — kept local, not committed
+*.png
+*.jpg
+*.jpeg
+
+# …except the curated dashboard screenshots used in the README
+!docs/screenshots/
+!docs/screenshots/*.png
