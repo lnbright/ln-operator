@@ -257,7 +257,9 @@ def get_dashboard_data():
     data["backup"] = get_backup_status(now)
     data["fwd_fail"] = get_forward_failures(now, channels_enriched)
     data["sat_flow"] = get_sat_flow(now, channels_enriched,
-                                    request.args.get("flow_window", "30"))
+                                    request.args.get("flow_window", "30"),
+                                    request.args.get("flow_in", ""),
+                                    request.args.get("flow_out", ""))
 
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return data
@@ -464,9 +466,10 @@ def get_forward_failures(now, channels):
 SAT_FLOW_WINDOWS = {"30": ("30d", 30), "7": ("7d", 7), "all": ("all time", None)}
 
 
-def get_sat_flow(now, channels, window_key="30"):
+def get_sat_flow(now, channels, window_key="30", flow_in="", flow_out=""):
     """Routing-flow map: where sats come IN and where they go OUT, over a
-    selectable window (30d / 7d / all time).
+    selectable window (30d / 7d / all time), optionally filtered to a single
+    inbound and/or outbound channel.
 
     Reads forwarding_log (every successfully-routed HTLC carries chan_in +
     chan_out). Returns three views of the same flow:
@@ -475,7 +478,12 @@ def get_sat_flow(now, channels, window_key="30"):
       - sinks:   total sats sent per outbound peer (where liquidity leaves)
     chan_in/chan_out are scids; we map them to peer aliases via the live channel
     list. Scids with no current channel (closed since) fall back to the raw id —
-    most visible under 'all time'."""
+    most visible under 'all time'.
+
+    flow_in / flow_out are scids: when set, rows are filtered to that channel so
+    you can drill into a single peer ("where do sats from Boltz go?"). The
+    dropdown option lists are built from the *unfiltered* window so the full
+    menu stays available regardless of the current selection."""
     if window_key not in SAT_FLOW_WINDOWS:
         window_key = "30"
     label, days = SAT_FLOW_WINDOWS[window_key]
@@ -507,12 +515,29 @@ def get_sat_flow(now, channels, window_key="30"):
     def alias(scid):
         return alias_by_chan.get(str(scid), str(scid))
 
+    # Dropdown menus — every channel that appears on each side in the window,
+    # built before filtering so changing one filter never empties the other menu.
+    in_opts, out_opts = {}, {}
+    for r in rows:
+        in_opts[str(r["chan_in"])]   = alias(r["chan_in"])
+        out_opts[str(r["chan_out"])] = alias(r["chan_out"])
+    in_options  = sorted(in_opts.items(),  key=lambda kv: kv[1].lower())
+    out_options = sorted(out_opts.items(), key=lambda kv: kv[1].lower())
+
+    # Only honour a filter if it names a channel actually present in the window.
+    flow_in  = flow_in  if flow_in  in in_opts  else ""
+    flow_out = flow_out if flow_out in out_opts else ""
+
     pairs = []
     sources = {}  # chan_in  -> {alias, sats, n}
     sinks   = {}  # chan_out -> {alias, sats, n}
     total_sats = total_n = total_fee = 0
 
     for r in rows:
+        if flow_in and str(r["chan_in"]) != flow_in:
+            continue
+        if flow_out and str(r["chan_out"]) != flow_out:
+            continue
         sats = int(r["sats"] or 0)
         n    = int(r["n"] or 0)
         fee  = int(r["fee"] or 0)
@@ -536,6 +561,11 @@ def get_sat_flow(now, channels, window_key="30"):
     return {
         "window_key":  window_key,
         "window_label": label,
+        "flow_in":     flow_in,
+        "flow_out":    flow_out,
+        "in_options":  in_options,
+        "out_options": out_options,
+        "filtered":    bool(flow_in or flow_out),
         "total_sats":  total_sats,
         "total_n":     total_n,
         "total_fee":   total_fee,
@@ -648,6 +678,11 @@ TEMPLATE = """
 
   /* Sat-flow card */
   .flow-select { margin-left: auto; background: var(--surface); color: var(--text); border: 1px solid var(--border); font-family: 'Space Mono', monospace; font-size: 10px; padding: 3px 6px; cursor: pointer; text-transform: none; letter-spacing: 0; }
+  .flow-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 14px; }
+  .flow-filters label { font-size: 10px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; display: flex; align-items: center; }
+  .flow-filters .flow-select { margin-left: 4px; }
+  .flow-clear { font-size: 10px; color: var(--red); text-decoration: none; border: 1px solid rgba(255,77,109,0.3); padding: 3px 8px; }
+  .flow-clear:hover { background: rgba(255,77,109,0.1); }
   .flow-row { margin-bottom: 9px; }
   .flow-row-top { display: flex; justify-content: space-between; font-size: 11px; gap: 8px; margin-bottom: 3px; }
 
@@ -1164,11 +1199,32 @@ TEMPLATE = """
       <div class="card-title">
         Sat Flow — Where Sats Route ({{ sf.window_label }})
         <select class="flow-select" onchange="location=this.value">
-          <option value="?flow_window=30"  {% if sf.window_key=='30'  %}selected{% endif %}>Last 30d</option>
-          <option value="?flow_window=7"   {% if sf.window_key=='7'   %}selected{% endif %}>Last 7d</option>
-          <option value="?flow_window=all" {% if sf.window_key=='all' %}selected{% endif %}>All time</option>
+          <option value="?flow_window=30&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}"  {% if sf.window_key=='30'  %}selected{% endif %}>Last 30d</option>
+          <option value="?flow_window=7&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}"   {% if sf.window_key=='7'   %}selected{% endif %}>Last 7d</option>
+          <option value="?flow_window=all&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}" {% if sf.window_key=='all' %}selected{% endif %}>All time</option>
         </select>
       </div>
+
+      <div class="flow-filters">
+        <label>In&nbsp;
+          <select class="flow-select" onchange="location=this.value">
+            <option value="?flow_window={{ sf.window_key }}&flow_out={{ sf.flow_out }}" {% if not sf.flow_in %}selected{% endif %}>All sources</option>
+            {% for cid, al in sf.in_options %}
+            <option value="?flow_window={{ sf.window_key }}&flow_out={{ sf.flow_out }}&flow_in={{ cid }}" {% if sf.flow_in==cid %}selected{% endif %}>{{ al }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Out&nbsp;
+          <select class="flow-select" onchange="location=this.value">
+            <option value="?flow_window={{ sf.window_key }}&flow_in={{ sf.flow_in }}" {% if not sf.flow_out %}selected{% endif %}>All destinations</option>
+            {% for cid, al in sf.out_options %}
+            <option value="?flow_window={{ sf.window_key }}&flow_in={{ sf.flow_in }}&flow_out={{ cid }}" {% if sf.flow_out==cid %}selected{% endif %}>{{ al }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% if sf.filtered %}<a class="flow-clear" href="?flow_window={{ sf.window_key }}">clear ✕</a>{% endif %}
+      </div>
+
       {% if sf.pairs %}
       <div style="font-size:11px;color:var(--muted);margin-bottom:14px;">
         {{ "{:,}".format(sf.total_sats) }} sats routed across
@@ -1215,7 +1271,7 @@ TEMPLATE = """
         </div>
       </div>
       {% else %}
-      <div class="empty-state">No routing flows in this window yet</div>
+      <div class="empty-state">{% if sf.filtered %}No flows match this filter in the window — try “clear ✕”.{% else %}No routing flows in this window yet{% endif %}</div>
       {% endif %}
     </div>
   </div>

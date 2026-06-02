@@ -96,9 +96,11 @@ inbound and outbound channel) and shows three views of the same data over a
 selectable window (30d / 7d / all time): the top in→out peer **pairs**
 ranked by volume routed (with a bar, forward count, and fee earned), plus
 ranked **inbound** (where liquidity enters) and **outbound** (where it
-leaves) bar-lists. Channel ids are resolved to peer aliases from the live
-channel list; channels closed since a flow occurred show as raw scids, most
-visible under "all time".
+leaves) bar-lists. **In** and **Out** dropdowns filter every view to a single
+channel by peer alias, so you can drill into one peer ("where do sats coming
+in from Boltz go?" or "where did the sats leaving via LNBiG come from?").
+Channel ids are resolved to peer aliases from the live channel list; channels
+closed since a flow occurred show as raw scids, most visible under "all time".
 
 The watchtower card reports tower count, deactivated count, lifetime
 backups delivered, pending/failed counters, and an overall health
