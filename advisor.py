@@ -23,9 +23,8 @@ The build_investment_plan() function is kept for legacy/DB logging purposes
 but the main CLI entry point is now cmd_plan() in main.py which calls
 these functions directly for a cleaner flow.
 
-NOTE: The Claude API agent layer (agent.py) has been removed from the plan
-workflow. Peer research is now done by the user using the top 10 candidates
-output from the local graph.
+NOTE: There is no Claude API agent layer. Peer research is done by the user
+using the top 10 candidates output from the local graph.
 """
 
 import time
@@ -859,7 +858,7 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
         # all traffic flows through the same corridors) and not all mid-tier
         # (less initial traffic). Start with hubs for backbone, then diversify.
         if hub_count == 0:
-            # No hubs yet — shortlist top 10 hubs for agent to evaluate
+            # No hubs yet — shortlist top 10 hubs for the user to evaluate
             pool = hubs[:10] if hubs else candidates[:10]
             strategy = "no hub connections yet — shortlisting top 10 hubs"
             log.info("allocation strategy: %s", strategy)
@@ -868,7 +867,7 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
                 f"Once you have 1-2 hubs, future opens will target mid-tier nodes."
             )
         elif hub_count >= 2:
-            # Well connected to hubs — shortlist top 10 mid-tier for agent
+            # Well connected to hubs — shortlist top 10 mid-tier for the user
             pool = mid_tier[:10] if mid_tier else candidates[:10]
             strategy = f"already have {hub_count} hub connections — shortlisting top 10 mid-tier nodes"
             log.info("allocation strategy: %s", strategy)
@@ -884,10 +883,9 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
             strategy = f"1 hub already — shortlisting {len(hub_picks)} hub(s) + {len(mid_picks)} mid-tier"
             log.info("allocation strategy: %s", strategy)
 
-        # ── Step 4: Shortlist top 10 from pool for agent evaluation ─
-        # These are candidates for the agent to research — NOT final allocation.
-        # The agent picks the best 1-3 from this list based on Amboss/1ML data.
-        # Budget allocation happens based on how many the agent recommends.
+        # ── Step 4: Shortlist top 10 from pool for the user to research ─
+        # These are candidates for the user to research — NOT final allocation.
+        # The user picks the best 1-3 from this list based on Amboss/1ML data.
         shortlist = pool[:10]
         log.info("shortlisting %d candidates", len(shortlist))
 
@@ -904,10 +902,10 @@ def _allocate_budget(deployable, state, channel_analysis, candidates, fee_env):
             if gd.get("diversity_score") is not None:
                 reason_parts.append(f"diversity {gd['diversity_score']:.0%}")
 
-            # Amount is 0 here — agent decides which to open, budget allocated after
+            # Amount is 0 here — user decides which to open, budget allocated after
             actions.append(_make_open_action(
                 candidate,
-                0,  # no allocation yet — agent picks from shortlist
+                0,  # no allocation yet — user picks from shortlist
                 " — ".join(reason_parts),
                 priority=2
             ))

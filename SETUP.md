@@ -42,7 +42,7 @@ cd /home/pi/ln-operator
 
 # Copy all .py files here:
 #   config.py, db.py, lnd_client.py, telegram_bot.py,
-#   engine.py, advisor.py, agent.py, main.py
+#   engine.py, advisor.py, main.py
 ```
 
 ### 2. Set up Python environment
@@ -257,7 +257,6 @@ All tuneable values are in `config.py`:
 | `config.py` | All settings + `.env` loader |
 | `engine/` | Channel-management package — `fees`, `rebalance_planner`, `rebalance_executor`, `sync`, `monitor` |
 | `advisor.py` | Peer ranking — tier-segmented, centrality prefilter → diversity rerank |
-| `agent.py` | Optional Claude API helper (not used by current `plan`) |
 | `lnd_client.py` | LND REST API client |
 | `db.py` | SQLite schema, migrations, query helpers |
 | `telegram_bot.py` | Telegram message formatting + sending (alerts + daily summary only) |

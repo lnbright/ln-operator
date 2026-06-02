@@ -105,11 +105,6 @@ def format_investment_plan(plan):
     if plan.get("onchain_fee_note"):
         lines.append(f"⛓ {plan['onchain_fee_note']}")
 
-    if plan.get("agent_summary"):
-        lines.append("")
-        lines.append("🤖 *Agent notes:*")
-        lines.append(plan["agent_summary"])
-
     return "\n".join(lines)
 
 

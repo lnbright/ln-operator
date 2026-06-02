@@ -15,7 +15,6 @@ Tables:
 - graph_snapshots: periodic network-level stats
 - alerts: alerts fired (depleted channels, offline peers, etc.)
 - channel_maturity: tracks how long each channel has been in a balanced state
-  (used by the 3-tier rebalance budget system to judge channel performance)
 - sync_state: key-value store for tracking sync cursors (e.g. last LND forwarding
   event offset, so we never fetch the same event twice)
 """
@@ -42,11 +41,37 @@ def _migrate_rebalance_log():
             conn.execute("ALTER TABLE rebalance_log ADD COLUMN budget_ppm REAL")
 
 
+def _migrate_drop_unused_columns():
+    """Drop vestigial columns left over from removed features (idempotent).
+
+    - channel_signals: rebalance-cost-floor / adaptive-cap (superseded by the
+      live last_refill_ppm budget + fee floor — never written or read).
+    - investment_log: agent_summary / executed / outcome_notes (the Claude API
+      agent layer and follow-through tracking were never built out).
+    Requires SQLite 3.35+ for ALTER TABLE DROP COLUMN.
+    """
+    drops = {
+        "channel_signals": [
+            "rebalance_cost_floor_ppm", "rebalance_cost_floor_samples",
+            "rebalance_cost_floor_source", "adaptive_cap_ppm",
+            "adaptive_cap_samples",
+        ],
+        "investment_log": ["agent_summary", "executed", "outcome_notes"],
+    }
+    with get_conn() as conn:
+        for table, cols in drops.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for col in cols:
+                if col in existing:
+                    conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+
+
 def init_db():
     """Create all tables if they don't exist."""
     with get_conn() as conn:
         conn.executescript(SCHEMA)
     _migrate_rebalance_log()
+    _migrate_drop_unused_columns()
 
 
 @contextmanager
@@ -183,10 +208,7 @@ CREATE TABLE IF NOT EXISTS investment_log (
     total_sats       INTEGER NOT NULL,
     treasury_reserve INTEGER NOT NULL,
     deployable_sats  INTEGER NOT NULL,
-    plan_json        TEXT NOT NULL,      -- full recommendation as JSON
-    agent_summary    TEXT,               -- Claude's plain-English summary
-    executed         INTEGER DEFAULT 0,  -- did the user follow through?
-    outcome_notes    TEXT                -- post-hoc notes on how it went
+    plan_json        TEXT NOT NULL       -- full recommendation as JSON
 );
 
 -- ─── Network graph snapshots (periodic) ─────────────────────────
@@ -251,18 +273,11 @@ CREATE TABLE IF NOT EXISTS fee_overrides (
 --   market_multiplier    : nudge applied to sigmoid base (e.g. +0.2 → 120%)
 --   last_fee_update_ts   : when this channel was last broadcast (hysteresis)
 --   last_local_ratio     : for edge-zone-crossing detection
--- Vestigial columns (kept to avoid migration; no longer written or read by
--- engine.py — rebalance budget and fee floor are derived live from rebalance_log):
---   rebalance_cost_floor_*  : superseded by last_refill_ppm × REBALANCE_FEE_MARGIN
---   adaptive_cap_*          : superseded by last_refill_ppm + failure escalation
+-- Rebalance budget and fee floor are derived live from rebalance_log
+-- (last_refill_ppm × REBALANCE_FEE_MARGIN + failure escalation), not stored here.
 CREATE TABLE IF NOT EXISTS channel_signals (
     chan_id                       TEXT PRIMARY KEY,
     market_multiplier             REAL    NOT NULL DEFAULT 0.0,
-    rebalance_cost_floor_ppm      INTEGER NOT NULL DEFAULT 0,  -- vestigial
-    rebalance_cost_floor_samples  INTEGER NOT NULL DEFAULT 0,  -- vestigial
-    rebalance_cost_floor_source   TEXT,                         -- vestigial
-    adaptive_cap_ppm              INTEGER NOT NULL DEFAULT 0,   -- vestigial
-    adaptive_cap_samples          INTEGER NOT NULL DEFAULT 0,   -- vestigial
     last_fee_update_ts            INTEGER NOT NULL DEFAULT 0,
     last_local_ratio              REAL,
     signals_updated_ts            INTEGER NOT NULL DEFAULT 0
@@ -363,14 +378,14 @@ def save_forward_failure(row: dict):
         ))
 
 
-def save_investment_plan(total_sats, treasury, deployable, plan_dict, agent_summary=""):
+def save_investment_plan(total_sats, treasury, deployable, plan_dict):
     """Log an investment recommendation."""
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO investment_log
-            (total_sats, treasury_reserve, deployable_sats, plan_json, agent_summary)
-            VALUES (?, ?, ?, ?, ?)
-        """, (total_sats, treasury, deployable, json.dumps(plan_dict), agent_summary))
+            (total_sats, treasury_reserve, deployable_sats, plan_json)
+            VALUES (?, ?, ?, ?)
+        """, (total_sats, treasury, deployable, json.dumps(plan_dict)))
 
 
 def set_fee_override(chan_id, ppm, note=""):
@@ -683,11 +698,6 @@ def get_channel_signals(chan_id):
         return {
             "chan_id": chan_id,
             "market_multiplier": 0.0,
-            "rebalance_cost_floor_ppm": 0,
-            "rebalance_cost_floor_samples": 0,
-            "rebalance_cost_floor_source": None,
-            "adaptive_cap_ppm": 0,
-            "adaptive_cap_samples": 0,
             "last_fee_update_ts": 0,
             "last_local_ratio": None,
             "signals_updated_ts": 0,
@@ -710,24 +720,6 @@ def upsert_channel_signals(chan_id, **fields):
             f"ON CONFLICT(chan_id) DO UPDATE SET {placeholders}",
             params,
         )
-
-
-def get_target_rebalance_ppms(chan_id, days=30, auto_only=False):
-    """Return list of successful fee_ppm values for rebalances INTO this channel.
-
-    Used to compute the rebalance-cost floor and the adaptive cap.
-    """
-    cutoff = int(time.time()) - days * 86400
-    sql = """
-        SELECT fee_ppm FROM rebalance_log
-        WHERE target_chan_id = ? AND ts > ? AND success = 1
-          AND fee_ppm IS NOT NULL
-    """
-    params = [chan_id, cutoff]
-    if auto_only:
-        sql += " AND triggered_by = 'auto'"
-    with get_conn() as conn:
-        return [r["fee_ppm"] for r in conn.execute(sql, params).fetchall()]
 
 
 def get_last_forward_ts(chan_id):
@@ -797,8 +789,9 @@ if __name__ == "__main__":
     init_db()
     print(f"Database initialised at {DB_PATH}")
 else:
-    # Run migration on import to add new columns if missing
+    # Run migrations on import to reconcile schema if the DB already exists
     try:
         _migrate_rebalance_log()
+        _migrate_drop_unused_columns()
     except Exception:
         pass  # DB may not exist yet

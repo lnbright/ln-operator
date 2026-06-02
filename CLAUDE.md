@@ -28,7 +28,7 @@
   `SHOW_PER_TIER` (10) per tier are surfaced. Live LND calls make this
   slow (~90 round-trips) — runs only in `ln-operator plan`, never in the 2h
   pipeline. Constants live in `advisor.py`.
-- agent.py exists but plan command doesn't use it (pure local graph)
+- Plan command is pure local graph — no Claude API agent layer (removed)
 - Rebalance auto-chunks on failure (halves down to 100k min). Each successful
   chunk is its own success row in rebalance_log at its actual ppm.
 - Rebalance executor (`main.execute_rebalance_plans`) carries two ledgers:
@@ -53,9 +53,11 @@
   Outbound floor = `last_refill × REBALANCE_FEE_MARGIN`. Bootstrap from
   `REBALANCE_DEFAULT_BUDGET_PPM = 500` when no history; failure escalation
   handles both bootstrap and upward market drift. No PROVEN/DISCOVERY/DEADWEIGHT
-  tiers, no `earned_ppm × revenue_ratio`, no median/window smoothing,
-  no `adaptive_cap_ppm` or `rebalance_cost_floor_ppm` columns (those
-  channel_signals columns are leftover and unused — kept to avoid migration).
+  tiers, no `earned_ppm × revenue_ratio`, no median/window smoothing. The old
+  `adaptive_cap_*` / `rebalance_cost_floor_*` channel_signals columns were
+  dropped (db.py `_migrate_drop_unused_columns`); channel_signals now holds
+  only `market_multiplier`, `last_fee_update_ts`, `last_local_ratio`,
+  `signals_updated_ts`.
   Knobs: `REBALANCE_DEFAULT_BUDGET_PPM`, `REBALANCE_MAX_BUDGET_PPM`,
   `REBALANCE_BUDGET_ESCALATION_STEP`, `REBALANCE_FEE_MARGIN`.
 

@@ -142,7 +142,6 @@ ln-operator/
 │   ├── sync.py             Forwarding + manual-rebalance pull from LND
 │   └── monitor.py          Channel health report + alerts
 ├── advisor.py           Peer ranking (tier-segmented, centrality → diversity)
-├── agent.py             Claude API (optional) — web search for peer research
 ├── lnd_client.py        LND REST API client
 ├── db.py                SQLite schema, migrations, queries
 ├── telegram_bot.py      Telegram notifications (alerts + daily summary)

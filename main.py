@@ -218,7 +218,7 @@ def cmd_plan(args):
         db.save_investment_plan(
             total_balance, best_breakdown["treasury"], best_breakdown["deployable"],
             {"num_channels": best_num, "channel_size": best_channel_size,
-             "breakdown": best_breakdown, "fee_rate": fee_rate}, ""
+             "breakdown": best_breakdown, "fee_rate": fee_rate}
         )
 
     # ── Step 6: Offer to generate a deposit address ───────────────
