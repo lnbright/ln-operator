@@ -21,10 +21,6 @@ LND_REST_URL = os.getenv("LND_REST_URL", "https://127.0.0.1:9000")
 LND_CERT = os.getenv("LND_CERT", "/home/lnd/tls.cert")
 LND_MACAROON = os.getenv("LND_MACAROON", "/home/lnd/data/chain/bitcoin/mainnet/admin.macaroon")
 
-# ─── Claude API (optional — powers investment advisor peer research) ──
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-
 # ─── Telegram (optional — pipeline notifications and alerts) ─────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
