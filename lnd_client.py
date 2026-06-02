@@ -112,11 +112,6 @@ def get_pending_channels():
     return _get("/v1/channels/pending")
 
 
-def get_closed_channels():
-    """Get closed channels."""
-    return _get("/v1/channels/closed")
-
-
 # ─── Channel policy (fees) ───────────────────────────────────────
 
 def get_channel_edge(chan_id):
@@ -219,14 +214,6 @@ def get_forwarding_history(start_time=0, end_time=None, max_events=1000,
     return parsed, last_offset
 
 
-# ─── Peers ───────────────────────────────────────────────────────
-
-def get_peers():
-    """Get connected peers."""
-    data = _get("/v1/peers")
-    return data.get("peers", [])
-
-
 # ─── Graph ───────────────────────────────────────────────────────
 
 def describe_graph(include_unannounced=False):
@@ -239,25 +226,7 @@ def describe_graph(include_unannounced=False):
     return _get("/v1/graph", params, timeout=300)
 
 
-def get_network_info():
-    """Get high-level network statistics."""
-    return _get("/v1/graph/info")
-
-
 # ─── Payments & Invoices ─────────────────────────────────────────
-
-def send_payment(payment_request, fee_limit_sat=None, timeout_seconds=60):
-    """Send a basic payment — used for non-rebalance payments.
-    Does not support outgoing_chan_id. Use send_payment_v2 for rebalancing.
-    """
-    data = {
-        "payment_request": payment_request,
-        "timeout_seconds": timeout_seconds,
-    }
-    if fee_limit_sat is not None:
-        data["fee_limit"] = {"fixed": str(fee_limit_sat)}
-    return _post("/v1/channels/transactions", data)
-
 
 def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
                     fee_limit_sat, timeout_seconds=120):

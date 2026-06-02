@@ -76,38 +76,6 @@ def _split_message(text, max_len=4000):
     return chunks
 
 
-def format_investment_plan(plan):
-    """Format an investment plan dict as a Telegram message."""
-    lines = []
-    lines.append("⚡ *LN Operator — Investment Plan*")
-    lines.append("")
-    lines.append(f"💰 *Total input:* {plan['total_sats']:,} sats")
-    lines.append(f"🏦 *Treasury reserve:* {plan['treasury_reserve']:,} sats ({plan['treasury_pct']:.0%})")
-    lines.append(f"🚀 *Deployable:* {plan['deployable_sats']:,} sats")
-    lines.append("")
-
-    if plan.get("actions"):
-        lines.append("📋 *Recommended actions:*")
-        for i, action in enumerate(plan["actions"], 1):
-            emoji = {"open": "🔗", "upsize": "📈", "close": "🔴"}.get(action["type"], "•")
-            lines.append(f"  {emoji} {i}. *{action['type'].title()}* channel to `{action['peer_alias']}`")
-            lines.append(f"      Size: {action['amount_sats']:,} sats")
-            if action.get("reason"):
-                lines.append(f"      _{action['reason']}_")
-            lines.append("")
-
-    if plan.get("not_recommended"):
-        lines.append("⏸ *Not recommended right now:*")
-        for note in plan["not_recommended"]:
-            lines.append(f"  • _{note}_")
-        lines.append("")
-
-    if plan.get("onchain_fee_note"):
-        lines.append(f"⛓ {plan['onchain_fee_note']}")
-
-    return "\n".join(lines)
-
-
 def format_alert(alert_type, details):
     """Format a monitoring alert."""
     emojis = {

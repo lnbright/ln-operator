@@ -435,20 +435,6 @@ def save_alert(alert_type, message, channel_id=None, sent_telegram=False):
 
 # ─── Query helpers ───────────────────────────────────────────────
 
-def get_avg_monthly_rebalance_cost(months=3):
-    """Average monthly rebalancing cost over the last N months."""
-    cutoff = int(time.time()) - (months * 30 * 86400)
-    with get_conn() as conn:
-        row = conn.execute("""
-            SELECT COALESCE(SUM(fee_paid_sats), 0) as total_fees,
-                   COUNT(*) as attempts
-            FROM rebalance_log
-            WHERE ts > ? AND success = 1
-        """, (cutoff,)).fetchone()
-        total = row["total_fees"]
-        return total / months if months > 0 else 0
-
-
 def get_avg_monthly_fee_revenue(months=3):
     """Average monthly routing fee revenue over the last N months."""
     cutoff = int(time.time()) - (months * 30 * 86400)
@@ -459,18 +445,6 @@ def get_avg_monthly_fee_revenue(months=3):
             WHERE ts > ?
         """, (cutoff,)).fetchone()
         return row["total_fees"] / months if months > 0 else 0
-
-
-def get_channel_fee_revenue(chan_id, days=30):
-    """Fee revenue for a specific channel over last N days."""
-    cutoff = int(time.time()) - (days * 86400)
-    with get_conn() as conn:
-        row = conn.execute("""
-            SELECT COALESCE(SUM(fee_earned_sats), 0) as fees
-            FROM forwarding_log
-            WHERE (chan_in = ? OR chan_out = ?) AND ts > ?
-        """, (chan_id, chan_id, cutoff)).fetchone()
-        return row["fees"]
 
 
 def get_peer_history(pubkey):
@@ -563,51 +537,6 @@ def update_channel_maturity(chan_id, is_balanced_now):
         """, (add_seconds, now, int(is_balanced_now), chan_id))
 
 
-def get_channel_maturity(chan_id):
-    """Get maturity info for a channel.
-
-    Returns dict with:
-    - balanced_days: total days spent in a balanced state
-    - age_days: total days since first seen
-    - balanced_ratio: fraction of lifetime spent balanced
-    """
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM channel_maturity WHERE chan_id = ?", (chan_id,)
-        ).fetchone()
-
-    if row is None:
-        return {"balanced_days": 0, "age_days": 0, "balanced_ratio": 0}
-
-    now = int(time.time())
-    age_seconds = max(1, now - row["first_seen"])
-    return {
-        "balanced_days": row["balanced_seconds"] / 86400,
-        "age_days": age_seconds / 86400,
-        "balanced_ratio": row["balanced_seconds"] / age_seconds,
-    }
-
-
-def get_channel_earned_ppm(chan_id, days=30):
-    """Calculate the average ppm this channel has earned over the last N days.
-
-    Looks at forwarding events where this channel was involved (in or out)
-    and computes: total_fees / total_amount_routed * 1_000_000
-    """
-    cutoff = int(time.time()) - (days * 86400)
-    with get_conn() as conn:
-        row = conn.execute("""
-            SELECT COALESCE(SUM(fee_earned_sats), 0) as total_fees,
-                   COALESCE(SUM(amount_out_sats), 0) as total_routed
-            FROM forwarding_log
-            WHERE (chan_in = ? OR chan_out = ?) AND ts > ?
-        """, (chan_id, chan_id, cutoff)).fetchone()
-
-    if row["total_routed"] == 0:
-        return 0.0
-    return row["total_fees"] / row["total_routed"] * 1_000_000
-
-
 def rebalance_exists_by_hash(payment_hash):
     """Check if a rebalance with this payment hash is already in the log."""
     with get_conn() as conn:
@@ -666,24 +595,6 @@ def save_backup_attempt(success, file_mtime, file_bytes, destination,
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (int(bool(success)), file_mtime, file_bytes, destination,
               duration_ms, trigger, error))
-
-
-def get_latest_backup_status():
-    """Return last attempt row and last successful row (both may be None).
-
-    The dashboard uses this to render age + last error.
-    """
-    with get_conn() as conn:
-        last_any = conn.execute(
-            "SELECT * FROM backup_log ORDER BY ts DESC LIMIT 1"
-        ).fetchone()
-        last_ok = conn.execute(
-            "SELECT * FROM backup_log WHERE success=1 ORDER BY ts DESC LIMIT 1"
-        ).fetchone()
-    return {
-        "last_attempt": dict(last_any) if last_any else None,
-        "last_success": dict(last_ok) if last_ok else None,
-    }
 
 
 # ─── Channel signals (slow-moving per-channel state) ───────────

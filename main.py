@@ -19,7 +19,6 @@ Usage:
 
 import sys
 import argparse
-import json
 import time
 from datetime import datetime
 
@@ -683,19 +682,24 @@ def cmd_run(args):
     print("\n── Step 2: Rebalance Channels ──")
     plans, reason = engine.plan_rebalances()
     rebalance_results = []
-    if plans:
-        for p in plans:
-            result = engine.execute_rebalance(p, dry_run=args.dry_run)
-            rebalance_results.append(result)
-            if result["success"]:
-                print(f"  ✓ {p['source_alias']} → {p['target_alias']}: "
-                      f"{p['amount_sats']:,} sats, fee {result['fee_paid']:,} sats "
-                      f"({result['fee_ppm']:.0f} ppm)")
-            else:
-                print(f"  ✗ {p['source_alias']} → {p['target_alias']}: "
-                      f"{result['failure_reason']}")
-    else:
+    if not plans:
         print(f"  {reason}")
+    elif args.dry_run:
+        primaries = [p for p in plans if not p.get("is_fallback")]
+        fallbacks = [p for p in plans if p.get("is_fallback")]
+        print(f"  [DRY RUN] {len(primaries)} primary plan(s) "
+              f"+ {len(fallbacks)} fallback(s):")
+        for p in plans:
+            kind = "fallback" if p.get("is_fallback") else "primary"
+            print(f"    {p['source_alias']} → {p['target_alias']} ({kind}): "
+                  f"up to {p['amount_sats']:,} sats (cap {p['max_fee_ppm']} ppm)")
+        print("  [DRY RUN] No payments executed.")
+    else:
+        # Use the dual-ledger executor — caps each plan at the target's remaining
+        # deficit and the source's remaining surplus, so fallbacks only fire when
+        # their target still needs sats (no over-rebalancing). Same path as the
+        # interactive rebalance_channels command.
+        rebalance_results = execute_rebalance_plans(plans, log_main)
 
     # Step 3: Sync routing history from LND
     print("\n── Step 3: Sync Routing ──")
@@ -957,56 +961,6 @@ def cmd_clear_fee(args):
     log.info("clear_fee: removed pin on %s", ch["peer_alias"])
     print(f"  ✓ Pin removed from {ch['peer_alias']}.")
     print(f"  Run 'ln-operator adjust_fees' to recompute now, or wait for the next pipeline run.")
-
-
-def _display_plan(plan):
-    """Pretty-print an investment plan to terminal."""
-    state = plan.get("current_state", {})
-    print(f"\n  Current node: {state.get('num_channels', 0)} channels, "
-          f"{state.get('total_capacity', 0):,} sats, "
-          f"{state.get('overall_ratio', 0):.0%} local ratio")
-
-    print(f"\n  💰 Total: {plan['total_sats']:,} sats")
-    print(f"  🏦 Treasury: {plan['treasury_reserve']:,} sats ({plan['treasury_pct']:.0%})")
-    print(f"  🚀 Deployable: {plan['deployable_sats']:,} sats")
-
-    fee_env = plan.get("fee_environment", {})
-    if fee_env:
-        print(f"  ⛓  Fees: {fee_env.get('note', 'unknown')}")
-
-    actions = plan.get("actions", [])
-    if actions:
-        # Separate shortlisted candidates (amount=0) from actual allocations
-        shortlist = [a for a in actions if a.get("amount_sats", 0) == 0]
-        allocated = [a for a in actions if a.get("amount_sats", 0) > 0]
-
-        if allocated:
-            print(f"\n  Recommended actions:")
-            for i, a in enumerate(allocated, 1):
-                print(f"    {i}. {a['type'].upper()} → {a['peer_alias']}: {a['amount_sats']:,} sats")
-                if a.get("reason"):
-                    print(f"       {a['reason']}")
-
-        if shortlist:
-            print(f"\n  Candidates shortlisted ({len(shortlist)}):")
-            for i, a in enumerate(shortlist, 1):
-                gd = a.get("graph_data") or {}
-                diversity = f" — diversity {gd['diversity_score']:.0%}" if gd.get("diversity_score") is not None else ""
-                avg_fee = f" — avg fee {gd['avg_fee_ppm']} ppm" if gd.get("avg_fee_ppm") else ""
-                print(f"    {i}. {a['peer_alias']}"
-                      f" | score {a.get('score','?')}"
-                      f" | rank {a.get('network_rank','?')}"
-                      f" | {a.get('channel_count',0)} channels"
-                      f"{avg_fee}{diversity}")
-    else:
-        print("\n  No actions recommended at this time.")
-
-    nrec = plan.get("not_recommended", [])
-    if nrec:
-        print(f"\n  Notes:")
-        for note in nrec:
-            print(f"    • {note}")
-
 
 
 def _balance_bar(ratio, width=20):
