@@ -12,6 +12,9 @@ dashboard tour.
 - [Rebalance Budget](rebalance-budget.md) — single-signal budget, failure escalation, chunking, fallback pairs
 - [Plan Command](plan-command.md) — tier-segmented peer ranking (centrality → diversity)
 
+## Operations
+- [Daily Check](daily-check.md) — the optional, off-by-default AI health-check agent
+
 ## Reference
 - [Configuration](configuration.md) — every `config.py` knob and its default
 - [Data Flow](data-flow.md) — how LND data lands in SQLite and feeds each consumer

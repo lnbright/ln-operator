@@ -63,8 +63,14 @@
 
 ## LND Access
 - REST: https://127.0.0.1:9000
-- Cert: /home/lnd/tls.cert  
-- Macaroon: /home/lnd/data/chain/bitcoin/mainnet/admin.macaroon
+- Cert: /home/lnd/tls.cert
+- Macaroons (baked with `lncli bakemacaroon`, stored in ~/.lnd-macaroons/, mode 600):
+  - Main tool (`LND_MACAROON` in .env): least-privilege —
+    `info:read offchain:read offchain:write onchain:read address:write invoices:read invoices:write peers:read`.
+    No onchain:write / open / close / macaroon admin.
+  - Dashboard (`DASHBOARD_LND_MACAROON`) and daily-check (`DAILY_CHECK_LND_MACAROON`):
+    read-only — `info:read offchain:read onchain:read peers:read invoices:read`.
+  - admin.macaroon is only needed to bake the above; not used at runtime.
 - LND runs as lnd user, tool runs as pi user
 
 ## Database

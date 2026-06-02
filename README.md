@@ -184,7 +184,7 @@ $EDITOR .env       # fill in the keys you need
 ```
 
 `.env.example` is the source of truth for every env key the codebase reads
-(LND, Claude API, Telegram, backup destination, DB path, dashboard bind).
+(LND, Telegram, backup destination, DB path, dashboard bind).
 Only `LND_*` is strictly required — everything else is optional and falls
 back to a documented default.
 
@@ -280,6 +280,25 @@ venv/bin/python3 dashboard/app.py    # or install services/lnd-dashboard.service
 
 Access at `http://YOUR_IP:4000`. No auth — use Tailscale or LAN only.
 
+### Services (systemd)
+
+Unit files for the dashboard, off-site channel-backup, and HTLC monitor live
+in [`services/`](services/). **They are not portable as-is** — each one
+hardcodes `User=pi` and `/home/pi/ln-operator/...` paths plus an
+`EnvironmentFile`. Edit the `User=`, `WorkingDirectory=`, `ExecStart=`, and
+`EnvironmentFile=` lines in every unit to match your host **before** enabling
+them:
+
+```bash
+$EDITOR services/lnd-dashboard.service        # repeat for each unit you use
+sudo cp services/* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now lnd-dashboard.service
+```
+
+The daily-check AI agent is *not* a systemd service — it runs from cron and is
+off by default. See [docs/daily-check.md](docs/daily-check.md).
+
 ---
 
 ## Security
@@ -365,6 +384,9 @@ skimmable. Full index: [docs/README.md](docs/README.md).
 **Liquidity**
 - [Rebalance Budget](docs/rebalance-budget.md) — single-signal budget, failure escalation, chunking, fallback pairs
 - [Plan Command](docs/plan-command.md) — tier-segmented peer ranking (centrality → diversity)
+
+**Operations**
+- [Daily Check](docs/daily-check.md) — the optional, off-by-default AI health-check agent
 
 **Reference**
 - [Configuration](docs/configuration.md) — every `config.py` knob and its default
