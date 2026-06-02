@@ -310,6 +310,8 @@ def cmd_adjust_fees(args):
     log.info("adjust_fees: starting%s", " [dry-run]" if args.dry_run else "")
     print("\n⚡ LN Operator — Fee Policy Update")
     print("=" * 40)
+    print("  Reading channels + current fees from LND "
+          "(a few seconds)…", flush=True)
 
     updates = engine.update_all_fees(dry_run=args.dry_run)
 
@@ -466,8 +468,16 @@ def execute_rebalance_plans(plans, log, executor=None):
                  "(deficit %s, source %s available)",
                  kind, p["source_alias"], p["target_alias"],
                  f"{attempt_amount:,}", f"{deficit:,}", f"{available:,}")
+        print(f"  → {p['source_alias']} → {p['target_alias']} ({kind}): "
+              f"moving up to {attempt_amount:,} sats (cap {p['max_fee_ppm']} ppm)…",
+              flush=True)
 
-        result = executor(capped, dry_run=False)
+        # Stream chunk-level progress only through the real executor; test stubs
+        # and any custom executor keep the original (plan, dry_run) signature.
+        extra = {}
+        if executor is engine.execute_rebalance:
+            extra["on_progress"] = lambda m: print(f"      {m}", flush=True)
+        result = executor(capped, dry_run=False, **extra)
         results.append(result)
 
         moved = result.get("amount", 0) if result.get("success") else 0

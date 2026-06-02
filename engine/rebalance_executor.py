@@ -64,7 +64,7 @@ def _attempt_single_rebalance(plan, amount, max_fee_sats):
                 "failure_reason": str(e), "payment_hash": ""}
 
 
-def execute_rebalance(plan, dry_run=False):
+def execute_rebalance(plan, dry_run=False, on_progress=None):
     """Execute a circular rebalance using Router SendPaymentV2.
 
     If the full amount fails (e.g. no route with enough liquidity), automatically
@@ -75,7 +75,15 @@ def execute_rebalance(plan, dry_run=False):
     Forces the payment:
     - OUT through plan["source_chan_id"]  (the overfull channel)
     - BACK IN through plan["target_peer_pubkey"] (the depleted channel peer)
+
+    on_progress, if given, is called with short status strings at each chunk
+    boundary so an interactive caller can show live progress during the
+    (potentially minute-long) SendPaymentV2 attempts. It is purely cosmetic —
+    the pipeline/cron path leaves it None.
     """
+    def _emit(msg):
+        if on_progress:
+            on_progress(msg)
     result = {
         "source_chan_id": plan["source_chan_id"],
         "target_chan_id": plan["target_chan_id"],
@@ -121,6 +129,8 @@ def execute_rebalance(plan, dry_run=False):
 
         log.info("rebalance chunk %d: trying %s of %s remaining sats",
                  chunk_num, f"{chunk_amount:,}", f"{remaining:,}")
+        _emit(f"chunk {chunk_num}: trying {chunk_amount:,} sats "
+              f"(≤{chunk_fee_limit:,} sat fee, up to 120s)…")
 
         chunk_start = time.time()
         attempt = _attempt_single_rebalance(plan, chunk_amount, chunk_fee_limit)
@@ -133,6 +143,9 @@ def execute_rebalance(plan, dry_run=False):
             succeeded_chunks += 1
             log.info("  chunk %d succeeded: %s sats moved, fee %d sats (%.0f ppm)",
                      chunk_num, f"{chunk_amount:,}", attempt["fee_paid"], attempt["fee_ppm"])
+            _emit(f"chunk {chunk_num}: ✓ moved {chunk_amount:,} sats in "
+                  f"{chunk_duration:.0f}s, fee {attempt['fee_paid']:,} sats "
+                  f"({attempt['fee_ppm']:.0f} ppm)")
 
             # Persist this chunk as its own row so sync_rebalances can dedup by
             # payment_hash instead of misattributing it to a "manual" send.
@@ -159,8 +172,12 @@ def execute_rebalance(plan, dry_run=False):
             if chunk_amount < min_chunk:
                 log.info("  chunk size %s below minimum %s — giving up",
                          f"{chunk_amount:,}", f"{min_chunk:,}")
+                _emit(f"chunk {chunk_num}: ✗ {attempt['failure_reason']} — "
+                      f"next size {chunk_amount:,} below {min_chunk:,} floor, giving up")
                 result["failure_reason"] = last_failure_reason
                 break
+            _emit(f"chunk {chunk_num}: ✗ {attempt['failure_reason']} — "
+                  f"halving to {chunk_amount:,} sats and retrying")
 
     duration = time.time() - start
 
