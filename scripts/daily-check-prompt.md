@@ -21,7 +21,29 @@ and call it out.
 
 Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
 
-- **forwarding_log** — sats forwarded, fees earned, per-channel breakdown
+- **forwarding_log** — sats forwarded, fees earned, per-channel breakdown.
+  Also analyse the **directional sat-flow** — the same `chan_in→chan_out`
+  view the dashboard's Sat Flow card builds (reuse `get_sat_flow` in
+  `dashboard/app.py` rather than reinventing the query): rank the top in→out
+  peer pairs by sats routed, and aggregate per-peer **inbound** (where
+  liquidity enters) vs **outbound** (where it leaves). Compare the last 24h
+  against a 7–30d baseline — anomalies live in the *change*, not the totals:
+    - a normally-dominant route gone quiet (pair in the 30d top-5 but ~0 in
+      24h) — peer down, our fee priced it out, or their liquidity dried up;
+      cross-ref the inactive-channel timeline and that channel's recent
+      fee_updates before guessing which.
+    - a peer that is almost purely a **sink** (heavy chan_out, little chan_in)
+      — that's the channel that keeps draining; ties directly to rebalance
+      direction and the depleted-channel list.
+    - a peer that is almost purely a **source** (heavy chan_in, little
+      chan_out) — cheap inbound; the channels it feeds are where outbound
+      capacity is worth holding.
+    - flow concentration — if one pair or one peer carries >~50% of volume,
+      note the dependency: both revenue and routing ride on that peer staying
+      up and that route staying open.
+  Quantify it the same way as the failure analysis — "<peer> routed Xm sats
+  out vs Ym in over 24h (pure sink), down from Zm 30d-avg" is the kind of line
+  that should feed Diagnose and Suggestions, not just sit in a flows total.
 - **rebalance_log** — successes/failures, fees paid, per-channel breakdown,
   cost ppm distribution. Note any channel with repeated failures.
 - **fee_updates** — broadcasts: how many, ppm deltas, reasons (sigmoid /
@@ -183,6 +205,14 @@ You're looking for things a human operator would notice as off:
   not catching up?)
 - Fee floors that look wrong vs the most recent successful refill ppm
 - Inactive/offline channels still being chosen as rebalance sources
+- **Sat-flow anomalies / directional imbalance** (from the §1 in→out
+  analysis): routes that dropped out vs their baseline, peers that are pure
+  sinks (chronic drain) or pure sources, and single-peer concentration that
+  makes the node's revenue fragile. Join signals up rather than listing them
+  separately — a pure-sink peer whose channel *also* shows repeated rebalance
+  failures or dropped `INSUFFICIENT_BALANCE` forwards is one compounding story
+  (demand wants to push through it, we can't keep it filled, and refills are
+  failing), worth a single pointed line.
 - **Local vs peer fee asymmetry** (from the graph-edge fees gathered above):
     - Peer charges *much more outbound toward us* than we charge them
       (remote_ppm ≫ local_ppm): pushing liquidity to us is expensive for
@@ -224,8 +254,13 @@ Based on the day's data, think about whether to suggest:
   observed flow
 - New peer connections — which kinds of nodes (high-centrality routing
   hubs, specific merchants, LSPs) would improve forwarding revenue given
-  what's actually flowing through us today
-- Channels worth closing or resizing
+  what's actually flowing through us today. Let the directional sat-flow
+  steer this: grow/open capacity toward the **destinations** demand keeps
+  pulling toward (the heavy sinks) and toward cheap **inbound sources** that
+  feed them — that's where added liquidity earns, not a generic "add a hub".
+- Channels worth closing or resizing — a chronic pure-sink channel may want
+  more inbound (rebalance budget / a sibling source), and a peer that neither
+  sources nor sinks meaningful flow over 30d is a resize/close candidate.
 
 Put these in the summary as `Suggestions:`. Do not edit config.py or open
 channels — these are human decisions.
