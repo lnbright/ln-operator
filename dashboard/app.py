@@ -40,9 +40,15 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 
 # ─── Config ──────────────────────────────────────────────────────
-LND_REST_URL = "https://127.0.0.1:9000"
-LND_CERT     = "/home/lnd/tls.cert"
-LND_MACAROON = "/home/lnd/data/chain/bitcoin/mainnet/admin.macaroon"
+# Read from env (.env) so the dashboard isn't pinned to one host's layout;
+# defaults match config.py. The dashboard is read-only, so it prefers a
+# read-only macaroon via DASHBOARD_LND_MACAROON, falling back to the main
+# LND_MACAROON, then the legacy admin path.
+LND_REST_URL = os.getenv("LND_REST_URL", "https://127.0.0.1:9000")
+LND_CERT     = os.getenv("LND_CERT", "/home/lnd/tls.cert")
+LND_MACAROON = os.getenv("DASHBOARD_LND_MACAROON",
+                         os.getenv("LND_MACAROON",
+                                   "/home/lnd/data/chain/bitcoin/mainnet/admin.macaroon"))
 # Bind address — set DASHBOARD_BIND_IP in .env to your Tailscale IP so the
 # dashboard is reachable across the tailnet but not the public internet.
 # Defaults to 127.0.0.1 (localhost only) if unset.
