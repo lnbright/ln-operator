@@ -15,6 +15,26 @@ CLAUDE=/usr/bin/claude
 SUMMARY=/tmp/daily-check-summary.txt
 JSON=/tmp/daily-check-result.json
 
+# ─── Opt-in gate ────────────────────────────────────────────────────────────
+# This launches an AUTONOMOUS Claude agent with --dangerously-skip-permissions
+# that can edit code, `git commit`, and `git push origin main` unattended, using
+# whatever LND macaroon is in the environment. It is OFF by default. Enable it
+# only deliberately by setting LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1 in the cron
+# line or environment. See the Security section of the README first.
+if [ "${LN_OPERATOR_ENABLE_AI_DAILY_CHECK:-0}" != "1" ]; then
+  echo "daily-check: disabled. Set LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1 to enable." >&2
+  exit 0
+fi
+
+# Prefer a read-only macaroon for the unattended agent so it cannot move funds
+# even though the prompt instructs it to stay read-only. config.py reads .env
+# with override=False, so this exported value takes precedence over LND_MACAROON
+# in .env. Bake one with: info:read offchain:read onchain:read peers:read
+# invoices:read (see README Security section). Falls back to .env if unset.
+if [ -n "${DAILY_CHECK_LND_MACAROON:-}" ]; then
+  export LND_MACAROON="$DAILY_CHECK_LND_MACAROON"
+fi
+
 cd "$REPO" || exit 1
 mkdir -p "$(dirname "$LOG")"
 

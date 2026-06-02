@@ -282,6 +282,77 @@ Access at `http://YOUR_IP:4000`. No auth — use Tailscale or LAN only.
 
 ---
 
+## Security
+
+This tool talks to your LND node and serves your node's financials. A few
+things to get right before you run it — especially if you're not on a
+single-operator home network.
+
+### Dashboard exposure (no built-in auth)
+
+The dashboard has **no authentication** and runs on Flask's development
+server. Security is entirely the bind address: it defaults to `127.0.0.1`
+(loopback) and is set via `DASHBOARD_BIND_IP` in `.env`.
+
+- **Home / tailnet use:** bind to `127.0.0.1` or your Tailscale IP. Never
+  bind to `0.0.0.0` on a WAN-facing host — anyone who reaches the port sees
+  balances, channel points, peer pubkeys, and routing/payment history.
+- **Exposing it more widely:** don't point the dev server at the internet.
+  Put it behind a reverse proxy (nginx/Caddy) that terminates TLS and adds
+  HTTP Basic Auth or mTLS, and bind the app itself to loopback so only the
+  proxy can reach it.
+
+### Use a least-privilege macaroon
+
+`LND_MACAROON` defaults to `admin.macaroon`, which grants **total node
+control** (move funds, force-close channels, etc.). The tool does not need
+that. Bake a custom macaroon with only what it uses and point `LND_MACAROON`
+at it:
+
+```bash
+lncli bakemacaroon \
+  info:read \
+  offchain:read offchain:write \
+  onchain:read \
+  address:write \
+  invoices:read invoices:write \
+  peers:read \
+  --save_to ~/ln-operator.macaroon
+```
+
+This still allows rebalancing (`offchain:write` covers Router send and channel
+policy updates) and generating deposit addresses (`address:write`), but **not**
+moving on-chain funds, opening/closing channels, or baking further macaroons.
+
+### Daily-check AI agent (off by default)
+
+`scripts/daily-check.sh` can run an **autonomous Claude agent** that edits
+code, `git commit`s, and `git push origin main` unattended, with whatever
+macaroon is in your environment. It is **disabled by default** and must be
+explicitly opted into:
+
+```bash
+# In the cron line or environment:
+LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1
+```
+
+If you enable it, give it a **read-only** macaroon so it cannot move funds
+even though the prompt instructs it to stay read-only — bake one with only
+`info:read offchain:read onchain:read peers:read invoices:read` and point the
+script at it via `DAILY_CHECK_LND_MACAROON`. Also note it needs the `claude`
+CLI at `/usr/bin/claude` and pins a specific model. Review
+`scripts/daily-check-prompt.md` (which authorizes the auto-commit/push) before
+turning it on.
+
+### Off-site backup host key
+
+The channel-backup upload uses SSH with `StrictHostKeyChecking=accept-new`
+(trust-on-first-use). For a backup that contains `channel.backup`, pre-pin the
+host key instead: `ssh-keyscan -H backup-host >> ~/.ssh/known_hosts` before the
+first run.
+
+---
+
 ## Documentation
 
 The deep-dive docs live in [`docs/`](docs/) — kept out of this README so it stays

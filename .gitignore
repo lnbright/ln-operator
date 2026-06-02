@@ -1,6 +1,9 @@
 # Secrets — never commit these
 .env
 
+# Local tool/editor config (may hold machine-specific paths, IPs, hostnames)
+.claude/
+
 # Database — stays on the Pi
 *.db
 *.db-shm

@@ -91,8 +91,11 @@ TELEGRAM_CHAT_ID=
 # BACKUP_SSH_PORT=22
 # BACKUP_DEST_DIR=/path/on/remote/
 
-# Optional — bind address for the dashboard (defaults to 0.0.0.0)
-# DASHBOARD_HOST=100.64.0.1
+# Optional — dashboard bind address. Defaults to 127.0.0.1 (loopback only).
+# Set to your Tailscale IP to expose it tailnet-only. The dashboard has no
+# auth, so never bind it to 0.0.0.0 on a WAN-facing host.
+# DASHBOARD_BIND_IP=100.64.0.1
+# DASHBOARD_PORT=4000
 EOF
 
 chmod 600 /home/pi/ln-operator/.env
@@ -244,7 +247,9 @@ All tuneable values are in `config.py`:
 - **Inbound fees** aren't visible in the local channel graph. Check Amboss
   before opening to a new peer.
 - **Dashboard has no auth.** Bind it to a Tailscale/LAN-only IP via
-  `DASHBOARD_HOST` in `.env`.
+  `DASHBOARD_BIND_IP` in `.env` (defaults to `127.0.0.1`). Never bind to
+  `0.0.0.0` on a WAN-facing host. See the README's Security section for
+  stronger options (reverse proxy + auth).
 - **Channel opens are manual** — `plan` recommends, you execute via `lncli`.
 
 ---
