@@ -78,6 +78,34 @@ Also run:
     deactivated WG tower (`10.8.0.2`) does NOT appear in dial attempts. Only
     flag watchtower trouble if `num_failed_backups > 0`, the backup counter
     has stalled for many hours, or a NON-Tor dial error appears.
+- **Inactive-channel timeline** — for every channel `ln-operator status` (or
+  `/v1/channels` `active=false`) shows as inactive, don't just report the count:
+  build a short chronological story of *what happened over time* from LND's logs.
+  Grep the journal for the peer's pubkey:
+  `journalctl -u lnd --since "24 hours ago" --no-pager | grep <pubkey>`
+  (`pi` is in `adm` — no sudo). Read the connect/disconnect events in order and
+  summarise the progression, with timestamps, in 3-5 lines. The vocabulary:
+    - `Established/Finalizing outbound connection` + `Negotiated chan series` —
+      a successful (re)connect.
+    - `pong response failure ... timeout while waiting for pong ... disconnecting`
+      — **our** side dropped a stalled link (keepalive ping got no pong in 30s).
+      Note the `Last successful RTT` — a healthy RTT then a sudden timeout points
+      to the peer stalling/restarting, not a slow link.
+    - `unable to read message from peer: ... EOF` / `read handler closed` — the
+      **peer** closed the socket on us.
+    - `dial proxy failed: socks connect ... connection refused` (or a live
+      `connect_peer` returning the same) — the peer's port is now refusing
+      connections entirely: node down or LN port closed/firewalled.
+    - `Removing conn req` repeated — LND backing off its persistent retries.
+  Distinguish flapping (repeated pong timeouts back-to-back) from a clean
+  decline (one drop → quiet → peer goes fully unreachable). State whose side the
+  fault is on. Rule out our own Tor before blaming it: if other clearnet peers
+  are connected over the same `127.0.0.1:9050` proxy, our outbound Tor is fine
+  and the fault is the remote peer. LND auto-reconnects via its persistent conn
+  request, so most inactive channels self-heal when the peer returns — say so
+  rather than recommending a force-close on a freshly-opened channel. Surface the
+  timeline as the `Issues:` line for that channel, e.g.
+  `chan <scid> (<alias>) inactive 14h: 1 pong timeout 19:52 → EOF 19:59 → port refusing since; peer down, LND retrying`.
 - **Peer-side fees** — for each active channel, fetch our outbound fee vs
   the peer's outbound fee from `/v1/graph/edge/{chan_id}` (numeric scid;
   match `our_pubkey` against node1_pub/node2_pub, read
