@@ -1195,34 +1195,34 @@ TEMPLATE = """
   {% if data.sat_flow %}
   {% set sf = data.sat_flow %}
   <div class="grid-1">
-    <div class="card">
+    <div class="card" id="sat-flow">
       <div class="card-title">
         Sat Flow — Where Sats Route ({{ sf.window_label }})
         <select class="flow-select" onchange="location=this.value">
-          <option value="?flow_window=30&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}"  {% if sf.window_key=='30'  %}selected{% endif %}>Last 30d</option>
-          <option value="?flow_window=7&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}"   {% if sf.window_key=='7'   %}selected{% endif %}>Last 7d</option>
-          <option value="?flow_window=all&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}" {% if sf.window_key=='all' %}selected{% endif %}>All time</option>
+          <option value="?flow_window=30&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}#sat-flow"  {% if sf.window_key=='30'  %}selected{% endif %}>Last 30d</option>
+          <option value="?flow_window=7&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}#sat-flow"   {% if sf.window_key=='7'   %}selected{% endif %}>Last 7d</option>
+          <option value="?flow_window=all&flow_in={{ sf.flow_in }}&flow_out={{ sf.flow_out }}#sat-flow" {% if sf.window_key=='all' %}selected{% endif %}>All time</option>
         </select>
       </div>
 
       <div class="flow-filters">
         <label>In&nbsp;
           <select class="flow-select" onchange="location=this.value">
-            <option value="?flow_window={{ sf.window_key }}&flow_out={{ sf.flow_out }}" {% if not sf.flow_in %}selected{% endif %}>All sources</option>
+            <option value="?flow_window={{ sf.window_key }}&flow_out={{ sf.flow_out }}#sat-flow" {% if not sf.flow_in %}selected{% endif %}>All sources</option>
             {% for cid, al in sf.in_options %}
-            <option value="?flow_window={{ sf.window_key }}&flow_out={{ sf.flow_out }}&flow_in={{ cid }}" {% if sf.flow_in==cid %}selected{% endif %}>{{ al }}</option>
+            <option value="?flow_window={{ sf.window_key }}&flow_out={{ sf.flow_out }}&flow_in={{ cid }}#sat-flow" {% if sf.flow_in==cid %}selected{% endif %}>{{ al }}</option>
             {% endfor %}
           </select>
         </label>
         <label>Out&nbsp;
           <select class="flow-select" onchange="location=this.value">
-            <option value="?flow_window={{ sf.window_key }}&flow_in={{ sf.flow_in }}" {% if not sf.flow_out %}selected{% endif %}>All destinations</option>
+            <option value="?flow_window={{ sf.window_key }}&flow_in={{ sf.flow_in }}#sat-flow" {% if not sf.flow_out %}selected{% endif %}>All destinations</option>
             {% for cid, al in sf.out_options %}
-            <option value="?flow_window={{ sf.window_key }}&flow_in={{ sf.flow_in }}&flow_out={{ cid }}" {% if sf.flow_out==cid %}selected{% endif %}>{{ al }}</option>
+            <option value="?flow_window={{ sf.window_key }}&flow_in={{ sf.flow_in }}&flow_out={{ cid }}#sat-flow" {% if sf.flow_out==cid %}selected{% endif %}>{{ al }}</option>
             {% endfor %}
           </select>
         </label>
-        {% if sf.filtered %}<a class="flow-clear" href="?flow_window={{ sf.window_key }}">clear ✕</a>{% endif %}
+        {% if sf.filtered %}<a class="flow-clear" href="?flow_window={{ sf.window_key }}#sat-flow">clear ✕</a>{% endif %}
       </div>
 
       {% if sf.pairs %}
