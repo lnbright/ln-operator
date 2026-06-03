@@ -987,13 +987,13 @@ TEMPLATE = """
             <th style="width:18%">Balance</th>
             <th>Capacity</th>
             <th>Sent / Received</th>
-            <th>Local Fee</th>
-            <th>Remote Fee</th>
+            <th>Local Fee [ppm]</th>
+            <th>Remote Fee [ppm]</th>
             <th>Revenue 30d</th>
             <th>Rebal Cost 30d</th>
             <th>Net 30d</th>
             <th>Net Lifetime</th>
-            <th>Status</th>
+            <th>Flags</th>
           </tr>
         </thead>
         <tbody>
@@ -1021,12 +1021,12 @@ TEMPLATE = """
               ↓ {{ "{:,}".format(ch.total_satoshis_received | int) }}
             </td>
             <td style="font-size:11px;">
-              {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }} <span style="color:var(--muted);font-size:9px;">ppm</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
-              {% if ch.gate and ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="trailing earned ppm (revenue / out-volume)">earns {{ ch.gate.earned_ppm }}ppm</div>
+              {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+              {% if ch.gate and ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="trailing earned ppm (revenue / out-volume)">earns {{ ch.gate.earned_ppm }}</div>
               {% elif ch.gate and ch.gate.judged is defined and not ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="too little out-volume to judge profitability — keeps full rebalance escalation">unjudged</div>{% endif %}
             </td>
             <td style="font-size:11px;">
-              {% if ch.remote_fee_ppm is not none %}{{ ch.remote_fee_ppm }} <span style="color:var(--muted);font-size:9px;">ppm</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+              {% if ch.remote_fee_ppm is not none %}{{ ch.remote_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>
             <td class="{% if perf.fee_rev > 0 %}amount-positive{% else %}amount-muted{% endif %}">
               {% if perf.fee_rev > 0 %}+{{ "{:,}".format(perf.fee_rev) }}{% else %}—{% endif %}
@@ -1041,17 +1041,23 @@ TEMPLATE = """
               {% if perf.net_all != 0 %}{% if perf.net_all > 0 %}+{% endif %}{{ "{:,}".format(perf.net_all) }}{% else %}—{% endif %}
             </td>
             <td>
-              {# Balance state (depleted/saturated/healthy) is already shown by the
-                 bar colour — the status column carries live, actionable signal only. #}
+              {# Balance state (depleted/saturated/healthy) is shown by the bar
+                 colour — this column flags only things needing attention/action.
+                 A muted dash means "nothing flagged", not a missing value. #}
+              {% set show_refill = ch.gate and ratio < 20 %}
+              {% set has_flags = (not ch.active) or ch.private or show_refill
+                                 or (ch.gate and ch.gate.inbound_fee_ppm < 0)
+                                 or (ch.gate and ch.gate.floor_decaying) %}
               {% if not ch.active %}<span class="badge badge-red" title="peer offline — LND auto-reconnects when it returns">offline</span>{% endif %}
               {% if ch.private %}<span class="badge badge-muted">private</span>{% endif %}
-              {% if ch.gate %}
-                {% if ratio < 20 and ch.gate.structural %}<span class="badge badge-red" title="{{ ch.gate.budget_reason }}">structural · needs capital</span>
-                {% elif ratio < 20 and ch.gate.profit_capped %}<span class="badge badge-yellow" title="{{ ch.gate.budget_reason }}">refill capped ≤{{ ch.gate.budget_ppm }}ppm</span>
-                {% elif ratio < 20 %}<span class="badge badge-green" title="profitable refill target — {{ ch.gate.budget_reason }}">refilling ≤{{ ch.gate.budget_ppm }}ppm</span>{% endif %}
-                {% if ch.gate.inbound_fee_ppm < 0 %}<span class="badge badge-blue" title="negative inbound fee pulling organic refill">inbound {{ ch.gate.inbound_fee_ppm }}ppm</span>{% endif %}
-                {% if ch.gate.floor_decaying %}<span class="badge badge-muted" title="outbound floor decaying toward clearing fee while idle">floor↓</span>{% endif %}
+              {% if show_refill %}
+                {% if ch.gate.structural %}<span class="badge badge-red" title="{{ ch.gate.budget_reason }}">structural · needs capital</span>
+                {% elif ch.gate.profit_capped %}<span class="badge badge-yellow" title="{{ ch.gate.budget_reason }}">refill capped ≤{{ ch.gate.budget_ppm }}ppm</span>
+                {% else %}<span class="badge badge-green" title="profitable refill target — {{ ch.gate.budget_reason }}">refilling ≤{{ ch.gate.budget_ppm }}ppm</span>{% endif %}
               {% endif %}
+              {% if ch.gate and ch.gate.inbound_fee_ppm < 0 %}<span class="badge badge-blue" title="negative inbound fee pulling organic refill">inbound {{ ch.gate.inbound_fee_ppm }}ppm</span>{% endif %}
+              {% if ch.gate and ch.gate.floor_decaying %}<span class="badge badge-muted" title="outbound floor decaying toward clearing fee while idle">floor↓</span>{% endif %}
+              {% if not has_flags %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>
           </tr>
           {% endfor %}
