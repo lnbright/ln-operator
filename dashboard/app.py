@@ -614,10 +614,10 @@ def get_sat_flow(now, channels, window_key="30", flow_in="", flow_out=""):
         "total_sats":  total_sats,
         "total_n":     total_n,
         "total_fee":   total_fee,
-        "pairs":       pairs[:15],
+        "pairs":       pairs[:10],
         "max_pair":    pairs[0]["sats"] if pairs else 0,
-        "sources":     sources_list[:8],
-        "sinks":       sinks_list[:8],
+        "sources":     sources_list[:10],
+        "sinks":       sinks_list[:10],
         "max_source":  sources_list[0]["sats"] if sources_list else 0,
         "max_sink":    sinks_list[0]["sats"] if sinks_list else 0,
     }
@@ -1292,7 +1292,7 @@ TEMPLATE = """
       </div>
 
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>In (source)</th><th>Out (destination)</th><th style="width:30%">Sats routed</th><th>Fwds</th><th>Fee</th></tr></thead>
+        <thead><tr><th>In (source) — top 10 routes</th><th>Out (destination)</th><th style="width:30%">Sats routed</th><th>Fwds</th><th>Fee</th></tr></thead>
         <tbody>
           {% for p in sf.pairs %}
           <tr>
@@ -1311,7 +1311,7 @@ TEMPLATE = """
 
       <div class="grid-2" style="margin-top:18px;margin-bottom:0;">
         <div>
-          <div style="font-size:10px;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;">↓ Inbound — where sats come from</div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;">↓ Inbound — where sats come from <span style="text-transform:none;">(top 10)</span></div>
           {% for s in sf.sources %}
           <div class="flow-row">
             <div class="flow-row-top"><span class="truncate">{{ s.alias }}</span><span class="amount-muted">{{ "{:,}".format(s.sats) }}</span></div>
@@ -1320,7 +1320,7 @@ TEMPLATE = """
           {% endfor %}
         </div>
         <div>
-          <div style="font-size:10px;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;">↑ Outbound — where sats go to</div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;">↑ Outbound — where sats go to <span style="text-transform:none;">(top 10)</span></div>
           {% for s in sf.sinks %}
           <div class="flow-row">
             <div class="flow-row-top"><span class="truncate">{{ s.alias }}</span><span class="amount-muted">{{ "{:,}".format(s.sats) }}</span></div>
