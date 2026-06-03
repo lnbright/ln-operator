@@ -156,7 +156,7 @@ REBALANCE_BALANCED_RATIO_HIGH = 0.70 # ...and below 70% for time to count
 # rebalancer's job). Negative inbound is backward-compatible (older senders just
 # ignore it). POSITIVE inbound (a charge) is NOT — it breaks unupgraded senders
 # and LND refuses it by default — so it stays off unless deliberately enabled.
-INBOUND_FEE_ENABLED                = False  # master switch; ship outbound layers first
+INBOUND_FEE_ENABLED                = True   # master switch; negative-discount path only (INBOUND_CHARGE_PPM=0)
 INBOUND_DISCOUNT_MAX_PPM           = 200    # largest discount, applied when most depleted
 INBOUND_DISCOUNT_CLEAR_RATIO       = 0.35   # taper discount to 0 by here; engage zone is < this
 INBOUND_DISCOUNT_SAFETY_MARGIN_PPM = 10     # discount ≤ our_outbound − this (keeps summed fee > 0)
