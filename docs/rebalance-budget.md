@@ -1,19 +1,41 @@
 # Rebalance Budget
 
-Single-signal model. No tiers, no maturity gates. The most recent successful
-refill ppm for a channel drives both:
+The most recent successful refill ppm for a channel anchors both:
 
 - **The budget** (max fee we'll pay to refill it again)
 - **The outbound fee floor** (what we charge to recoup that cost + margin)
 
 ```
-budget   = (last_refill_ppm OR DEFAULT_BUDGET)
-            × (1 + ESCALATION_STEP × failures_since_last_success)
-            capped at REBALANCE_MAX_BUDGET_PPM
+escalated = (last_refill_ppm OR DEFAULT_BUDGET)
+             × (1 + ESCALATION_STEP × failures_since_last_success)
 
-fee_floor = last_refill_ppm × REBALANCE_FEE_MARGIN
+budget    = min(escalated, MAX_BUDGET)                     # if UNJUDGED
+budget    = min(escalated, earned_ppm × PROFIT_HORIZON, MAX_BUDGET)  # if JUDGED
+
+fee_floor = soft ratchet of last_refill_ppm × REBALANCE_FEE_MARGIN
             (0 if no successful refill yet — sigmoid alone)
 ```
+
+## Profitability gate (Layer 1)
+
+Escalation alone would happily pay 2500 ppm to refill a channel that only earns
+200 — the classic "buy expensive, sell cheap" bleed. The gate caps a **judged**
+channel's budget at `earned_ppm × REBALANCE_PROFIT_HORIZON` (1.25 ≈ break-even
+on the recoup price): never pay more to refill than the channel can earn back.
+
+- **Judged** = trailing OUT-volume ≥ `EARNED_PPM_MIN_VOLUME_SATS` (2M over
+  `EARNED_PPM_WINDOW_DAYS`), so `earned_ppm = Σ fee_earned / Σ amount_out` is
+  trustworthy. The cap applies.
+- **Unjudged** = too little volume to trust the ratio → **no cap, full
+  escalation** (capping a low-volume channel would kill price discovery and it'd
+  never bootstrap). The gate is opt-in by evidence.
+
+A judged channel whose escalation exceeds the cap is `profit_capped`; if it has
+also failed `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` (5) times it is `structural` —
+`plan_rebalances` drops it (refilling is a losing trade), `recompute_signals`
+stamps `structural_flag_ts` and fires a `structural_liquidity` alert, and the
+fix becomes a capital decision (open inbound / splice / resize). With Layer 3
+enabled it first gets a negative inbound-fee probe to pull organic refill.
 
 ## Bootstrap & drift recovery — failure escalation
 
@@ -38,6 +60,12 @@ After the first successful refill at `R` ppm:
 - `update_all_fees` posts that target on the next 2h pipeline run, subject
   to hysteresis (`SNAP_PPM` usually lets it through without waiting).
 - No 5-sample warmup, no median smoothing — one refill = one fee update.
+- The floor is a **soft ratchet**: it holds at `R × 1.1` while the channel
+  forwards, but if the channel goes idle and the floor is pricing it out, the
+  effective floor decays toward the market-clearing fee (half-life
+  `FLOOR_DECAY_HALFLIFE_DAYS`) so it can find a price that sells. A forward does
+  **not** snap it back up (no whipsaw); only a fresh refill re-arms it to the
+  full level. See [Fee Engine Internals](fee-engine-internals.md).
 
 ## Auto-Chunking
 

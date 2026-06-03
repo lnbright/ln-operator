@@ -152,6 +152,39 @@ class SoftFloorDecayTests(unittest.TestCase):
         self.assertEqual(r["floor_decay_started_ts"], self.NOW)
         self.assertEqual(r["floor_decay_anchor_ppm"], hard)
 
+    def test_forward_holds_decayed_level_no_snap_back(self):
+        # A channel decayed to 350 gets a forward (not idle) and NO fresh refill →
+        # it must HOLD 350, not snap back to the full recoup floor. High local so
+        # the sigmoid base is low enough that the floor is what shows through.
+        with patch("db.get_last_refill_ppm", return_value=553):
+            r = engine.compute_fee_target(
+                self._channel(0.9),
+                self._signals(floor_decay_anchor_ppm=350,
+                              floor_decay_started_ts=self.NOW - 86400,
+                              floor_armed_refill_ts=1000),
+                now=self.NOW, last_forward_ts=self.NOW - 3600,  # 1h ago → active
+                last_refill_ts=1000,                            # == armed → no fresh refill
+            )
+        hard = int(round(553 * config.REBALANCE_FEE_MARGIN))
+        self.assertEqual(r["target_ppm"], 350)
+        self.assertLess(r["target_ppm"], hard)            # did NOT snap back to full
+        self.assertEqual(r["floor_decay_anchor_ppm"], 350)
+
+    def test_fresh_refill_rearms_to_full_floor(self):
+        # A refill newer than the armed ts re-arms the floor to the full recoup level.
+        with patch("db.get_last_refill_ppm", return_value=553):
+            r = engine.compute_fee_target(
+                self._channel(0.9),
+                self._signals(floor_decay_anchor_ppm=350,
+                              floor_decay_started_ts=self.NOW - 86400,
+                              floor_armed_refill_ts=1000),
+                now=self.NOW, last_forward_ts=self.NOW - 10 * 86400,  # idle
+                last_refill_ts=self.NOW,                              # fresh refill
+            )
+        hard = int(round(553 * config.REBALANCE_FEE_MARGIN))
+        self.assertEqual(r["target_ppm"], hard)
+        self.assertEqual(r["floor_armed_refill_ts"], self.NOW)
+
     def test_disabled_when_halflife_zero(self):
         hard = int(round(1000 * config.REBALANCE_FEE_MARGIN))
         with patch("db.get_last_refill_ppm", return_value=1000), \

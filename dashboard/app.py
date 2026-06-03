@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     import db as _opdb
     from engine.rebalance_planner import get_channel_rebalance_budget as _get_budget
+    from config import REBALANCE_FEE_MARGIN as _FEE_MARGIN
     _GATE_OK = True
 except Exception:
     _GATE_OK = False
@@ -199,6 +200,11 @@ def get_channel_gate(chan_id):
         b = _get_budget(chan_id)
         sig = _opdb.get_channel_signals(chan_id)
         ep = b["earned_ppm"]
+        # Floor is "decaying" only when its persisted level sits BELOW the full
+        # recoup floor (last_refill × margin) — not merely because a floor exists.
+        lr = b.get("last_refill_ppm")
+        hard_floor = round(lr * _FEE_MARGIN) if lr else 0
+        level = sig.get("floor_decay_anchor_ppm")
         return {
             "earned_ppm": round(ep) if ep is not None else None,
             "judged": ep is not None,
@@ -207,7 +213,7 @@ def get_channel_gate(chan_id):
             "profit_capped": b["profit_capped"],
             "structural": b["structural"],
             "inbound_fee_ppm": int(sig.get("inbound_fee_ppm") or 0),
-            "floor_decaying": int(sig.get("floor_decay_started_ts") or 0) > 0,
+            "floor_decaying": bool(hard_floor and level is not None and level < hard_floor),
         }
     except Exception:
         return {}

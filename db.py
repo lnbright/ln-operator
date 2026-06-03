@@ -83,6 +83,7 @@ def _migrate_channel_signals_v2():
         adds = {
             "floor_decay_anchor_ppm": "REAL",
             "floor_decay_started_ts": "INTEGER NOT NULL DEFAULT 0",
+            "floor_armed_refill_ts":  "INTEGER NOT NULL DEFAULT 0",
             "structural_flag_ts":     "INTEGER NOT NULL DEFAULT 0",
             "inbound_fee_ppm":        "INTEGER NOT NULL DEFAULT 0",
             "inbound_fee_set_ts":     "INTEGER NOT NULL DEFAULT 0",
@@ -313,6 +314,7 @@ CREATE TABLE IF NOT EXISTS channel_signals (
     signals_updated_ts            INTEGER NOT NULL DEFAULT 0,
     floor_decay_anchor_ppm        REAL,
     floor_decay_started_ts        INTEGER NOT NULL DEFAULT 0,
+    floor_armed_refill_ts         INTEGER NOT NULL DEFAULT 0,
     structural_flag_ts            INTEGER NOT NULL DEFAULT 0,
     inbound_fee_ppm               INTEGER NOT NULL DEFAULT 0,
     inbound_fee_set_ts            INTEGER NOT NULL DEFAULT 0
@@ -652,6 +654,7 @@ def get_channel_signals(chan_id):
             "signals_updated_ts": 0,
             "floor_decay_anchor_ppm": None,
             "floor_decay_started_ts": 0,
+            "floor_armed_refill_ts": 0,
             "structural_flag_ts": 0,
             "inbound_fee_ppm": 0,
             "inbound_fee_set_ts": 0,
@@ -738,6 +741,21 @@ def get_channel_earned_ppm(chan_id, days=EARNED_PPM_WINDOW_DAYS):
     if vol < EARNED_PPM_MIN_VOLUME_SATS:
         return None, vol
     return (fees / vol * 1_000_000), vol
+
+
+def get_last_refill_ts(chan_id):
+    """Timestamp of the most recent SUCCESSFUL rebalance into this channel, or None.
+
+    Used by the soft-floor ratchet to detect a FRESH refill (a refill newer than
+    the one the floor is armed against) — the only event that re-arms the floor to
+    the full recoup level. A mere forward must not re-arm it."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT ts FROM rebalance_log
+            WHERE target_chan_id = ? AND success = 1 AND fee_ppm IS NOT NULL
+            ORDER BY ts DESC LIMIT 1
+        """, (chan_id,)).fetchone()
+    return int(row["ts"]) if row and row["ts"] else None
 
 
 def count_failures_since_last_success(chan_id):

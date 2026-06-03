@@ -6,10 +6,10 @@ dashboard tour.
 
 ## Fees
 - [Fee Formula](fee-formula.md) — the layered outbound-fee calculation + manual pins
-- [Fee Engine Internals](fee-engine-internals.md) — cadence, the four layers, hysteresis, corner cases
+- [Fee Engine Internals](fee-engine-internals.md) — cadence, the layers, hysteresis, soft-floor ratchet, profitability gate, inbound-fee ladder, corner cases
 
 ## Liquidity
-- [Rebalance Budget](rebalance-budget.md) — single-signal budget, failure escalation, chunking, fallback pairs
+- [Rebalance Budget](rebalance-budget.md) — budget, failure escalation, the profitability gate, chunking, fallback pairs
 - [Plan Command](plan-command.md) — tier-segmented peer ranking (centrality → diversity)
 
 ## Operations

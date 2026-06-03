@@ -76,21 +76,25 @@ def _edge_zone(local_ratio):
     return "mid"
 
 
-def compute_fee_target(channel, signals, now, last_forward_ts=None):
+def compute_fee_target(channel, signals, now, last_forward_ts=None, last_refill_ts=None):
     """Compute the target outbound fee for a channel + decide whether to broadcast.
 
-    The outbound floor is the last successful refill ppm × REBALANCE_FEE_MARGIN
-    (read live from rebalance_log). It is a HARD floor while the channel is
-    forwarding; once a channel sits idle (no forwards for FLOOR_DECAY_IDLE_SECONDS)
-    the *effective* floor decays toward the market-clearing fee so a channel the
-    floor has priced out can find a price that actually sells. The decay resets
-    to the full hard floor on the next forward or fresh refill (handled by the
-    caller, which clears floor_decay_started_ts). Sigmoid alone drives fees
-    before any refill history exists.
+    The outbound floor recoups refill cost (last refill ppm × REBALANCE_FEE_MARGIN).
+    It is a RATCHET, not a snap-back: it sits at the full recoup level while the
+    channel forwards, and relaxes toward the market-clearing fee only while the
+    channel is IDLE (no forwards for FLOOR_DECAY_IDLE_SECONDS), ratcheting DOWN.
+    Crucially it does NOT jump back up when a forward lands — that would whipsaw a
+    priced-out channel between a sellable price and an unsellable one. It is
+    re-armed to the full floor ONLY by a FRESH refill (a refill newer than the one
+    it's armed against = new cost to recoup); demand-driven upside is the market
+    multiplier's job. Sigmoid alone drives fees before any refill history exists.
+
+    State (persisted by the caller): floor_decay_anchor_ppm = the current floor
+    level (ratchet), floor_decay_started_ts = when the level was last updated,
+    floor_armed_refill_ts = the refill ts the floor is armed against.
 
     Returns dict with: target_ppm, base_ppm, mult, floor_ppm (effective),
-    hard_floor_ppm, source, reason, and the decay state to persist
-    (floor_decay_started_ts, floor_decay_anchor_ppm).
+    hard_floor_ppm, source, reason, and the ratchet state to persist.
     """
     chan_id = channel["chan_id"]
     local_ratio = channel["local_ratio"]
@@ -109,31 +113,37 @@ def compute_fee_target(channel, signals, now, last_forward_ts=None):
         adjusted = max(adjusted, base)
     market_clearing = adjusted
 
-    # Soft-floor decay — only while idle and only when the hard floor is the thing
-    # holding the fee above what the market is paying.
-    idle = (now - (last_forward_ts or 0)) > FLOOR_DECAY_IDLE_SECONDS
+    # Soft-floor RATCHET (see docstring): down while idle, hold while forwarding,
+    # re-arm to full only on a fresh refill.
+    prev_level    = signals.get("floor_decay_anchor_ppm")
+    prev_ts       = int(signals.get("floor_decay_started_ts") or 0)
+    prev_armed_ts = int(signals.get("floor_armed_refill_ts") or 0)
+    new_armed_ts  = prev_armed_ts
     decaying = False
-    new_decay_started = 0
-    new_decay_anchor = None
-    if hard_floor and idle and FLOOR_DECAY_HALFLIFE_DAYS > 0:
-        prev_started = int(signals.get("floor_decay_started_ts") or 0)
-        prev_anchor = signals.get("floor_decay_anchor_ppm")
-        # Keep the running clock only if it was already decaying against THIS
-        # floor; a fresh refill (different hard_floor) or first idle cycle re-anchors.
-        if prev_started and prev_anchor is not None and int(prev_anchor) == hard_floor:
-            started = prev_started
-        else:
-            started = now
-        age_days = max(0.0, (now - started) / 86400.0)
-        decay = 0.5 ** (age_days / FLOOR_DECAY_HALFLIFE_DAYS)
-        effective_floor = market_clearing + (hard_floor - market_clearing) * decay
-        # Never below the clearing fee nor the absolute min.
-        effective_floor = max(effective_floor, market_clearing, float(FLOOR_DECAY_MIN_PPM))
-        new_decay_started = started
-        new_decay_anchor = hard_floor
-        decaying = effective_floor < hard_floor
-    else:
+
+    if not hard_floor or FLOOR_DECAY_HALFLIFE_DAYS <= 0:
         effective_floor = float(hard_floor)
+        new_level = None
+    else:
+        idle = (now - (last_forward_ts or 0)) > FLOOR_DECAY_IDLE_SECONDS
+        fresh_refill = (last_refill_ts or 0) > prev_armed_ts
+        if prev_level is None or fresh_refill:
+            level = float(hard_floor)            # (re)arm to the full recoup floor
+            new_armed_ts = last_refill_ts or now
+        elif idle:
+            # Ratchet down toward the clearing fee by the time since last update.
+            dt_days = max(0.0, (now - prev_ts) / 86400.0) if prev_ts else 0.0
+            factor = 0.5 ** (dt_days / FLOOR_DECAY_HALFLIFE_DAYS)
+            level = market_clearing + (float(prev_level) - market_clearing) * factor
+        else:
+            level = float(prev_level)            # active: hold (no decay, no snap-up)
+        # Never below the clearing fee nor the absolute min; never above the floor.
+        level = min(max(level, market_clearing, float(FLOOR_DECAY_MIN_PPM)), float(hard_floor))
+        effective_floor = level
+        new_level = int(round(level))
+        decaying = new_level < hard_floor
+
+    new_level_ts = now if new_level is not None else 0
 
     target = max(adjusted, effective_floor)
     target = min(target, float(FEE_HARD_CEILING_PPM))
@@ -163,8 +173,9 @@ def compute_fee_target(channel, signals, now, last_forward_ts=None):
         "hard_floor_ppm": hard_floor,
         "source": source,
         "reason": reason,
-        "floor_decay_started_ts": new_decay_started,
-        "floor_decay_anchor_ppm": new_decay_anchor,
+        "floor_decay_started_ts": new_level_ts,
+        "floor_decay_anchor_ppm": new_level,
+        "floor_armed_refill_ts": new_armed_ts,
     }
 
 
@@ -262,6 +273,7 @@ def update_all_fees(dry_run=False):
             why = "pin enforced" if broadcast else "pin unchanged"
         else:
             last_forward_ts = db.get_last_forward_ts(chan_id)
+            last_refill_ts = db.get_last_refill_ts(chan_id)
             # Fast-drain bump (up-only): a depleted channel dropping forwards for
             # lack of liquidity gets an immediate market-mult bump THIS cycle, so
             # its resting fee climbs after the first bad cycle instead of waiting
@@ -279,23 +291,26 @@ def update_all_fees(dry_run=False):
                                  "(dropped forwards, INSUFFICIENT_BALANCE)",
                                  ch["peer_alias"], prev_mult, bumped)
 
-            target_info = compute_fee_target(ch, signals, now, last_forward_ts=last_forward_ts)
+            target_info = compute_fee_target(ch, signals, now,
+                                              last_forward_ts=last_forward_ts,
+                                              last_refill_ts=last_refill_ts)
             new_ppm = target_info["target_ppm"]
             reason = target_info["reason"]
             broadcast, why = _should_broadcast(
                 new_ppm, old_ppm, signals, ch["local_ratio"], now
             )
 
-            # Persist soft-floor decay state every run (not just on broadcast) so
-            # the idle-decay clock advances and resets independent of broadcasts.
+            # Persist soft-floor ratchet state every run (not just on broadcast) so
+            # the level ratchets/holds/re-arms independent of broadcasts.
             if not dry_run:
-                decay_state = {
+                ratchet_state = {
                     "floor_decay_started_ts": int(target_info.get("floor_decay_started_ts") or 0),
+                    "floor_armed_refill_ts": int(target_info.get("floor_armed_refill_ts") or 0),
                 }
-                anchor = target_info.get("floor_decay_anchor_ppm")
-                if anchor is not None:
-                    decay_state["floor_decay_anchor_ppm"] = anchor
-                db.upsert_channel_signals(chan_id, **decay_state)
+                level = target_info.get("floor_decay_anchor_ppm")
+                if level is not None:
+                    ratchet_state["floor_decay_anchor_ppm"] = level
+                db.upsert_channel_signals(chan_id, **ratchet_state)
 
             # Layer 3: inbound-fee decision (only when the feature is enabled —
             # otherwise inbound stays untouched and this is fully inert).

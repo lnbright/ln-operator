@@ -49,14 +49,22 @@ with estimated lost fees on empty channels (a rebalance signal):
 Runs unattended on a cron schedule. Four steps execute in sequence:
 
 **1. Fee adjustment** — Sets each channel's fee rate based on its local/remote
-balance ratio. Full channels get low fees to attract routing. Depleted channels
-get high fees to protect remaining liquidity. Base fee is always zero.
+balance ratio (sigmoid curve). Full channels get low fees to attract routing;
+depleted channels get high fees to protect remaining liquidity and to recoup
+refill cost. The refill-cost floor is a **soft ratchet** — it decays toward the
+market-clearing fee while a channel sits idle so it never gets priced out and
+stranded, and re-arms only on a fresh refill. Base fee is always zero.
 
 **2. Rebalancing** — Moves sats from overfull channels (>80% local) to depleted
 ones (<20% local) via circular self-payments through LND's Router SendPaymentV2.
-Each channel has its own fee budget based on earnings history. If the full amount
-can't route, it halves and retries down to 100k sats. If one source→target pair
-has no route, it tries alternative pairs before giving up.
+Each channel's fee budget is its refill history with failure escalation, **capped
+by a profitability gate**: for channels with enough traffic to judge, we never
+pay more to refill than the channel can earn back. Channels that can't be
+profitably refilled are flagged as a capital decision rather than ground on. If
+the full amount can't route, it halves and retries down to 100k sats; if one
+source→target pair has no route, it tries alternatives before giving up.
+(Optional, off by default: a node-level **inbound-fee** ladder that pulls organic
+refill with a negative inbound fee instead of paying for a circular rebalance.)
 
 **3. Routing sync** — Pulls new forwarding events from LND into SQLite using
 offset-based pagination. Also detects manual rebalances done via `lncli` and
@@ -136,9 +144,10 @@ ln-operator/
 ├── main.py              CLI entry — commands, display, orchestration
 ├── config.py            All tuneable settings
 ├── engine/              Channel-management engine (package)
-│   ├── fees.py             Sigmoid + hysteresis + market-mult recompute
-│   ├── rebalance_planner.py  Budget, candidate selection, plan generation
+│   ├── fees.py             Sigmoid + hysteresis + soft-floor ratchet + market-mult/fast-drain
+│   ├── rebalance_planner.py  Budget + profitability gate, candidate selection, plan generation
 │   ├── rebalance_executor.py Per-plan execution with chunked retry
+│   ├── liquidity_policy.py   Node-level decision ladder (rebalance / inbound discount / structural)
 │   ├── sync.py             Forwarding + manual-rebalance pull from LND
 │   └── monitor.py          Channel health report + alerts
 ├── advisor.py           Peer ranking (tier-segmented, centrality → diversity)
@@ -379,10 +388,10 @@ skimmable. Full index: [docs/README.md](docs/README.md).
 
 **Fees**
 - [Fee Formula](docs/fee-formula.md) — layered outbound-fee calculation + manual pins
-- [Fee Engine Internals](docs/fee-engine-internals.md) — cadence, the four layers, hysteresis, corner cases
+- [Fee Engine Internals](docs/fee-engine-internals.md) — cadence, the layers, hysteresis, soft-floor ratchet, profitability gate, inbound-fee ladder, corner cases
 
 **Liquidity**
-- [Rebalance Budget](docs/rebalance-budget.md) — single-signal budget, failure escalation, chunking, fallback pairs
+- [Rebalance Budget](docs/rebalance-budget.md) — budget, failure escalation, the profitability gate, chunking, fallback pairs
 - [Plan Command](docs/plan-command.md) — tier-segmented peer ranking (centrality → diversity)
 
 **Operations**

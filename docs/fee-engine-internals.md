@@ -14,9 +14,15 @@ Every 2h (cron):
   4. healthcheck
 
 Nightly (cron, separate line):
-  recompute_signals    ← refreshes per-channel market_multiplier and logs
-                          last_refill_ppm / failure counts for visibility
+  recompute_signals    ← refreshes per-channel market_multiplier, stamps the
+                          structural-liquidity flag, logs last_refill / earned
+                          ppm / failure counts for visibility
 ```
+
+The routine ±`MARKET_MULT_STEP` drift is nightly (slow baseline). The 2h loop
+adds only an *up-only fast-drain bump* (`MARKET_MULT_FASTDRAIN_STEP`) when a
+depleted channel is dropping forwards, so a fast drainer's resting fee climbs
+after the first bad cycle rather than waiting days for the nightly drift.
 
 Suggested cron line for the nightly job:
 
@@ -24,7 +30,9 @@ Suggested cron line for the nightly job:
 15 3 * * * cd /path/to/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1
 ```
 
-## The four layers
+## The outbound-fee stack
+
+The target outbound fee is `clamp(max(base × (1+mult), floor), 0, ceiling)`:
 
 1. **Sigmoid base** — `sigmoid_fee_ppm(local_ratio)`. Liquidity-driven base fee
    with clean plateaus near 0% and 100% local. No clamps needed at the edges —
@@ -33,13 +41,22 @@ Suggested cron line for the nightly job:
 2. **Market multiplier** — slow per-channel scalar in `channel_signals`. Each
    nightly run nudges `+MARKET_MULT_STEP` if the channel forwarded in the last
    24h, `-MARKET_MULT_STEP` if silent ≥ `MARKET_MULT_SILENT_DAYS`. Bounded by
-   `[MARKET_MULT_MIN, MARKET_MULT_MAX]`. Modulates the sigmoid: `adjusted =
-   base × (1 + mult)`.
+   `[MARKET_MULT_MIN, MARKET_MULT_MAX]` (−0.5..1.0). Modulates the sigmoid:
+   `adjusted = base × (1 + mult)`. Separately, the 2h loop applies an up-only
+   `MARKET_MULT_FASTDRAIN_STEP` bump when a depleted channel drops forwards
+   (`forward_fail_log` INSUFFICIENT_BALANCE) — fast up, slow down.
 
-3. **Rebalance-cost floor** — "don't sell outbound below what refilling costs."
-   Floor = `last_refill_ppm × REBALANCE_FEE_MARGIN`, read live from
-   `rebalance_log`. Activates on the first successful refill — no warmup, no
-   median smoothing. No refill history → no floor (sigmoid alone decides).
+3. **Soft rebalance-cost floor (ratchet)** — "recoup what refilling costs, but
+   don't price yourself into the ground." Floor = `last_refill_ppm ×
+   REBALANCE_FEE_MARGIN`, read live from `rebalance_log`, but applied as a
+   ratchet: it holds at the full level while the channel forwards, decays toward
+   the market-clearing fee while the channel sits **idle** (`FLOOR_DECAY_*`,
+   half-life `FLOOR_DECAY_HALFLIFE_DAYS`), and does **not** snap back up on a
+   forward (that would whipsaw a priced-out channel). It re-arms to the full
+   floor only on a **fresh refill** (detected via `floor_armed_refill_ts` vs the
+   latest refill ts). State lives in `channel_signals.floor_decay_anchor_ppm`
+   (current level), `floor_decay_started_ts` (last update), `floor_armed_refill_ts`.
+   No refill history → no floor (sigmoid alone decides).
 
 4. **Hard ceiling** — `FEE_HARD_CEILING_PPM` (5000). Last line of defense
    against runaway data. Matched to `REBALANCE_MAX_BUDGET_PPM` so a channel
@@ -57,20 +74,44 @@ A computed target only becomes a broadcast `channel_update` if:
 This is what actually prevents gossip spam. The sigmoid shape is for *what*
 fee, not *whether to broadcast*.
 
-## Rebalance budget & failure escalation
+## Rebalance budget, failure escalation & profitability gate
 
-`get_channel_rebalance_budget` reads `last_refill_ppm` and
-`failures_since_last_success` live from `rebalance_log` and returns:
+`get_channel_rebalance_budget` reads `last_refill_ppm`,
+`failures_since_last_success`, and `get_channel_earned_ppm` live from the DB and
+returns:
 
 ```
-budget = (last_refill OR DEFAULT_BUDGET) × (1 + STEP × failures)
-         capped at REBALANCE_MAX_BUDGET_PPM
+escalated = (last_refill OR DEFAULT_BUDGET) × (1 + STEP × failures)
+earned_ppm, out_vol = get_channel_earned_ppm(chan)    # None if out_vol < MIN_VOLUME
+
+if earned_ppm is None:                 # UNJUDGED — full escalation, no cap
+    budget = min(escalated, MAX_BUDGET)
+else:                                  # JUDGED — also cap at the recoup price
+    budget = min(escalated, earned_ppm × REBALANCE_PROFIT_HORIZON, MAX_BUDGET)
 ```
 
-This single formula handles bootstrap, drift, and re-bootstrap after a long
-idle period. There are no tiers, no maturity windows, no separate adaptive
-cap or revenue-ratio gate — the budget tracks the actual paid price, and
-failures walk it back up if the market has moved.
+Escalation handles bootstrap, drift, and re-bootstrap. **Layer 1 — the
+profitability gate** adds the second clamp: for channels with enough trailing
+OUT-volume to judge, never pay more to refill than the channel can earn back
+(`earned_ppm × 1.25` ≈ break-even on the recoup price). Channels we can't judge
+keep full escalation untouched — capping them would kill the price discovery
+escalation exists for. The returned dict carries `earned_ppm`, `profit_capped`,
+and `structural` (profit-capped *and* `failures ≥ REBALANCE_STRUCTURAL_FAIL_THRESHOLD`).
+`plan_rebalances` drops targets whose ladder verdict ≠ `rebalance`, so structural
+channels stop being ground; `recompute_signals` stamps `structural_flag_ts` and
+fires a one-time `structural_liquidity` alert (a capital decision — see Layer 3).
+
+## Node-level liquidity ladder (Layer 3 — `engine/liquidity_policy.py`)
+
+Off by default (`INBOUND_FEE_ENABLED=False`). For a depleted channel,
+`decide_channel_action` chooses: **rebalance** (profitable + a source exists) →
+**inbound_discount** (a negative inbound fee pulling organic refill when a paid
+rebalance isn't worth it; a rescue subsidy tapering to 0 by
+`INBOUND_DISCOUNT_CLEAR_RATIO`, capped at `our_outbound − safety_margin`) →
+**flag_structural** (organic defense failed over `INBOUND_DEFENSE_WINDOW_DAYS` →
+capital decision). Optional **inbound_charge** (positive inbound) on heavy sinks
+is off by default — positive inbound is not backward-compatible. Inbound and
+outbound are set in one `/v1/chanpolicy` POST.
 
 ## Corner cases & how each is handled
 
@@ -88,6 +129,10 @@ failures walk it back up if the market has moved.
 | Crossing 20%/80% boundary | Edge-zone crossing escapes cooldown |
 | Tiny fee drift (1-2 ppm) | Caught by tolerance — no broadcast |
 | Channel offline | Skipped — no policy update |
+| Refilled channel sits idle, floor prices it out | Floor decays toward the clearing fee (`floor↓`) so it can sell; doesn't sit dead at an unsellable price |
+| Decayed-floor channel forwards once | Floor HOLDS at the cleared level — does not snap back to full (no whipsaw); only a fresh refill re-arms it |
+| Judged channel, refill cost > earned×1.25 | `profit_capped` — budget held to the recoup price; if it keeps failing → `structural`, dropped from planning, capital alert |
+| Quiet/new channel, low out-volume | "unjudged" — no profit cap, full escalation (price discovery preserved) |
 
 ## When data is missing
 
