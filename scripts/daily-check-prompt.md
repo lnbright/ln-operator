@@ -64,14 +64,24 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
   capacity) and by `chan_in→chan_out` pair: count, total `amount_msat`, and the
   `failure_detail` mix. The two details that matter:
     - `INSUFFICIENT_BALANCE` — the outgoing channel was too depleted to forward.
-      This is lost routing revenue AND a hard rebalance signal: cross-reference
-      with `rebalance_log` (did we fail to refill that same channel?) and the
-      depleted-channel list. Quantify it — "Xm sats of forwards dropped on
-      <peer> for empty channel, Y attempts" is exactly the kind of line that
-      should drive Suggestions.
-    - `FEE_INSUFFICIENT` — the sender under-paid our outbound fee. If frequent on
-      a healthy channel, our fee may have just risen above what routes will bear;
-      note it against that channel's recent fee_updates.
+      Lost routing revenue, but the remedy depends on that channel's gate verdict
+      (`get_channel_rebalance_budget`) — route it accordingly, don't blanket-call
+      it "rebalance harder":
+        - channel is a **profitable refill target** (not profit_capped) → transient;
+          the gate/planner is already refilling it. Note it, don't action it.
+        - channel is **profit_capped / structural** → this is NOT recoverable by
+          rebalancing (we've decided refilling it loses money). The dropped-sat
+          total is the *capital* signal: it quantifies demand we're losing, which
+          justifies a capital suggestion (§4 — open inbound toward the destination,
+          splice, or resize). Quantify it: "Xm sats of forwards dropped on <peer>
+          for an empty channel that's structurally unprofitable to refill →
+          recommend <capital action>".
+    - `FEE_INSUFFICIENT` — the sender under-paid our outbound fee. More likely now
+      that Layer 2 raised the ceiling (SIGMOID_MAX_PPM 750) and the market-mult /
+      fast-drain bump push fees higher: frequent FEE_INSUFFICIENT on a channel
+      whose fee we just raised means we overshot the market-clearing price — note
+      it against that channel's recent fee_updates and flag whether the defence is
+      too aggressive (candidate for a faster floor decay / lower mult).
   If the table is empty, first check the daemon is actually up
   (`systemctl is-active lnd-htlc-monitor` — `pi` can read this) before assuming
   zero dropped forwards; a stopped daemon means a blind window, not a clean day.

@@ -1118,7 +1118,7 @@ TEMPLATE = """
   {% set ff = data.fwd_fail %}
   <div class="grid-1">
     <div class="card">
-      <div class="card-title">Forwarding Failures — Lost-Revenue Watch (24h)</div>
+      <div class="card-title">Forwarding Failures — Lost-Revenue Glance (24h)</div>
       {#
         Service badge tracks the htlc_monitor daemon. These events are live-only
         (LND persists them nowhere), so a dead daemon = a blind window, NOT a
@@ -1140,7 +1140,7 @@ TEMPLATE = """
       </div>
       {% if ff.liq_n > 0 %}
       <div class="stat-row">
-        <span class="stat-label">↳ Empty-channel (recoverable)</span>
+        <span class="stat-label">↳ Empty-channel (insufficient balance)</span>
         <span class="stat-value red">{{ ff.liq_n }} drops · {{ "{:,}".format(ff.liq_sats) }} sats</span>
       </div>
       <div class="stat-row">
@@ -1150,7 +1150,7 @@ TEMPLATE = """
       {% if ff.top %}
       <div class="stat-row">
         <span class="stat-label">Worst channel</span>
-        <span class="stat-value">{{ ff.top.alias }} <span style="color:var(--muted);font-size:11px;">({{ "{:,}".format(ff.top.sats) }} sats over {{ ff.top.n }} drops — refill it)</span></span>
+        <span class="stat-value">{{ ff.top.alias }} <span style="color:var(--muted);font-size:11px;">({{ "{:,}".format(ff.top.sats) }} sats over {{ ff.top.n }} drops)</span></span>
       </div>
       {% endif %}
       {% endif %}
@@ -1176,6 +1176,13 @@ TEMPLATE = """
       <div class="stat-row">
         <span class="stat-label">Last drop captured</span>
         <span class="stat-value" style="color:var(--muted)">{{ ff.last_event_ts | format_age }}</span>
+      </div>
+      {% endif %}
+      {% if ff.liq_n > 0 %}
+      <div style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.5;">
+        Glance only — the daily check diagnoses each dropped-forward channel against
+        its profit gate and suggests the fix: a refill target self-heals, a
+        profit-gated / structural one is a capital call (open inbound / splice).
       </div>
       {% endif %}
     </div>
