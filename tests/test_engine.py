@@ -548,9 +548,12 @@ class DecisionLadderTests(unittest.TestCase):
         self.assertEqual(r["action"], "rebalance")
 
     def test_inbound_disabled_collapses_to_none(self):
-        # depleted + structural would be inbound_discount, but disabled → none, 0.
+        # depleted + structural would be inbound_discount, but with inbound
+        # disabled it collapses to none, 0. Patch the flag explicitly so the test
+        # is hermetic regardless of the config default.
         b = {"profit_capped": True, "structural": True}
-        r = engine.decide_channel_action(self._ch(0.05), {}, b, 200, True, 0)
+        with patch("engine.liquidity_policy.INBOUND_FEE_ENABLED", False):
+            r = engine.decide_channel_action(self._ch(0.05), {}, b, 200, True, 0)
         self.assertEqual(r["action"], "none")
         self.assertEqual(r["inbound_fee_ppm"], 0)
 
