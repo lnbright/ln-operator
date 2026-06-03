@@ -49,8 +49,14 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
 - **fee_updates** — broadcasts: how many, ppm deltas, reasons (sigmoid /
   floor / market mult / pin)
 - **alerts** — anything fired in the last 24h
-- **channel_signals** — current market_multiplier per channel; flag any
-  pinned at MIN/MAX
+- **channel_signals** — current market_multiplier per channel (flag any pinned
+  at MIN/MAX); also the profitability-gate / liquidity-ladder state:
+  `structural_flag_ts` (≠0 → judged a structural liquidity gap), `inbound_fee_ppm`
+  (negative = a Layer-3 organic-refill discount is active), `floor_decay_started_ts`
+  (≠0 → the outbound floor is decaying toward the clearing fee on an idle channel).
+  For each channel also call `engine.get_channel_rebalance_budget(chan_id)` and read
+  `earned_ppm`, `profit_capped`, `structural`, `max_fee_ppm` — this is the live
+  verdict the planner acts on.
 - **backup_log** — verify the channel.backup heartbeat is fresh (<3h old)
 - **forward_fail_log** — forwards we DROPPED in the last 24h, captured live by
   the `htlc_monitor` daemon (LND persists these nowhere else). This is routing
@@ -168,7 +174,12 @@ quietly producing wrong numbers. Always check, every day.
        REBALANCE_MAX_BUDGET_PPM)`
   Then assert `row.fee_ppm ≤ budget_at_time × 1.1` (the chunk wrapper adds
   a 10% search buffer). Any overshoot is a bug — LND may have ignored the
-  fee_limit, or our plan passed a stale budget.
+  fee_limit, or our plan passed a stale budget. NOTE (Layer 1 profitability
+  gate): for a JUDGED channel the live budget is *additionally* capped at
+  `earned_ppm × REBALANCE_PROFIT_HORIZON`, so the actual budget is ≤ the formula
+  above — the `≤` assertion still holds (the cap only lowers it). Don't flag a
+  channel whose `fee_ppm` is *below* `budget_at_time`; that's the gate working,
+  not a bug.
 - All successful auto rows must satisfy `fee_ppm ≤ REBALANCE_MAX_BUDGET_PPM`
   as an absolute floor. Hard fail if violated.
 - Within a single rebalance attempt's chunks (same source→target within a
@@ -184,7 +195,17 @@ quietly producing wrong numbers. Always check, every day.
   `channel_signals`, and the `last_refill_ppm` from `rebalance_log` as of
   that timestamp. The reconstructed `target_ppm` should match the row's
   `new_ppm` within ±1 ppm (rounding). Any larger drift means either the
-  math changed or the broadcast bypassed the pipeline.
+  math changed or the broadcast bypassed the pipeline. CAVEAT — the outbound
+  fee is no longer a pure function of (local_ratio, market_mult, last_refill):
+  (a) the last-refill floor is SOFT — once a channel is idle ≥`FLOOR_DECAY_IDLE_SECONDS`
+  the effective floor decays toward the sigmoid/market clearing fee per
+  `channel_signals.floor_decay_started_ts`/`floor_decay_anchor_ppm` (so a row
+  *below* `last_refill × REBALANCE_FEE_MARGIN` with `source=floor-decaying` is
+  correct, not drift); (b) `SIGMOID_MAX_PPM` is 750; (c) a fast-drain cycle may
+  have bumped `market_multiplier` (persisted, so reading it back reconciles).
+  Reconstruct using `engine.compute_fee_target` itself (passing the channel's
+  `last_forward_ts` and the stored decay state) rather than the old closed-form,
+  or treat a `floor-decaying` row as expected.
 - For channels in `fee_overrides`, confirm every recent broadcast used the
   pinned ppm. A non-pin broadcast on a pinned channel is a bug.
 - Cross-check `fee_updates.new_ppm` against the live LND `/v1/fees` for
@@ -201,9 +222,19 @@ Report each discrepancy as a one-line `Issues:` entry. Quote actual values
 
 You're looking for things a human operator would notice as off:
 - Channels that are stuck depleted or overfull and aren't being rebalanced
+- **Structural / profit-gated channels** — any channel where
+  `get_channel_rebalance_budget` returns `structural=True` (or `structural_flag_ts`
+  is set, or a `structural_liquidity` alert fired): refilling it is a losing trade
+  (earns far below its refill cost, repeated failed refills). The planner has
+  stopped rebalancing it on purpose. Also note `profit_capped=True` channels whose
+  budget is now well below their market refill price — they'll likely keep failing
+  to refill. These are capital decisions; surface them in Suggestions (below).
 - Rebalance failures concentrated on one peer (route problem? fee escalation
   not catching up?)
-- Fee floors that look wrong vs the most recent successful refill ppm
+- Fee floors that look wrong vs the most recent successful refill ppm. Note that
+  the floor is now SOFT: a `floor_decay_started_ts`≠0 channel is intentionally
+  pricing its idle, refilled liquidity down toward the clearing fee — that's
+  correct, not a bug.
 - Inactive/offline channels still being chosen as rebalance sources
 - **Sat-flow anomalies / directional imbalance** (from the §1 in→out
   analysis): routes that dropped out vs their baseline, peers that are pure
@@ -261,6 +292,21 @@ Based on the day's data, think about whether to suggest:
 - Channels worth closing or resizing — a chronic pure-sink channel may want
   more inbound (rebalance budget / a sibling source), and a peer that neither
   sources nor sinks meaningful flow over 30d is a resize/close candidate.
+- **Capital action for structural channels (always surface these explicitly).**
+  For every channel flagged `structural` (from Diagnose), the tool has decided
+  rebalancing can't fix it — say so and give a concrete capital recommendation,
+  with numbers. Pick the option the data supports and explain why:
+    - **Add inbound** — open a new channel toward the destination this channel
+      feeds, or to a cheap inbound source that feeds it, or splice in capacity,
+      so the depleted side fills organically instead of by paid rebalances. Prefer
+      this when the channel still carries real outbound demand (forwards/INSUFFICIENT_BALANCE
+      drops) but can't be refilled cheaply.
+    - **Resize** — close and reopen smaller if it's oversized for its actual flow.
+    - **Close** — recover and redeploy the capital if it's a chronic dead-weight
+      sink that neither earns nor can be cheaply refilled.
+  Quote the evidence: `<peer> earns X ppm, refill needs ≫ that, N failed refills,
+  Ym sats of demand dropped — recommend <action> because <reason>`. Never recommend
+  force-closing a freshly-opened channel (see the inactive-channel guidance).
 
 Put these in the summary as `Suggestions:`. Do not edit config.py or open
 channels — these are human decisions.

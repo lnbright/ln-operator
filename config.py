@@ -51,7 +51,12 @@ FEE_BASE_MSAT = 0       # base fee per HTLC (0 = best practice)
 
 # Sigmoid curve — asymptotes of the liquidity-driven base fee
 SIGMOID_MIN_PPM   = 25        # local_ratio → 1.0 (drain)
-SIGMOID_MAX_PPM   = 250       # local_ratio → 0.0 (defend)
+SIGMOID_MAX_PPM   = 750       # local_ratio → 0.0 (defend). Lifted from 250: with
+                              # refill costs often ~1000+ ppm, a 250 ceiling can't
+                              # let a draining channel defend with price before a
+                              # paid rebalance fires. 750 ≈ 3× headroom, still well
+                              # below refill cost / FEE_HARD_CEILING_PPM so the
+                              # last-refill floor still does work above it.
 SIGMOID_K         = 8.0       # steepness; higher = sharper midpoint, flatter edges.
                               # K=8 gives clean plateaus near 0% and 100% local while
                               # staying roughly linear-ish through the healthy middle.
@@ -74,12 +79,30 @@ FEE_HYSTERESIS_EDGE_HIGH       = 0.80     # crossing into/out of this also escap
 
 # Market multiplier — slow-moving per-channel adjustment from observed demand
 MARKET_MULT_STEP        = 0.15     # how much to nudge per nightly recompute.
-                                   # 0.15 = full saturation (0→+2.0) in ~14 nights,
+                                   # 0.15 = full saturation (0→+1.0) in ~7 nights,
                                    # full deflation (0→-0.5) in ~4 nights.
 MARKET_MULT_MIN         = -0.5     # never lower base by more than 50%
-MARKET_MULT_MAX         = 2.0      # cap at 3× base (1 + 2.0)
+MARKET_MULT_MAX         = 1.0      # cap at 2× base (1 + 1.0). With SIGMOID_MAX_PPM=750
+                                   # the demand-amplified outbound max is 750×2=1500.
 MARKET_MULT_BUSY_HOURS  = 24       # forwards in last N hours → nudge up
 MARKET_MULT_SILENT_DAYS = 3        # no forwards for N days → nudge down
+
+# Fast-drain bump — the routine ±STEP drift above runs nightly (slow baseline).
+# Separately, the 2h fee loop applies an UP-ONLY emergency bump when a depleted
+# channel is dropping forwards for lack of liquidity (forward_fail_log
+# INSUFFICIENT_BALANCE), so a fast drainer's resting fee climbs after the FIRST
+# bad cycle instead of waiting days for the nightly drift. Up fast, down slow.
+MARKET_MULT_FASTDRAIN_STEP = 0.40  # market_multiplier up-nudge on a fast-drain cycle
+
+# ─── Soft outbound floor decay ───────────────────────────────────
+# The last-refill floor (last_refill × REBALANCE_FEE_MARGIN) is a HARD floor only
+# while the channel is forwarding. If a channel sits idle at/above the floor — the
+# floor pricing it out of its own market — the effective floor decays toward the
+# market-clearing fee so it can find a price that actually sells. Resets to the
+# full hard floor the instant a forward lands or a fresh refill changes last_refill.
+FLOOR_DECAY_HALFLIFE_DAYS = 7.0    # gap (hard_floor − clearing) halves every N idle days; 0 disables decay
+FLOOR_DECAY_IDLE_SECONDS  = 3 * 86400  # only decay after this much silence (matches MARKET_MULT_SILENT_DAYS)
+FLOOR_DECAY_MIN_PPM       = 25     # decay never drops the floor below this (absolute outbound floor)
 
 # ─── Rebalancing Thresholds ──────────────────────────────────────
 REBALANCE_LOW_THRESHOLD = 0.20    # below 20% local → depleted, needs sats in
@@ -103,9 +126,43 @@ REBALANCE_MAX_BUDGET_PPM           = 5000   # hard ceiling on what we'll ever pa
 REBALANCE_BUDGET_ESCALATION_STEP   = 0.20   # per consecutive failure since last success
 REBALANCE_FEE_MARGIN               = 1.1    # outbound fee floor = last_refill × this
 
+# ─── Profitability gate (Layer 1) ────────────────────────────────
+# Don't pay more to refill a channel than it can earn back. The escalation above
+# still bootstraps/discovers price freely; this caps it for channels we have
+# enough data to JUDGE. A judged channel's budget is capped at its trailing
+# earned-ppm × horizon (≈ how many fill/drain cycles we'll wait to recoup).
+# Unjudged channels (too little volume to trust the ratio) keep full escalation.
+EARNED_PPM_WINDOW_DAYS             = 21         # trailing window for per-channel earned-ppm
+EARNED_PPM_MIN_VOLUME_SATS         = 2_000_000  # min OUT-traffic to trust the ratio; below → unjudged
+REBALANCE_PROFIT_HORIZON           = 1.25       # judged budget cap = earned_ppm × this.
+                                                # ≈ break-even: only refill if demonstrated
+                                                # willingness-to-pay (earned_ppm) roughly covers
+                                                # the recoup price (refill × FEE_MARGIN). The 0.25
+                                                # over 1.0 allows for earned_ppm being measured at
+                                                # our older, lower outbound fees.
+REBALANCE_STRUCTURAL_FAIL_THRESHOLD= 5          # consecutive fails while profit-capped → flag structural
+
 # What counts as "balanced" for status reporting (no longer gates budget tiers)
 REBALANCE_BALANCED_RATIO = 0.30      # local must be above 30%...
 REBALANCE_BALANCED_RATIO_HIGH = 0.70 # ...and below 70% for time to count
+
+
+# ─── Node-level inbound fees + liquidity ladder (Layer 3) ────────
+# When a depleted channel can't be profitably rebalanced, defend it with a
+# NEGATIVE inbound fee (a discount) to attract organic refill traffic — cheaper
+# than a circular rebalance and it doesn't raise outbound / price out demand.
+# The discount is a rescue subsidy: largest when most depleted, tapering to 0 by
+# INBOUND_DISCOUNT_CLEAR_RATIO ("out of danger" — full refill to 50% stays the
+# rebalancer's job). Negative inbound is backward-compatible (older senders just
+# ignore it). POSITIVE inbound (a charge) is NOT — it breaks unupgraded senders
+# and LND refuses it by default — so it stays off unless deliberately enabled.
+INBOUND_FEE_ENABLED                = False  # master switch; ship outbound layers first
+INBOUND_DISCOUNT_MAX_PPM           = 200    # largest discount, applied when most depleted
+INBOUND_DISCOUNT_CLEAR_RATIO       = 0.35   # taper discount to 0 by here; engage zone is < this
+INBOUND_DISCOUNT_SAFETY_MARGIN_PPM = 10     # discount ≤ our_outbound − this (keeps summed fee > 0)
+INBOUND_CHARGE_PPM                 = 0      # positive inbound on heavy-sink sources; 0 = disabled (risky)
+INBOUND_HYSTERESIS_PPM             = 25     # min inbound-fee move before re-broadcast (gossip damping)
+INBOUND_DEFENSE_WINDOW_DAYS        = 14     # inbound-discount defense duration before flagging structural
 
 
 # ─── Channel Planning (plan command) ─────────────────────────────

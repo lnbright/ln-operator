@@ -124,10 +124,18 @@ def get_fee_report():
     return _get("/v1/fees")
 
 
-def update_channel_policy(channel_point, base_fee_msat, fee_rate_ppm, time_lock_delta=40):
+def update_channel_policy(channel_point, base_fee_msat, fee_rate_ppm, time_lock_delta=40,
+                          inbound_fee_rate_ppm=None, inbound_base_fee_msat=0):
     """Update fee policy for a specific channel.
-    
+
     channel_point format: "txid:output_index"
+
+    inbound_fee_rate_ppm: when not None, also set the channel's INBOUND fee
+    (signed; negative = a discount that attracts routing in through this channel).
+    LND ≥0.18 supports this; both inbound fields are signed int32. Default None
+    omits the field so existing callers are unchanged. NOTE on LND 0.20: an
+    omitted inbound_fee can reset inbound to 0, so when managing inbound fees
+    always pass the explicit intended value (0 to clear), never rely on omission.
     """
     txid, output_index = channel_point.split(":")
     data = {
@@ -139,6 +147,11 @@ def update_channel_policy(channel_point, base_fee_msat, fee_rate_ppm, time_lock_
         "fee_rate_ppm": str(fee_rate_ppm),
         "time_lock_delta": time_lock_delta,
     }
+    if inbound_fee_rate_ppm is not None:
+        data["inbound_fee"] = {
+            "fee_rate_ppm": int(inbound_fee_rate_ppm),
+            "base_fee_msat": int(inbound_base_fee_msat),
+        }
     return _post("/v1/chanpolicy", data)
 
 

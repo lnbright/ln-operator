@@ -17,9 +17,13 @@ from config import (
     REBALANCE_MAX_AMOUNT_RATIO,
     REBALANCE_DEFAULT_BUDGET_PPM, REBALANCE_MAX_BUDGET_PPM,
     REBALANCE_BUDGET_ESCALATION_STEP,
+    REBALANCE_PROFIT_HORIZON, REBALANCE_STRUCTURAL_FAIL_THRESHOLD,
 )
+import time
+
 import lnd_client
 import db
+from engine.liquidity_policy import decide_channel_action
 from logging_config import get_logger
 
 log = get_logger('engine.rebalance_planner')
@@ -28,19 +32,22 @@ log = get_logger('engine.rebalance_planner')
 def get_channel_rebalance_budget(chan_id):
     """Max fee ppm we'll pay to refill this channel.
 
-    Single-signal model — no tiers, no maturity gates:
+    Escalation (unchanged): bootstrap at REBALANCE_DEFAULT_BUDGET_PPM (or the last
+    refill ppm) and walk up by ESCALATION_STEP per consecutive failure, capped at
+    REBALANCE_MAX_BUDGET_PPM — this discovers price.
 
-      budget = (last_refill_ppm or DEFAULT_BUDGET)
-               × (1 + ESCALATION_STEP × failures_since_last_success)
-               capped at REBALANCE_MAX_BUDGET_PPM
-
-    Bootstrap: with no successful refill yet, starts at REBALANCE_DEFAULT_BUDGET_PPM
-    and walks up by ESCALATION_STEP per consecutive failure until a success lands.
-    Post-bootstrap: the same mechanism handles upward market drift — failures at the
-    last-known price escalate the budget until the new price is discovered.
+    Profitability gate (Layer 1): for channels with enough trailing OUT-volume to
+    JUDGE, cap the budget at earned_ppm × REBALANCE_PROFIT_HORIZON — never pay more
+    to refill than the channel can earn back within ~horizon fill/drain cycles.
+    Channels we can't judge (earned_ppm is None) keep full escalation untouched —
+    capping them would kill the price-discovery the escalation exists for.
+    A judged channel whose escalation exceeds the profit cap is `profit_capped`;
+    if it has also failed REBALANCE_STRUCTURAL_FAIL_THRESHOLD times it is
+    `structural` (rebalancing is the wrong tool — needs the Layer-3 ladder/capital).
     """
     last_refill = db.get_last_refill_ppm(chan_id)
     failures = db.count_failures_since_last_success(chan_id)
+    earned_ppm, out_volume = db.get_channel_earned_ppm(chan_id)
 
     if last_refill is None:
         base = REBALANCE_DEFAULT_BUDGET_PPM
@@ -49,10 +56,27 @@ def get_channel_rebalance_budget(chan_id):
         base = last_refill
         anchor = "last_refill"
 
-    budget = base * (1.0 + REBALANCE_BUDGET_ESCALATION_STEP * failures)
-    budget = min(int(round(budget)), REBALANCE_MAX_BUDGET_PPM)
+    escalated = base * (1.0 + REBALANCE_BUDGET_ESCALATION_STEP * failures)
+    escalated = int(round(escalated))
 
-    if failures > 0:
+    profit_cap = None
+    if earned_ppm is not None:
+        profit_cap = earned_ppm * REBALANCE_PROFIT_HORIZON
+
+    budget = escalated
+    if profit_cap is not None:
+        budget = min(budget, int(round(profit_cap)))
+    budget = min(budget, REBALANCE_MAX_BUDGET_PPM)
+
+    profit_capped = profit_cap is not None and escalated > profit_cap
+    structural = profit_capped and failures >= REBALANCE_STRUCTURAL_FAIL_THRESHOLD
+
+    if profit_capped:
+        reason = (f"{anchor} {base} ppm escalated {escalated} capped to "
+                  f"earn×{REBALANCE_PROFIT_HORIZON:g}={int(round(profit_cap))} ppm [profit gate]")
+        if structural:
+            reason += f" — STRUCTURAL ({failures} fails)"
+    elif failures > 0:
         reason = (f"{anchor} {base} ppm × (1 + {REBALANCE_BUDGET_ESCALATION_STEP:.0%}"
                   f" × {failures} fails) → {budget} ppm")
     else:
@@ -63,6 +87,11 @@ def get_channel_rebalance_budget(chan_id):
         "reason": reason,
         "last_refill_ppm": last_refill,
         "failures_since_success": failures,
+        "earned_ppm": earned_ppm,
+        "out_volume_sats": out_volume,
+        "escalated_ppm": escalated,
+        "profit_capped": profit_capped,
+        "structural": structural,
     }
 
 
@@ -154,6 +183,27 @@ def plan_rebalances(channels=None, force=None):
 
     # Use force target ratio if specified, otherwise use config default
     rebalance_target = force if force is not None else REBALANCE_TARGET
+
+    # Layer 1/3 gate: drop targets the liquidity ladder says we should NOT pay to
+    # refill (judged structurally unprofitable, or being defended with an inbound
+    # discount instead). This is where the profit gate actually stops the grind —
+    # the channel falls out of planning. `force` is an explicit operator override,
+    # so honour it and skip the gate. outbound_ppm doesn't affect the rebalance
+    # verdict, so 0 is fine here.
+    if force is None and needs_inbound:
+        now = int(time.time())
+        has_source = bool(needs_outbound)
+        kept = []
+        for ch in needs_inbound:
+            budget = get_channel_rebalance_budget(ch["chan_id"])
+            signals = db.get_channel_signals(ch["chan_id"])
+            act = decide_channel_action(ch, signals, budget, 0, has_source, now)
+            if act["action"] == "rebalance":
+                kept.append(ch)
+            else:
+                log.info("rebalance: skipping %s (%.0f%% local) — %s",
+                         ch["peer_alias"], ch["local_ratio"] * 100, act["reason"])
+        needs_inbound = kept
 
     log.info("rebalance: %d depleted, %d overfull channel(s) found",
              len(needs_inbound), len(needs_outbound))

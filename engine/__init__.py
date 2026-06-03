@@ -46,6 +46,10 @@ from engine.sync import (
 from engine.monitor import (
     get_channel_health_report,
 )
+from engine.liquidity_policy import (
+    decide_channel_action,
+    inbound_discount_ppm,
+)
 
 __all__ = [
     # fees
@@ -58,4 +62,6 @@ __all__ = [
     "chan_open_ts_from_id", "sync_forwarding_history", "sync_rebalances",
     # monitor
     "get_channel_health_report",
+    # liquidity policy (Layer 3)
+    "decide_channel_action", "inbound_discount_ppm",
 ]

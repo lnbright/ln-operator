@@ -25,10 +25,14 @@ from config import (
     FEE_HYSTERESIS_EDGE_LOW, FEE_HYSTERESIS_EDGE_HIGH,
     MARKET_MULT_STEP, MARKET_MULT_MIN, MARKET_MULT_MAX,
     MARKET_MULT_BUSY_HOURS, MARKET_MULT_SILENT_DAYS,
-    REBALANCE_FEE_MARGIN,
+    MARKET_MULT_FASTDRAIN_STEP,
+    FLOOR_DECAY_HALFLIFE_DAYS, FLOOR_DECAY_IDLE_SECONDS, FLOOR_DECAY_MIN_PPM,
+    REBALANCE_FEE_MARGIN, REBALANCE_HIGH_THRESHOLD,
+    INBOUND_FEE_ENABLED, INBOUND_HYSTERESIS_PPM,
 )
 import lnd_client
 import db
+from engine.liquidity_policy import decide_channel_action
 from logging_config import get_logger
 
 log = get_logger('engine.fees')
@@ -72,14 +76,21 @@ def _edge_zone(local_ratio):
     return "mid"
 
 
-def compute_fee_target(channel, signals, now):
+def compute_fee_target(channel, signals, now, last_forward_ts=None):
     """Compute the target outbound fee for a channel + decide whether to broadcast.
 
     The outbound floor is the last successful refill ppm × REBALANCE_FEE_MARGIN
-    (read live from rebalance_log). Activates after the first successful refill;
-    sigmoid alone drives fees before any refill history exists.
+    (read live from rebalance_log). It is a HARD floor while the channel is
+    forwarding; once a channel sits idle (no forwards for FLOOR_DECAY_IDLE_SECONDS)
+    the *effective* floor decays toward the market-clearing fee so a channel the
+    floor has priced out can find a price that actually sells. The decay resets
+    to the full hard floor on the next forward or fresh refill (handled by the
+    caller, which clears floor_decay_started_ts). Sigmoid alone drives fees
+    before any refill history exists.
 
-    Returns dict with: target_ppm, base_ppm, mult, floor_ppm, source, reason.
+    Returns dict with: target_ppm, base_ppm, mult, floor_ppm (effective),
+    hard_floor_ppm, source, reason, and the decay state to persist
+    (floor_decay_started_ts, floor_decay_anchor_ppm).
     """
     chan_id = channel["chan_id"]
     local_ratio = channel["local_ratio"]
@@ -88,7 +99,7 @@ def compute_fee_target(channel, signals, now):
     mult = float(signals.get("market_multiplier", 0.0) or 0.0)
 
     last_refill = db.get_last_refill_ppm(chan_id)
-    floor = int(round(last_refill * REBALANCE_FEE_MARGIN)) if last_refill else 0
+    hard_floor = int(round(last_refill * REBALANCE_FEE_MARGIN)) if last_refill else 0
 
     # Adjusted base with market multiplier. In the low-local defense zone,
     # the multiplier may never push the fee BELOW the sigmoid output — that
@@ -96,20 +107,51 @@ def compute_fee_target(channel, signals, now):
     adjusted = base * (1.0 + mult)
     if local_ratio < FEE_HYSTERESIS_EDGE_LOW:
         adjusted = max(adjusted, base)
+    market_clearing = adjusted
 
-    target = max(adjusted, float(floor))
+    # Soft-floor decay — only while idle and only when the hard floor is the thing
+    # holding the fee above what the market is paying.
+    idle = (now - (last_forward_ts or 0)) > FLOOR_DECAY_IDLE_SECONDS
+    decaying = False
+    new_decay_started = 0
+    new_decay_anchor = None
+    if hard_floor and idle and FLOOR_DECAY_HALFLIFE_DAYS > 0:
+        prev_started = int(signals.get("floor_decay_started_ts") or 0)
+        prev_anchor = signals.get("floor_decay_anchor_ppm")
+        # Keep the running clock only if it was already decaying against THIS
+        # floor; a fresh refill (different hard_floor) or first idle cycle re-anchors.
+        if prev_started and prev_anchor is not None and int(prev_anchor) == hard_floor:
+            started = prev_started
+        else:
+            started = now
+        age_days = max(0.0, (now - started) / 86400.0)
+        decay = 0.5 ** (age_days / FLOOR_DECAY_HALFLIFE_DAYS)
+        effective_floor = market_clearing + (hard_floor - market_clearing) * decay
+        # Never below the clearing fee nor the absolute min.
+        effective_floor = max(effective_floor, market_clearing, float(FLOOR_DECAY_MIN_PPM))
+        new_decay_started = started
+        new_decay_anchor = hard_floor
+        decaying = effective_floor < hard_floor
+    else:
+        effective_floor = float(hard_floor)
+
+    target = max(adjusted, effective_floor)
     target = min(target, float(FEE_HARD_CEILING_PPM))
     target_ppm = int(round(target))
 
-    if floor and floor >= adjusted:
-        source = "floor"
+    floor_ppm = int(round(effective_floor)) if hard_floor else 0
+    if hard_floor and effective_floor >= adjusted:
+        source = "floor-decaying" if decaying else "floor"
     elif abs(mult) > 0.01:
         source = "sigmoid+market"
     else:
         source = "sigmoid"
 
+    floor_note = f"floor={floor_ppm}"
+    if decaying:
+        floor_note += f"(↓from {hard_floor})"
     reason = (
-        f"sigmoid={base} mult={mult:+.2f} floor={floor} "
+        f"sigmoid={base} mult={mult:+.2f} {floor_note} "
         f"local={local_ratio:.2f} → {target_ppm} [{source}]"
     )
 
@@ -117,9 +159,12 @@ def compute_fee_target(channel, signals, now):
         "target_ppm": target_ppm,
         "base_ppm": base,
         "mult": mult,
-        "floor_ppm": floor,
+        "floor_ppm": floor_ppm,
+        "hard_floor_ppm": hard_floor,
         "source": source,
         "reason": reason,
+        "floor_decay_started_ts": new_decay_started,
+        "floor_decay_anchor_ppm": new_decay_anchor,
     }
 
 
@@ -180,6 +225,12 @@ def update_all_fees(dry_run=False):
             "fee_rate_ppm": int(item.get("fee_per_mil", 0)),
         }
 
+    # Whether any overfull channel exists to rebalance FROM — feeds the Layer-3
+    # ladder's rebalance-vs-defend decision (computed once, not per channel).
+    has_overfull_source = any(
+        c.get("active") and c["local_ratio"] > REBALANCE_HIGH_THRESHOLD for c in channels
+    )
+
     updates = []
     for ch in channels:
         chan_id = ch["chan_id"]
@@ -188,6 +239,10 @@ def update_all_fees(dry_run=False):
         old = current_fees.get(cp, {})
         old_ppm = old.get("fee_rate_ppm", 0)
         old_base = old.get("base_fee_msat", 0)
+        # Inbound-fee decision (Layer 3). Defaults keep inbound untouched; only the
+        # non-pin branch computes a real target, and only when the feature is on.
+        inbound_target = None   # None ⇒ omit from the chanpolicy POST (no inbound change)
+        inbound_changed = False
 
         pin = overrides.get(chan_id)
         if pin is not None:
@@ -206,12 +261,56 @@ def update_all_fees(dry_run=False):
             broadcast = (new_ppm != old_ppm) or (old_base != FEE_BASE_MSAT)
             why = "pin enforced" if broadcast else "pin unchanged"
         else:
-            target_info = compute_fee_target(ch, signals, now)
+            last_forward_ts = db.get_last_forward_ts(chan_id)
+            # Fast-drain bump (up-only): a depleted channel dropping forwards for
+            # lack of liquidity gets an immediate market-mult bump THIS cycle, so
+            # its resting fee climbs after the first bad cycle instead of waiting
+            # for the nightly ±STEP drift. The routine drift stays nightly.
+            if ch["local_ratio"] < FEE_HYSTERESIS_EDGE_LOW:
+                since_ts = int(signals.get("last_fee_update_ts") or 0) or (now - 7200)
+                if db.count_forward_fails(chan_id, since_ts) > 0:
+                    prev_mult = float(signals.get("market_multiplier", 0.0) or 0.0)
+                    bumped = min(MARKET_MULT_MAX, prev_mult + MARKET_MULT_FASTDRAIN_STEP)
+                    if bumped > prev_mult:
+                        signals["market_multiplier"] = bumped
+                        if not dry_run:
+                            db.upsert_channel_signals(chan_id, market_multiplier=bumped)
+                        log.info("fees: %s fast-drain bump mult %+.2f → %+.2f "
+                                 "(dropped forwards, INSUFFICIENT_BALANCE)",
+                                 ch["peer_alias"], prev_mult, bumped)
+
+            target_info = compute_fee_target(ch, signals, now, last_forward_ts=last_forward_ts)
             new_ppm = target_info["target_ppm"]
             reason = target_info["reason"]
             broadcast, why = _should_broadcast(
                 new_ppm, old_ppm, signals, ch["local_ratio"], now
             )
+
+            # Persist soft-floor decay state every run (not just on broadcast) so
+            # the idle-decay clock advances and resets independent of broadcasts.
+            if not dry_run:
+                decay_state = {
+                    "floor_decay_started_ts": int(target_info.get("floor_decay_started_ts") or 0),
+                }
+                anchor = target_info.get("floor_decay_anchor_ppm")
+                if anchor is not None:
+                    decay_state["floor_decay_anchor_ppm"] = anchor
+                db.upsert_channel_signals(chan_id, **decay_state)
+
+            # Layer 3: inbound-fee decision (only when the feature is enabled —
+            # otherwise inbound stays untouched and this is fully inert).
+            if INBOUND_FEE_ENABLED:
+                from engine.rebalance_planner import get_channel_rebalance_budget
+                budget_info = get_channel_rebalance_budget(chan_id)
+                action_info = decide_channel_action(
+                    ch, signals, budget_info, new_ppm, has_overfull_source, now)
+                inbound_target = action_info["inbound_fee_ppm"]
+                prev_inbound = int(signals.get("inbound_fee_ppm") or 0)
+                inbound_changed = abs(inbound_target - prev_inbound) >= INBOUND_HYSTERESIS_PPM
+                if inbound_changed:
+                    log.info("fees: %s inbound %+d → %+d ppm [%s]",
+                             ch["peer_alias"], prev_inbound, inbound_target,
+                             action_info["action"])
 
         change = {
             "chan_id": chan_id,
@@ -229,21 +328,33 @@ def update_all_fees(dry_run=False):
             "floor_ppm": target_info["floor_ppm"],
             "broadcast": broadcast,
             "broadcast_reason": why,
+            "inbound_ppm": inbound_target,
+            "inbound_changed": inbound_changed,
         }
 
-        if not broadcast:
+        # Outbound and inbound share one chanpolicy POST — broadcast if EITHER moved.
+        if not (broadcast or inbound_changed):
             log.debug("fees: %s skip — %s (target %d, current %d)",
                       ch["peer_alias"], why, new_ppm, old_ppm)
             continue
 
+        # When inbound fees are managed we must send the explicit inbound value on
+        # every POST (LND 0.20 resets an omitted inbound_fee to 0). Pins keep
+        # inbound untouched (operator-controlled outbound only).
+        manage_inbound = INBOUND_FEE_ENABLED and pin is None
+        inbound_arg = inbound_target if manage_inbound else None
+
         # INFO-level audit line for every broadcast so the log explains why
         # the fee moved (sigmoid / floor / pin) and how hysteresis allowed it.
-        log.info("fees: %s %d → %d ppm — %s [hysteresis: %s]",
-                 ch["peer_alias"], old_ppm, new_ppm, reason, why)
+        log.info("fees: %s %d → %d ppm%s — %s [hysteresis: %s]",
+                 ch["peer_alias"], old_ppm, new_ppm,
+                 f" inbound {inbound_arg:+d}" if inbound_arg is not None else "",
+                 reason, why)
 
         if not dry_run:
             try:
-                lnd_client.update_channel_policy(cp, FEE_BASE_MSAT, new_ppm)
+                lnd_client.update_channel_policy(
+                    cp, FEE_BASE_MSAT, new_ppm, inbound_fee_rate_ppm=inbound_arg)
                 change["applied"] = True
             except Exception as e:
                 change["applied"] = False
@@ -251,14 +362,19 @@ def update_all_fees(dry_run=False):
 
             db.save_fee_update(
                 chan_id, ch["peer_alias"], old_ppm, new_ppm,
-                old_base, FEE_BASE_MSAT, ch["local_ratio"], reason
+                old_base, FEE_BASE_MSAT, ch["local_ratio"], reason,
+                new_inbound_ppm=inbound_arg,
             )
-            # Stamp last_fee_update_ts + last_local_ratio for next-run hysteresis.
-            db.upsert_channel_signals(
-                chan_id,
-                last_fee_update_ts=now,
-                last_local_ratio=ch["local_ratio"],
-            )
+            # Stamp last_fee_update_ts + last_local_ratio for next-run hysteresis,
+            # and the inbound state when we manage it.
+            sig_update = {
+                "last_fee_update_ts": now,
+                "last_local_ratio": ch["local_ratio"],
+            }
+            if manage_inbound:
+                sig_update["inbound_fee_ppm"] = inbound_target
+                sig_update["inbound_fee_set_ts"] = now
+            db.upsert_channel_signals(chan_id, **sig_update)
         else:
             change["applied"] = "dry_run"
 
@@ -337,24 +453,51 @@ def recompute_all_signals():
         last_refill = db.get_last_refill_ppm(chan_id)
         failures = db.count_failures_since_last_success(chan_id)
 
+        # Layer 1: stamp the structural-liquidity flag when a channel is judged
+        # unprofitable to refill and keeps failing. First-stamp on entry, keep
+        # the original timestamp thereafter, clear when it recovers. Local import
+        # avoids a load-order cycle in engine/__init__.
+        from engine.rebalance_planner import get_channel_rebalance_budget
+        budget = get_channel_rebalance_budget(chan_id)
+        prev_flag = int(prev.get("structural_flag_ts") or 0)
+        structural_ts = (prev_flag or now) if budget["structural"] else 0
+        # Alert once, on entry into the structural state — refilling this channel
+        # is a losing trade; it needs a capital decision, not more rebalancing.
+        if budget["structural"] and not prev_flag:
+            alias = ch.get("peer_alias", chan_id[:12])
+            ep = budget["earned_ppm"]
+            db.save_alert(
+                "structural_liquidity",
+                f"{alias} structurally unprofitable to refill — earns "
+                f"{ep:.0f} ppm, refill needs ≫ that ({budget['failures_since_success']} "
+                f"fails). Consider more inbound / splice / close rather than rebalancing.",
+                channel_id=chan_id,
+            )
+
         db.upsert_channel_signals(
             chan_id,
             market_multiplier=mult,
             signals_updated_ts=now,
+            structural_flag_ts=structural_ts,
         )
         results.append({
             "chan_id": chan_id,
             "alias": ch.get("peer_alias", ""),
             "last_refill_ppm": last_refill,
             "failures_since_success": failures,
+            "earned_ppm": budget["earned_ppm"],
+            "profit_capped": budget["profit_capped"],
+            "structural": budget["structural"],
             "mult": mult,
             "mult_prev": prev_mult,
             "mult_reason": mult_reason,
         })
-        log.info("recompute_signals: %s last_refill=%s ppm failures=%d "
-                 "mult %+.2f → %+.2f (%s)",
+        log.info("recompute_signals: %s last_refill=%s ppm earned=%s ppm failures=%d "
+                 "mult %+.2f → %+.2f (%s)%s",
                  ch.get("peer_alias", chan_id[:12]),
                  last_refill if last_refill is not None else "none",
-                 failures, prev_mult, mult, mult_reason)
+                 f"{budget['earned_ppm']:.0f}" if budget["earned_ppm"] is not None else "unjudged",
+                 failures, prev_mult, mult, mult_reason,
+                 " [STRUCTURAL]" if budget["structural"] else "")
 
     return results

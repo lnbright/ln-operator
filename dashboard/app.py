@@ -35,6 +35,19 @@ try:
 except ImportError:
     pass
 
+# Reuse the engine's profitability-gate + per-channel signals so the dashboard
+# shows the exact same verdict the pipeline acts on (no re-implementation). These
+# are pure DB reads — no LND calls at import. Guarded so a missing dep never
+# breaks the (read-only) page.
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    import db as _opdb
+    from engine.rebalance_planner import get_channel_rebalance_budget as _get_budget
+    _GATE_OK = True
+except Exception:
+    _GATE_OK = False
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -175,6 +188,31 @@ def get_channel_perf(chan_id, days30):
     }
 
 
+def get_channel_gate(chan_id):
+    """Profitability-gate + liquidity-ladder verdict for a channel, straight from
+    the engine so the dashboard mirrors what the pipeline acts on. Returns {} if
+    the engine isn't importable or the lookup fails (page stays read-only/robust).
+    """
+    if not _GATE_OK:
+        return {}
+    try:
+        b = _get_budget(chan_id)
+        sig = _opdb.get_channel_signals(chan_id)
+        ep = b["earned_ppm"]
+        return {
+            "earned_ppm": round(ep) if ep is not None else None,
+            "judged": ep is not None,
+            "budget_ppm": b["max_fee_ppm"],
+            "budget_reason": b["reason"],
+            "profit_capped": b["profit_capped"],
+            "structural": b["structural"],
+            "inbound_fee_ppm": int(sig.get("inbound_fee_ppm") or 0),
+            "floor_decaying": int(sig.get("floor_decay_started_ts") or 0) > 0,
+        }
+    except Exception:
+        return {}
+
+
 # ─── Data gathering ──────────────────────────────────────────────
 
 def get_dashboard_data():
@@ -203,6 +241,7 @@ def get_dashboard_data():
         capacity  = int(ch.get("capacity", 0))
         local     = int(ch.get("local_balance", 0))
         ch["perf"]      = get_channel_perf(chan_id, days30)
+        ch["gate"]      = get_channel_gate(chan_id)
         ch["local_pct"] = round(local / capacity * 100, 1) if capacity > 0 else 0
         local_ppm, remote_ppm = get_remote_fee_ppm(chan_id, our_pubkey)
         ch["local_fee_ppm"]  = local_ppm
@@ -983,6 +1022,8 @@ TEMPLATE = """
             </td>
             <td style="font-size:11px;">
               {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }} <span style="color:var(--muted);font-size:9px;">ppm</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+              {% if ch.gate and ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="trailing earned ppm (revenue / out-volume)">earns {{ ch.gate.earned_ppm }}ppm</div>
+              {% elif ch.gate and ch.gate.judged is defined and not ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="too little out-volume to judge profitability — keeps full rebalance escalation">unjudged</div>{% endif %}
             </td>
             <td style="font-size:11px;">
               {% if ch.remote_fee_ppm is not none %}{{ ch.remote_fee_ppm }} <span style="color:var(--muted);font-size:9px;">ppm</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
@@ -1000,11 +1041,17 @@ TEMPLATE = """
               {% if perf.net_all != 0 %}{% if perf.net_all > 0 %}+{% endif %}{{ "{:,}".format(perf.net_all) }}{% else %}—{% endif %}
             </td>
             <td>
-              {% if not ch.active %}<span class="badge badge-red">offline</span>
-              {% elif ratio < 20 %}<span class="badge badge-red">depleted</span>
-              {% elif ratio > 80 %}<span class="badge badge-blue">saturated</span>
-              {% else %}<span class="badge badge-green">healthy</span>{% endif %}
-              {% if ch.private %}&nbsp;<span class="badge badge-muted">private</span>{% endif %}
+              {# Balance state (depleted/saturated/healthy) is already shown by the
+                 bar colour — the status column carries live, actionable signal only. #}
+              {% if not ch.active %}<span class="badge badge-red" title="peer offline — LND auto-reconnects when it returns">offline</span>{% endif %}
+              {% if ch.private %}<span class="badge badge-muted">private</span>{% endif %}
+              {% if ch.gate %}
+                {% if ratio < 20 and ch.gate.structural %}<span class="badge badge-red" title="{{ ch.gate.budget_reason }}">structural · needs capital</span>
+                {% elif ratio < 20 and ch.gate.profit_capped %}<span class="badge badge-yellow" title="{{ ch.gate.budget_reason }}">refill capped ≤{{ ch.gate.budget_ppm }}ppm</span>
+                {% elif ratio < 20 %}<span class="badge badge-green" title="profitable refill target — {{ ch.gate.budget_reason }}">refilling ≤{{ ch.gate.budget_ppm }}ppm</span>{% endif %}
+                {% if ch.gate.inbound_fee_ppm < 0 %}<span class="badge badge-blue" title="negative inbound fee pulling organic refill">inbound {{ ch.gate.inbound_fee_ppm }}ppm</span>{% endif %}
+                {% if ch.gate.floor_decaying %}<span class="badge badge-muted" title="outbound floor decaying toward clearing fee while idle">floor↓</span>{% endif %}
+              {% endif %}
             </td>
           </tr>
           {% endfor %}

@@ -23,7 +23,7 @@ import sqlite3
 import json
 import time
 from contextlib import contextmanager
-from config import DB_PATH
+from config import DB_PATH, EARNED_PPM_WINDOW_DAYS, EARNED_PPM_MIN_VOLUME_SATS
 
 
 def _migrate_rebalance_log():
@@ -66,12 +66,42 @@ def _migrate_drop_unused_columns():
                     conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
 
 
+def _migrate_channel_signals_v2():
+    """Add soft-floor-decay and inbound-fee state columns to channel_signals
+    (additive, idempotent). Also add fee_updates.new_inbound_ppm.
+
+    These back the fee-redesign layers:
+      - floor_decay_* : Layer 2 soft outbound floor (decays toward the clearing
+        fee while a channel sits idle at/above the last-refill floor).
+      - structural_flag_ts : Layer 1/3 — when a channel was judged a structural
+        liquidity gap (rebalance not profitable, organic refill failed).
+      - inbound_fee_* : Layer 3 — last broadcast inbound fee (signed; negative =
+        discount) and its timestamp for inbound hysteresis.
+    """
+    with get_conn() as conn:
+        cs = {row["name"] for row in conn.execute("PRAGMA table_info(channel_signals)")}
+        adds = {
+            "floor_decay_anchor_ppm": "REAL",
+            "floor_decay_started_ts": "INTEGER NOT NULL DEFAULT 0",
+            "structural_flag_ts":     "INTEGER NOT NULL DEFAULT 0",
+            "inbound_fee_ppm":        "INTEGER NOT NULL DEFAULT 0",
+            "inbound_fee_set_ts":     "INTEGER NOT NULL DEFAULT 0",
+        }
+        for col, decl in adds.items():
+            if col not in cs:
+                conn.execute(f"ALTER TABLE channel_signals ADD COLUMN {col} {decl}")
+        fu = {row["name"] for row in conn.execute("PRAGMA table_info(fee_updates)")}
+        if "new_inbound_ppm" not in fu:
+            conn.execute("ALTER TABLE fee_updates ADD COLUMN new_inbound_ppm INTEGER")
+
+
 def init_db():
     """Create all tables if they don't exist."""
     with get_conn() as conn:
         conn.executescript(SCHEMA)
     _migrate_rebalance_log()
     _migrate_drop_unused_columns()
+    _migrate_channel_signals_v2()
 
 
 @contextmanager
@@ -280,7 +310,12 @@ CREATE TABLE IF NOT EXISTS channel_signals (
     market_multiplier             REAL    NOT NULL DEFAULT 0.0,
     last_fee_update_ts            INTEGER NOT NULL DEFAULT 0,
     last_local_ratio              REAL,
-    signals_updated_ts            INTEGER NOT NULL DEFAULT 0
+    signals_updated_ts            INTEGER NOT NULL DEFAULT 0,
+    floor_decay_anchor_ppm        REAL,
+    floor_decay_started_ts        INTEGER NOT NULL DEFAULT 0,
+    structural_flag_ts            INTEGER NOT NULL DEFAULT 0,
+    inbound_fee_ppm               INTEGER NOT NULL DEFAULT 0,
+    inbound_fee_set_ts            INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -308,16 +343,19 @@ def save_channel_snapshot(channels: list[dict]):
 
 
 def save_fee_update(chan_id, peer_alias, old_ppm, new_ppm, old_base, new_base,
-                    local_ratio, reason=""):
-    """Log a fee policy change."""
+                    local_ratio, reason="", new_inbound_ppm=None):
+    """Log a fee policy change.
+
+    new_inbound_ppm: the inbound fee broadcast alongside the outbound change
+    (signed; negative = discount). None when inbound fees are disabled."""
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO fee_updates
             (chan_id, peer_alias, old_fee_ppm, new_fee_ppm, old_base_msat,
-             new_base_msat, local_ratio, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             new_base_msat, local_ratio, reason, new_inbound_ppm)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (chan_id, peer_alias, old_ppm, new_ppm, old_base, new_base,
-              local_ratio, reason))
+              local_ratio, reason, new_inbound_ppm))
 
 
 def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
@@ -612,6 +650,11 @@ def get_channel_signals(chan_id):
             "last_fee_update_ts": 0,
             "last_local_ratio": None,
             "signals_updated_ts": 0,
+            "floor_decay_anchor_ppm": None,
+            "floor_decay_started_ts": 0,
+            "structural_flag_ts": 0,
+            "inbound_fee_ppm": 0,
+            "inbound_fee_set_ts": 0,
         }
     return dict(row)
 
@@ -643,6 +686,20 @@ def get_last_forward_ts(chan_id):
     return row["ts"] if row and row["ts"] else None
 
 
+def count_forward_fails(chan_id, since_ts, detail="INSUFFICIENT_BALANCE"):
+    """Count forwards we DROPPED on this channel (as chan_out) since since_ts.
+
+    Defaults to INSUFFICIENT_BALANCE — the channel was too depleted to forward,
+    i.e. lost revenue and a hard "this channel is draining" signal. Used by the
+    2h fee loop to apply a fast-drain market-multiplier bump."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) AS n FROM forward_fail_log
+            WHERE chan_out = ? AND ts > ? AND failure_detail = ?
+        """, (chan_id, since_ts, detail)).fetchone()
+    return int(row["n"]) if row else 0
+
+
 def get_last_refill_ppm(chan_id):
     """Return the fee_ppm of the most recent SUCCESSFUL rebalance into this channel.
 
@@ -656,6 +713,31 @@ def get_last_refill_ppm(chan_id):
             ORDER BY ts DESC LIMIT 1
         """, (chan_id,)).fetchone()
     return int(row["fee_ppm"]) if row else None
+
+
+def get_channel_earned_ppm(chan_id, days=EARNED_PPM_WINDOW_DAYS):
+    """Trailing outbound earn-rate for a channel, as (earned_ppm, out_volume_sats).
+
+    We earn the fee on the OUTBOUND leg of a forward, so this groups on chan_out:
+    earned_ppm = Σ fee_earned_sats / Σ amount_out_sats × 1e6 over the window.
+
+    Returns (None, out_volume) when out_volume < EARNED_PPM_MIN_VOLUME_SATS — too
+    little traffic to trust the ratio. None is the "unjudged" sentinel the profit
+    gate keys off (it must NOT treat a quiet channel as unprofitable).
+    """
+    cutoff = int(time.time()) - days * 86400
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COALESCE(SUM(fee_earned_sats), 0) AS fees,
+                   COALESCE(SUM(amount_out_sats), 0) AS vol
+            FROM forwarding_log
+            WHERE chan_out = ? AND ts > ?
+        """, (chan_id, cutoff)).fetchone()
+    fees = int(row["fees"]) if row else 0
+    vol = int(row["vol"]) if row else 0
+    if vol < EARNED_PPM_MIN_VOLUME_SATS:
+        return None, vol
+    return (fees / vol * 1_000_000), vol
 
 
 def count_failures_since_last_success(chan_id):
@@ -704,5 +786,6 @@ else:
     try:
         _migrate_rebalance_log()
         _migrate_drop_unused_columns()
+        _migrate_channel_signals_v2()
     except Exception:
         pass  # DB may not exist yet

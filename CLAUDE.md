@@ -46,20 +46,47 @@
   `engine.update_all_fees` checks the table first; pinned channels use the
   stored ppm with reason `manual pin: N ppm` instead of `calculate_fee_ppm`.
   Set via `ln-operator overwrite_fee`, cleared via `ln-operator clear_fee`, shown by `status`.
-- **Single-signal budget + fee floor (no tiers)**: `last_refill_ppm` (most
-  recent successful rebalance into a channel) drives BOTH the rebalance
-  budget AND the outbound fee floor. Budget = `last_refill ×
-  (1 + 0.20 × failures_since_last_success)`, capped at 5000.
-  Outbound floor = `last_refill × REBALANCE_FEE_MARGIN`. Bootstrap from
-  `REBALANCE_DEFAULT_BUDGET_PPM = 500` when no history; failure escalation
-  handles both bootstrap and upward market drift. No PROVEN/DISCOVERY/DEADWEIGHT
-  tiers, no `earned_ppm × revenue_ratio`, no median/window smoothing. The old
-  `adaptive_cap_*` / `rebalance_cost_floor_*` channel_signals columns were
-  dropped (db.py `_migrate_drop_unused_columns`); channel_signals now holds
-  only `market_multiplier`, `last_fee_update_ts`, `last_local_ratio`,
-  `signals_updated_ts`.
+- **`last_refill_ppm` budget + fee floor, now profitability-gated (3 layers)**:
+  `last_refill_ppm` (most recent successful rebalance into a channel) still
+  anchors BOTH the rebalance budget and the outbound fee floor. Base budget =
+  `last_refill × (1 + 0.20 × failures_since_last_success)`, capped at 5000;
+  bootstrap `REBALANCE_DEFAULT_BUDGET_PPM = 500`. On top of that:
+  - **Layer 1 — profitability gate** (`get_channel_rebalance_budget`): for
+    channels with enough trailing OUT-volume to JUDGE (≥ `EARNED_PPM_MIN_VOLUME_SATS`),
+    the budget is also capped at `earned_ppm × REBALANCE_PROFIT_HORIZON` — never
+    pay more to refill than the channel earns back in ~horizon cycles. UNJUDGED
+    channels (`db.get_channel_earned_ppm` returns None) keep full escalation
+    untouched (capping them would kill price discovery). Budget dict carries
+    `earned_ppm`, `profit_capped`, `structural`. `plan_rebalances` drops targets
+    whose ladder verdict ≠ `rebalance`, so structural channels stop being ground.
+  - **Layer 2 — soft outbound floor + raised ceiling** (`compute_fee_target`):
+    `SIGMOID_MAX_PPM` is 750 (was 250) so a draining channel can defend with price.
+    The `last_refill × REBALANCE_FEE_MARGIN` floor is HARD while forwarding but
+    DECAYS toward the market-clearing fee once a channel sits idle
+    (`FLOOR_DECAY_*`), so a priced-out channel can find a sellable price; resets on
+    the next forward / fresh refill. A separate up-only fast-drain market-mult bump
+    (`MARKET_MULT_FASTDRAIN_STEP`, fired in the 2h loop on `forward_fail_log`
+    INSUFFICIENT_BALANCE) raises the resting fee after the first bad cycle; the
+    routine ±`MARKET_MULT_STEP` drift stays nightly.
+  - **Layer 3 — node-level inbound fees + ladder** (`engine/liquidity_policy.py`,
+    off by default `INBOUND_FEE_ENABLED=False`): a depleted channel that can't be
+    profitably rebalanced is defended with a NEGATIVE inbound fee (discount) to pull
+    organic refill — a rescue subsidy tapering to 0 by `INBOUND_DISCOUNT_CLEAR_RATIO`
+    (out of danger, not full target), capped at `our_outbound − safety_margin`.
+    `decide_channel_action` ladder: rebalance → inbound_discount → flag_structural
+    (alerts, capital decision) → optional inbound_charge on heavy sinks. Inbound +
+    outbound set in one `/v1/chanpolicy` POST; always send explicit inbound when
+    enabled (LND 0.20 resets an omitted `inbound_fee`).
+  No PROVEN/DISCOVERY/DEADWEIGHT tiers, no median/window smoothing. `channel_signals`
+  holds `market_multiplier`, `last_fee_update_ts`, `last_local_ratio`,
+  `signals_updated_ts`, plus (migration `_migrate_channel_signals_v2`)
+  `floor_decay_anchor_ppm`, `floor_decay_started_ts`, `structural_flag_ts`,
+  `inbound_fee_ppm`, `inbound_fee_set_ts`; `fee_updates` gained `new_inbound_ppm`.
   Knobs: `REBALANCE_DEFAULT_BUDGET_PPM`, `REBALANCE_MAX_BUDGET_PPM`,
-  `REBALANCE_BUDGET_ESCALATION_STEP`, `REBALANCE_FEE_MARGIN`.
+  `REBALANCE_BUDGET_ESCALATION_STEP`, `REBALANCE_FEE_MARGIN`, `EARNED_PPM_WINDOW_DAYS`,
+  `EARNED_PPM_MIN_VOLUME_SATS`, `REBALANCE_PROFIT_HORIZON`,
+  `REBALANCE_STRUCTURAL_FAIL_THRESHOLD`, `SIGMOID_MAX_PPM`, `FLOOR_DECAY_*`,
+  `MARKET_MULT_FASTDRAIN_STEP`, `INBOUND_*`.
 
 ## LND Access
 - REST: https://127.0.0.1:9000
