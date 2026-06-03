@@ -1178,13 +1178,6 @@ TEMPLATE = """
         <span class="stat-value" style="color:var(--muted)">{{ ff.last_event_ts | format_age }}</span>
       </div>
       {% endif %}
-      {% if ff.liq_n > 0 %}
-      <div style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.5;">
-        Glance only — the daily check diagnoses each dropped-forward channel against
-        its profit gate and suggests the fix: a refill target self-heals, a
-        profit-gated / structural one is a capital call (open inbound / splice).
-      </div>
-      {% endif %}
     </div>
   </div>
   {% endif %}
