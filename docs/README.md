@@ -7,6 +7,7 @@ dashboard tour.
 ## Fees
 - [Fee Formula](fee-formula.md) — the layered outbound-fee calculation + manual pins
 - [Fee Engine Internals](fee-engine-internals.md) — cadence, the layers, hysteresis, soft-floor ratchet, profitability gate, inbound-fee ladder, corner cases
+- [How an Idle Channel Finds a Sellable Price](idle-channel-pricing.md) — walkthrough of floor decay, the market multiplier, the clearing target, freeze-on-forward, and the broadcast gate
 
 ## Liquidity
 - [Rebalance Budget](rebalance-budget.md) — budget, failure escalation, the profitability gate, chunking, fallback pairs
