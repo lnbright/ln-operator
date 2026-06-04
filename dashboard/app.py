@@ -299,6 +299,25 @@ def get_dashboard_data():
                CASE WHEN COALESCE(reason,'') LIKE 'manual pin%' THEN 'pin' ELSE 'auto' END as source
         FROM fee_updates ORDER BY ts DESC LIMIT 10
     """)
+    # Attribute each update to the layer that set it. Auto rows carry the
+    # winning layer as a trailing [tag] in the reason string (e.g.
+    # "...→ 2669 [floor-decaying]"); pins are flagged by the query above.
+    # Falls back to a plain "auto" badge for legacy rows with no [tag].
+    _layer_style = {
+        "pin":            ("📌 pin",      "badge-blue"),
+        "floor-decaying": ("floor ↓",     "badge-yellow"),
+        "floor":          ("floor",       "badge-yellow"),
+        "sigmoid+market": ("sigmoid+mkt", "badge-muted"),
+        "sigmoid":        ("sigmoid",     "badge-muted"),
+    }
+    for u in data["fee_updates"]:
+        if u["source"] == "pin":
+            tag = "pin"
+        else:
+            r = u["reason"]
+            lo, hi = r.rfind("["), r.rfind("]")
+            tag = r[lo + 1:hi] if 0 <= lo < hi else "auto"
+        u["layer"], u["layer_class"] = _layer_style.get(tag, (tag or "auto", "badge-muted"))
 
     data["alerts"] = db_all("""
         SELECT ts, alert_type, message
@@ -1417,10 +1436,7 @@ TEMPLATE = """
               {% else %}<span style="color:var(--green)">↓ {{ u.new_fee_ppm }} ppm</span>{% endif %}
             </td>
             <td style="color:var(--muted);">{{ "%.0f"|format(u.local_ratio * 100) }}%</td>
-            <td>
-              {% if u.source == 'pin' %}<span class="badge badge-blue" title="{{ u.reason }}">📌 pin</span>
-              {% else %}<span class="badge badge-muted">auto</span>{% endif %}
-            </td>
+            <td><span class="badge {{ u.layer_class }}" title="{{ u.reason }}">{{ u.layer }}</span></td>
           </tr>
           {% endfor %}
         </tbody>
