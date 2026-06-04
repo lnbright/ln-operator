@@ -100,7 +100,7 @@ MARKET_MULT_FASTDRAIN_STEP = 0.40  # market_multiplier up-nudge on a fast-drain 
 # floor pricing it out of its own market — the effective floor decays toward the
 # market-clearing fee so it can find a price that actually sells. Resets to the
 # full hard floor the instant a forward lands or a fresh refill changes last_refill.
-FLOOR_DECAY_HALFLIFE_DAYS = 7.0    # gap (hard_floor − clearing) halves every N idle days; 0 disables decay
+FLOOR_DECAY_HALFLIFE_DAYS = 3.0    # gap (hard_floor − clearing) halves every N idle days; 0 disables decay
 FLOOR_DECAY_IDLE_SECONDS  = 3 * 86400  # only decay after this much silence (matches MARKET_MULT_SILENT_DAYS)
 FLOOR_DECAY_MIN_PPM       = 25     # decay never drops the floor below this (absolute outbound floor)
 
