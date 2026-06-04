@@ -1,5 +1,5 @@
 #!/bin/bash
-# Daily LN node health check — invoked from cron at 09:00 Europe/London.
+# Daily LN node health check — invoked from cron (e.g. once each morning).
 # Runs claude headless against scripts/daily-check-prompt.md. The prompt
 # tells claude to write its exec summary to /tmp/daily-check-summary.txt and
 # print it to stdout; this wrapper parses the JSON result for cost/duration/
@@ -8,10 +8,11 @@
 
 set -u  # don't set -e: we want the log line even if claude exits non-zero
 
-REPO=/home/pi/ln-operator
+# Repo root: override with LN_OPERATOR_REPO, else derive from this script's path.
+REPO="${LN_OPERATOR_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 LOG=$REPO/logs/daily-check.log
 PROMPT=$REPO/scripts/daily-check-prompt.md
-CLAUDE=/usr/bin/claude
+CLAUDE="${CLAUDE_BIN:-claude}"  # resolved on PATH; override with CLAUDE_BIN
 SUMMARY=/tmp/daily-check-summary.txt
 JSON=/tmp/daily-check-result.json
 
