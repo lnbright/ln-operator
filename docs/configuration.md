@@ -51,7 +51,7 @@ Key settings in `config.py`:
 ## Soft outbound floor decay (Layer 2)
 | Setting | Default | |
 |---------|---------|---|
-| `FLOOR_DECAY_HALFLIFE_DAYS` | 7.0 | Idle floor halves toward the clearing fee every N days; 0 disables decay |
+| `FLOOR_DECAY_HALFLIFE_DAYS` | 3.0 | Idle floor halves toward the clearing fee every N days; 0 disables decay |
 | `FLOOR_DECAY_IDLE_SECONDS` | 259200 | Only decay after this much silence (3d) |
 | `FLOOR_DECAY_MIN_PPM` | 25 | Decay never drops the floor below this |
 
