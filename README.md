@@ -6,39 +6,7 @@ and alerting — with a web dashboard for real-time visibility.
 
 Built for home node operators running LND on a Raspberry Pi or similar hardware.
 
----
-
-## Dashboard
-
-A single-page Flask app (port 4000, no auth — Tailscale/LAN only) giving
-real-time visibility into node health, liquidity, routing, and profit/loss.
-
-**Sat Flow — where routed sats come from and go to** (in→out pairs by volume,
-plus inbound/outbound rankings; 30d / 7d / all-time selector):
-
-![Sat Flow card](docs/screenshots/03-sat-flow.png)
-
-**At-a-glance node health** — sync, channels, Bitcoin backend, watchtowers:
-
-![Node overview](docs/screenshots/01-overview.png)
-
-**Total funds controlled + per-channel health** — balance bars, your/their
-fees, 30d revenue, rebalance cost, and net P/L per channel:
-
-![Balance and channel details](docs/screenshots/02-balance-channels.png)
-
-**Routing events + daily fee revenue:**
-
-![Routing events and daily revenue](docs/screenshots/04-routing-revenue.png)
-
-**Rebalance history (auto + manual) + recent fee updates:**
-
-![Rebalance history and fee updates](docs/screenshots/05-rebalance-fees.png)
-
-**Forwarding-failure lost-revenue watch** — dropped forwards split by cause,
-with estimated lost fees on empty channels (a rebalance signal):
-
-![Forwarding failures](docs/screenshots/06-forwarding-failures.png)
+Visit **[www.lnbright.com](https://www.lnbright.com)** for more info.
 
 ---
 
@@ -88,46 +56,14 @@ No external API dependencies — everything from your own LND node.
 
 ### Dashboard — Web Interface
 
-Single-page Flask app showing live LND data and historical SQLite data:
-node status, watchtower health, channel health with balance bars and
-profit/loss, daily revenue chart, sat-flow routing map, rebalance history
-(auto + manual), fee updates, forwarding-failure lost-revenue watch,
-alerts, payments, and invoices.
+Single-page Flask app (port 4000, Tailscale/LAN only) showing live LND data and
+historical SQLite data: node status, watchtower health, per-channel balance bars
+and profit/loss, daily revenue chart, the Sat Flow routing map, rebalance history
+(auto + manual), fee updates, the forwarding-failure lost-revenue watch, alerts,
+payments, and invoices.
 
-The channel table shows local and remote outbound fees side-by-side,
-pulled per-channel from `/v1/graph/edge/{chan_id}` so you can see at a
-glance whether a peer is undercharging or overcharging relative to you.
-
-The **Sat Flow** card answers "where do routed sats come from and where do
-they go?" It reads `forwarding_log` (every routed HTLC records both the
-inbound and outbound channel) and shows three views of the same data over a
-selectable window (30d / 7d / all time): the top in→out peer **pairs**
-ranked by volume routed (with a bar, forward count, and fee earned), plus
-ranked **inbound** (where liquidity enters) and **outbound** (where it
-leaves) bar-lists. **In** and **Out** dropdowns filter every view to a single
-channel by peer alias, so you can drill into one peer ("where do sats coming
-in from Boltz go?" or "where did the sats leaving via LNBiG come from?").
-Channel ids are resolved to peer aliases from the live channel list; channels
-closed since a flow occurred show as raw scids, most visible under "all time".
-
-The watchtower card reports tower count, deactivated count, lifetime
-backups delivered, pending/failed counters, and an overall health
-badge. It requires `wtclient.active=1` in `lnd.conf` (LND only reads
-the config at startup, so add it then restart `lnd`); otherwise the
-card shows "wtclient disabled" in red. Note that
-`active_session_candidate` is LND's admin flag, not a liveness probe —
-a tower may still be backing up state on existing sessions even when
-flagged inactive.
-
-Health badge: **red** when wtclient is disabled, no towers are
-configured, or any backup has permanently failed; **yellow** when
-towers exist but none are active (all deactivated) or the status read
-errors; **green** otherwise. Pending is shown as a number but does not
-affect the badge — a transient `pending=1` is normal when a session
-fills its 1024-update cap and LND negotiates a fresh one, so it is not
-treated as a fault. Multiple towers can be configured for failover, but
-LND assigns each backup to a single tower rather than mirroring every
-update to all of them.
+See the **[Dashboard deep dive](docs/dashboard.md)** for a card-by-card tour with
+screenshots, the Sat Flow drill-downs, and the watchtower health-badge logic.
 
 ### Status — CLI Overview
 
@@ -273,13 +209,33 @@ ln-operator backup [--trigger path|timer|manual] # rsync channel.backup to the c
 
 ### Crontab
 
-```
+```cron
 # Fast loop — fees, rebalances, sync, healthcheck
 0 */2 * * * cd /path/to/ln-operator && ./ln-operator pipeline 2>&1
 
 # Nightly — refresh slow market signals (market multiplier per channel)
 15 3 * * * cd /path/to/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1
 ```
+
+These two lines are all the automation the node needs. The optional AI
+daily-check agent is a **separate, opt-in** cron line (off by default — see the
+[Security](#security) section and [docs/daily-check.md](docs/daily-check.md)
+before enabling). It is gated by an env flag set **on the cron line itself**, and
+should run with its own read-only macaroon:
+
+```cron
+# Daily at 09:00 — optional AI health-check agent (OFF unless the flag is set).
+# The opt-in flag and read-only macaroon are set inline so they apply to this
+# job only. Use absolute paths — cron has a minimal PATH and no shell profile.
+0 9 * * * LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1 \
+  DAILY_CHECK_LND_MACAROON=/home/youruser/.lnd-macaroons/ln-operator-readonly.macaroon \
+  /path/to/ln-operator/scripts/daily-check.sh >> /path/to/ln-operator/logs/daily-check.log 2>&1
+```
+
+Drop the `LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1` (or the whole line) to disable it —
+without the flag the script logs `disabled` and exits 0. The agent needs the
+`claude` CLI on `PATH` (override with `CLAUDE_BIN`) and Telegram configured for
+delivery.
 
 ### Dashboard
 
@@ -306,7 +262,8 @@ sudo systemctl enable --now lnd-dashboard.service
 ```
 
 The daily-check AI agent is *not* a systemd service — it runs from cron and is
-off by default. See [docs/daily-check.md](docs/daily-check.md).
+off by default. See the [Crontab](#crontab) section above for its full cron line,
+and [docs/daily-check.md](docs/daily-check.md) for the details.
 
 ---
 
@@ -393,6 +350,9 @@ skimmable. Full index: [docs/README.md](docs/README.md).
 **Liquidity**
 - [Rebalance Budget](docs/rebalance-budget.md) — budget, failure escalation, the profitability gate, chunking, fallback pairs
 - [Plan Command](docs/plan-command.md) — tier-segmented peer ranking (centrality → diversity)
+
+**Interface**
+- [Dashboard deep dive](docs/dashboard.md) — card-by-card tour with screenshots, Sat Flow drill-downs, and the watchtower health-badge logic
 
 **Operations**
 - [Daily Check](docs/daily-check.md) — the optional, off-by-default AI health-check agent
