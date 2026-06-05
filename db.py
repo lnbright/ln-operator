@@ -214,6 +214,18 @@ CREATE TABLE IF NOT EXISTS forward_fail_log (
 );
 CREATE INDEX IF NOT EXISTS idx_forward_fail_ts ON forward_fail_log(ts);
 
+-- ─── Knob history (outcome attribution) ─────────────────────────
+-- One row per *change* to the config knob set (config.knob_snapshot()),
+-- stamped at the start of every CLI run. The knobs live when any
+-- fee_updates / rebalance_log row was written are the latest knob_history
+-- row with ts <= that row's ts. Rows are tiny and only appear when a knob
+-- actually changes, so this stays a handful of rows per year.
+CREATE TABLE IF NOT EXISTS knob_history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    knobs_json TEXT NOT NULL
+);
+
 -- ─── Sync state (persists last-seen LND index between runs) ─────
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
@@ -379,6 +391,23 @@ def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
         """, (source_chan, target_chan, source_alias, target_alias,
               amount, fee_paid, fee_ppm, int(success), failure_reason, duration,
               payment_hash, budget_ppm))
+
+
+def record_knob_snapshot(knobs: dict):
+    """Stamp the active knob set into knob_history — only if it changed.
+
+    Called at the start of every CLI run with config.knob_snapshot(). Serialised
+    with sorted keys so comparison against the latest row is byte-stable; a new
+    row is written only when a knob value actually differs (or on first run)."""
+    knobs_json = json.dumps(knobs, sort_keys=True)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT knobs_json FROM knob_history ORDER BY ts DESC, id DESC LIMIT 1"
+        ).fetchone()
+        if row is None or row["knobs_json"] != knobs_json:
+            conn.execute(
+                "INSERT INTO knob_history (knobs_json) VALUES (?)", (knobs_json,)
+            )
 
 
 def save_forwarding_events(events: list[dict]):

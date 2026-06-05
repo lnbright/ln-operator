@@ -1063,6 +1063,11 @@ def main():
     # Initialise database
     db.init_db()
 
+    # Stamp the active knob set (writes only when a knob changed) so logged
+    # fee/rebalance outcomes can be attributed to the config that produced them
+    import config
+    db.record_knob_snapshot(config.knob_snapshot())
+
     if args.command == "plan":
         cmd_plan(args)
     elif args.command == "adjust_fees":

@@ -189,3 +189,42 @@ ANCHOR_RESERVE_MAX = 100_000             # LND's hard cap
 # ─── External Fallbacks ─────────────────────────────────────────
 MEMPOOL_API = "https://mempool.space/api"  # fee estimate fallback
 ONEML_API = "https://1ml.com"              # alias enrichment
+
+
+# ─── Knob snapshot (outcome attribution) ─────────────────────────
+# Every income-relevant tuneable, stamped into knob_history by each run so a
+# fee_updates / rebalance_log row can be joined back to the knob values that
+# were live when it was written (latest snapshot with ts <= row.ts). Without
+# this, a knob edit is invisible in the data and "did that change help?" is
+# unanswerable. Keep this list in sync when adding/removing knobs above.
+_KNOB_NAMES = (
+    # fee policy
+    "FEE_BASE_MSAT", "SIGMOID_MIN_PPM", "SIGMOID_MAX_PPM", "SIGMOID_K",
+    "SIGMOID_MIDPOINT", "FEE_HARD_CEILING_PPM",
+    "FEE_HYSTERESIS_TOLERANCE_PPM", "FEE_HYSTERESIS_TOLERANCE_PCT",
+    "FEE_HYSTERESIS_COOLDOWN_SEC", "FEE_HYSTERESIS_SNAP_PPM",
+    "FEE_HYSTERESIS_EDGE_LOW", "FEE_HYSTERESIS_EDGE_HIGH",
+    # market multiplier
+    "MARKET_MULT_STEP", "MARKET_MULT_MIN", "MARKET_MULT_MAX",
+    "MARKET_MULT_BUSY_HOURS", "MARKET_MULT_SILENT_DAYS",
+    "MARKET_MULT_FASTDRAIN_STEP",
+    # floor decay
+    "FLOOR_DECAY_HALFLIFE_DAYS", "FLOOR_DECAY_IDLE_SECONDS", "FLOOR_DECAY_MIN_PPM",
+    # rebalancing
+    "REBALANCE_LOW_THRESHOLD", "REBALANCE_HIGH_THRESHOLD", "REBALANCE_TARGET",
+    "REBALANCE_MAX_AMOUNT_RATIO",
+    "REBALANCE_DEFAULT_BUDGET_PPM", "REBALANCE_MAX_BUDGET_PPM",
+    "REBALANCE_BUDGET_ESCALATION_STEP", "REBALANCE_FEE_MARGIN",
+    # profitability gate
+    "EARNED_PPM_WINDOW_DAYS", "EARNED_PPM_MIN_VOLUME_SATS",
+    "REBALANCE_PROFIT_HORIZON", "REBALANCE_STRUCTURAL_FAIL_THRESHOLD",
+    # inbound fees / ladder
+    "INBOUND_FEE_ENABLED", "INBOUND_DISCOUNT_MAX_PPM",
+    "INBOUND_DISCOUNT_CLEAR_RATIO", "INBOUND_DISCOUNT_SAFETY_MARGIN_PPM",
+    "INBOUND_CHARGE_PPM", "INBOUND_HYSTERESIS_PPM", "INBOUND_DEFENSE_WINDOW_DAYS",
+)
+
+
+def knob_snapshot() -> dict:
+    """Current values of all income-relevant knobs, keyed by name."""
+    return {name: globals()[name] for name in _KNOB_NAMES}
