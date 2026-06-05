@@ -189,15 +189,18 @@ def get_channel_perf(chan_id, days30):
     }
 
 
-def get_channel_gate(chan_id):
+def get_channel_gate(chan_id, local_ratio=None):
     """Profitability-gate + liquidity-ladder verdict for a channel, straight from
     the engine so the dashboard mirrors what the pipeline acts on. Returns {} if
     the engine isn't importable or the lookup fails (page stays read-only/robust).
+
+    `local_ratio` is forwarded so the budget's structural-recovery escape (cleared
+    once a channel climbs back to target) matches what the pipeline computes.
     """
     if not _GATE_OK:
         return {}
     try:
-        b = _get_budget(chan_id)
+        b = _get_budget(chan_id, local_ratio=local_ratio)
         sig = _opdb.get_channel_signals(chan_id)
         ep = b["earned_ppm"]
         # Floor is "decaying" only when its persisted level sits BELOW the full
@@ -247,8 +250,9 @@ def get_dashboard_data():
         capacity  = int(ch.get("capacity", 0))
         local     = int(ch.get("local_balance", 0))
         ch["perf"]      = get_channel_perf(chan_id, days30)
-        ch["gate"]      = get_channel_gate(chan_id)
         ch["local_pct"] = round(local / capacity * 100, 1) if capacity > 0 else 0
+        ch["gate"]      = get_channel_gate(
+            chan_id, local_ratio=(local / capacity) if capacity > 0 else None)
         local_ppm, remote_ppm = get_remote_fee_ppm(chan_id, our_pubkey)
         ch["local_fee_ppm"]  = local_ppm
         ch["remote_fee_ppm"] = remote_ppm

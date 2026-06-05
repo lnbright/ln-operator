@@ -330,7 +330,8 @@ def update_all_fees(dry_run=False):
             # channel first trips it, rather than waiting for the nightly
             # recompute. Read-only; also reused by the Layer-3 block below.
             from engine.rebalance_planner import get_channel_rebalance_budget
-            budget_info = get_channel_rebalance_budget(chan_id)
+            budget_info = get_channel_rebalance_budget(
+                chan_id, local_ratio=ch["local_ratio"])
 
             # Persist soft-floor ratchet state every run (not just on broadcast) so
             # the level ratchets/holds/re-arms independent of broadcasts.
@@ -505,7 +506,7 @@ def recompute_all_signals():
         # the original timestamp thereafter, clear when it recovers. Local import
         # avoids a load-order cycle in engine/__init__.
         from engine.rebalance_planner import get_channel_rebalance_budget
-        budget = get_channel_rebalance_budget(chan_id)
+        budget = get_channel_rebalance_budget(chan_id, local_ratio=ch["local_ratio"])
         structural_ts = _structural_flag_ts(
             chan_id, prev, budget, now, ch.get("peer_alias"))
 

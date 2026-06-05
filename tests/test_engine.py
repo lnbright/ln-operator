@@ -279,6 +279,21 @@ class RebalanceBudgetTests(unittest.TestCase):
         self.assertTrue(r["profit_capped"])
         self.assertTrue(r["structural"])
 
+    def test_recovered_local_ratio_clears_structural(self):
+        # Same capped+failing channel, but liquidity has climbed back to target:
+        # the structural alarm is stale and clears (profit_capped is unaffected).
+        fails = config.REBALANCE_STRUCTURAL_FAIL_THRESHOLD
+        with patch("db.get_last_refill_ppm", return_value=2000), \
+             patch("db.count_failures_since_last_success", return_value=fails), \
+             patch("db.get_channel_earned_ppm", return_value=(300.0, 50_000_000)):
+            recovered = engine.get_channel_rebalance_budget(
+                "chan", local_ratio=config.REBALANCE_TARGET)
+            still_low = engine.get_channel_rebalance_budget(
+                "chan", local_ratio=config.REBALANCE_LOW_THRESHOLD)
+        self.assertTrue(recovered["profit_capped"])
+        self.assertFalse(recovered["structural"])   # escaped at ≥ target
+        self.assertTrue(still_low["structural"])     # still depleted → still flagged
+
 
 # ─── calculate_rebalance_amount ──────────────────────────────────
 

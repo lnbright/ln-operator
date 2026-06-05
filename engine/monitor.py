@@ -84,7 +84,8 @@ def get_channel_health_report(channels=None):
             pass
 
         try:
-            budget = get_channel_rebalance_budget(ch["chan_id"])
+            budget = get_channel_rebalance_budget(
+                ch["chan_id"], local_ratio=ch.get("local_ratio"))
             ch_report["budget_ppm"] = budget["max_fee_ppm"]
             ch_report["budget_reason"] = budget["reason"]
         except Exception:

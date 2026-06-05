@@ -29,7 +29,7 @@ from logging_config import get_logger
 log = get_logger('engine.rebalance_planner')
 
 
-def get_channel_rebalance_budget(chan_id):
+def get_channel_rebalance_budget(chan_id, local_ratio=None):
     """Max fee ppm we'll pay to refill this channel.
 
     Escalation (unchanged): bootstrap at REBALANCE_DEFAULT_BUDGET_PPM (or the last
@@ -44,6 +44,14 @@ def get_channel_rebalance_budget(chan_id):
     A judged channel whose escalation exceeds the profit cap is `profit_capped`;
     if it has also failed REBALANCE_STRUCTURAL_FAIL_THRESHOLD times it is
     `structural` (rebalancing is the wrong tool — needs the Layer-3 ladder/capital).
+
+    Recovery escape: `structural` describes a depleted channel that can't be
+    profitably refilled. If `local_ratio` is supplied and has climbed back to
+    REBALANCE_TARGET (≥50%), the channel is no longer depleted, so the structural
+    verdict is stale and is cleared regardless of earnings/failure history — the
+    flag-stamp callers then retire the alarm. Strong hysteresis: it trips below
+    REBALANCE_LOW_THRESHOLD (20%) and only clears at ≥50%, so it can't flap.
+    Callers without a live ratio omit it and keep the pre-existing behaviour.
     """
     last_refill = db.get_last_refill_ppm(chan_id)
     failures = db.count_failures_since_last_success(chan_id)
@@ -70,12 +78,18 @@ def get_channel_rebalance_budget(chan_id):
 
     profit_capped = profit_cap is not None and escalated > profit_cap
     structural = profit_capped and failures >= REBALANCE_STRUCTURAL_FAIL_THRESHOLD
+    recovered = (structural and local_ratio is not None
+                 and local_ratio >= REBALANCE_TARGET)
+    if recovered:
+        structural = False   # liquidity recovered → structural alarm is stale
 
     if profit_capped:
         reason = (f"{anchor} {base} ppm escalated {escalated} capped to "
                   f"earn×{REBALANCE_PROFIT_HORIZON:g}={int(round(profit_cap))} ppm [profit gate]")
         if structural:
             reason += f" — STRUCTURAL ({failures} fails)"
+        elif recovered:
+            reason += f" — structural cleared (local {local_ratio:.0%} ≥ target)"
     elif failures > 0:
         reason = (f"{anchor} {base} ppm × (1 + {REBALANCE_BUDGET_ESCALATION_STEP:.0%}"
                   f" × {failures} fails) → {budget} ppm")

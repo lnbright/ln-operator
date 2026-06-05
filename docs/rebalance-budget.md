@@ -65,11 +65,22 @@ blind spot, so on a steady sink it tends to persist until you act:
   goes fully quiet sheds the flag for lack of evidence (and can re-trip if
   traffic returns and it fails again — the flag can flap).
 
-What does **not** clear it: organic refill alone. `structural` never reads
-`local_ratio`, so a channel rescued back to healthy by the inbound discount
-keeps the flag until one of the above fires. If you want the alarm retired on
-liquidity recovery, that needs an explicit `local_ratio`-recovered escape added
-to the verdict — it isn't there today.
+There is also a fourth, automatic path:
+
+- **Liquidity recovers** — if the channel's `local_ratio` climbs back to
+  `REBALANCE_TARGET` (≥50%), the structural verdict is cleared regardless of
+  earnings or failure history: a channel that's no longer depleted isn't a
+  structural emergency. Strong hysteresis — it trips below 20% and only clears
+  at ≥50%, so it can't flap. This is what retires the alarm when the inbound
+  discount (or any organic flow) actually refills the channel.
+
+> ⚠️ **Attention:** the recovery escape only applies where a live `local_ratio`
+> is passed to `get_channel_rebalance_budget` — the fee loop, monitor, and
+> dashboard all pass it, so the flag and its timestamp clear within one 2h cycle
+> of recovery. The rebalance planner calls it without a ratio, but that's moot:
+> it only ever evaluates already-depleted (<20%) targets, which can't be
+> recovered. `profit_capped` is *not* affected by recovery — only the
+> `structural` escalation clears.
 
 ## Bootstrap & drift recovery — failure escalation
 
