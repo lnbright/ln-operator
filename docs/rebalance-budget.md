@@ -32,10 +32,44 @@ on the recoup price): never pay more to refill than the channel can earn back.
 
 A judged channel whose escalation exceeds the cap is `profit_capped`; if it has
 also failed `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` (5) times it is `structural` —
-`plan_rebalances` drops it (refilling is a losing trade), `recompute_signals`
-stamps `structural_flag_ts` and fires a `structural_liquidity` alert, and the
+`plan_rebalances` drops it (refilling is a losing trade), the verdict stamps
+`structural_flag_ts` and fires a one-time `structural_liquidity` alert, and the
 fix becomes a capital decision (open inbound / splice / resize). With Layer 3
 enabled it first gets a negative inbound-fee probe to pull organic refill.
+
+The stamp is written by **both** the 2h fee loop (`update_all_fees`) and the
+nightly `recompute_signals`, via the shared `_structural_flag_ts` helper —
+first-stamp on entry, kept thereafter, cleared on recovery. Whichever runs first
+wins, so the flag trips within one 2h cycle, not up to a day late. The alert is
+gated on the prior stamp, so it still fires exactly once.
+
+## Clearing a structural flag
+
+`structural = profit_capped AND failures_since_last_success ≥ THRESHOLD`. The
+flag (and its timestamp) clears automatically on the next run where **either**
+term goes false. It is not permanent — but note the auto-loop has a deliberate
+blind spot, so on a steady sink it tends to persist until you act:
+
+- **A successful refill** moves the failure cutoff and zeroes
+  `failures_since_last_success` → not structural. **Catch:** `plan_rebalances`
+  drops structural targets, so the pipeline never *attempts* a refill and never
+  produces the success that would clear it. In practice this path needs an
+  **operator-forced rebalance** (`ln-operator rebalance --force …` against that
+  channel) that lands.
+- **Earnings climb** until `earned_ppm × PROFIT_HORIZON > escalated_budget` →
+  `profit_capped` false → cleared. Realistic only if the channel starts earning
+  far more on outbound than it did.
+- **Channel goes UNJUDGED** — if trailing OUT-volume falls below
+  `EARNED_PPM_MIN_VOLUME_SATS` over the window, `earned_ppm` is `None`, the
+  profit cap evaporates, and `profit_capped` is false → cleared. A channel that
+  goes fully quiet sheds the flag for lack of evidence (and can re-trip if
+  traffic returns and it fails again — the flag can flap).
+
+What does **not** clear it: organic refill alone. `structural` never reads
+`local_ratio`, so a channel rescued back to healthy by the inbound discount
+keeps the flag until one of the above fires. If you want the alarm retired on
+liquidity recovery, that needs an explicit `local_ratio`-recovered escape added
+to the verdict — it isn't there today.
 
 ## Bootstrap & drift recovery — failure escalation
 
