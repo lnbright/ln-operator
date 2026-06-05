@@ -23,7 +23,8 @@ import sqlite3
 import json
 import time
 from contextlib import contextmanager
-from config import DB_PATH, EARNED_PPM_WINDOW_DAYS, EARNED_PPM_MIN_VOLUME_SATS
+from config import (DB_PATH, EARNED_PPM_WINDOW_DAYS, EARNED_PPM_MIN_VOLUME_SATS,
+                    EARNED_PPM_MAX_LOOKBACK_DAYS)
 
 
 def _migrate_rebalance_log():
@@ -753,23 +754,37 @@ def get_channel_earned_ppm(chan_id, days=EARNED_PPM_WINDOW_DAYS):
     We earn the fee on the OUTBOUND leg of a forward, so this groups on chan_out:
     earned_ppm = Σ fee_earned_sats / Σ amount_out_sats × 1e6 over the window.
 
-    Returns (None, out_volume) when out_volume < EARNED_PPM_MIN_VOLUME_SATS — too
-    little traffic to trust the ratio. None is the "unjudged" sentinel the profit
-    gate keys off (it must NOT treat a quiet channel as unprofitable).
+    Evidence widening: if the standard window holds < EARNED_PPM_MIN_VOLUME_SATS,
+    the window is doubled (21 → 42 → 84 → EARNED_PPM_MAX_LOOKBACK_DAYS) until the
+    volume suffices or the cap is hit. Adverse evidence must age out gradually,
+    not expire at a cliff: without this, a profit-capped channel that goes quiet
+    (often BECAUSE it is depleted and can't forward) sheds its cap — and its
+    structural verdict — the moment the trailing window drains below the judging
+    threshold, and the budget snaps back to full failure-escalation (up to
+    REBALANCE_MAX_BUDGET_PPM) with no profitability evidence ever consulted.
+
+    Returns (None, out_volume) only when even the max lookback holds too little
+    traffic to trust the ratio. None is the "unjudged" sentinel the profit gate
+    keys off (it must NOT treat a genuinely quiet/new channel as unprofitable).
     """
-    cutoff = int(time.time()) - days * 86400
-    with get_conn() as conn:
-        row = conn.execute("""
-            SELECT COALESCE(SUM(fee_earned_sats), 0) AS fees,
-                   COALESCE(SUM(amount_out_sats), 0) AS vol
-            FROM forwarding_log
-            WHERE chan_out = ? AND ts > ?
-        """, (chan_id, cutoff)).fetchone()
-    fees = int(row["fees"]) if row else 0
-    vol = int(row["vol"]) if row else 0
-    if vol < EARNED_PPM_MIN_VOLUME_SATS:
-        return None, vol
-    return (fees / vol * 1_000_000), vol
+    now = int(time.time())
+    window = days
+    while True:
+        cutoff = now - window * 86400
+        with get_conn() as conn:
+            row = conn.execute("""
+                SELECT COALESCE(SUM(fee_earned_sats), 0) AS fees,
+                       COALESCE(SUM(amount_out_sats), 0) AS vol
+                FROM forwarding_log
+                WHERE chan_out = ? AND ts > ?
+            """, (chan_id, cutoff)).fetchone()
+        fees = int(row["fees"]) if row else 0
+        vol = int(row["vol"]) if row else 0
+        if vol >= EARNED_PPM_MIN_VOLUME_SATS:
+            return (fees / vol * 1_000_000), vol
+        if window >= EARNED_PPM_MAX_LOOKBACK_DAYS:
+            return None, vol
+        window = min(window * 2, EARNED_PPM_MAX_LOOKBACK_DAYS)
 
 
 def get_last_refill_ts(chan_id):

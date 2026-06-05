@@ -134,6 +134,14 @@ REBALANCE_FEE_MARGIN               = 1.1    # outbound fee floor = last_refill �
 # Unjudged channels (too little volume to trust the ratio) keep full escalation.
 EARNED_PPM_WINDOW_DAYS             = 21         # trailing window for per-channel earned-ppm
 EARNED_PPM_MIN_VOLUME_SATS         = 2_000_000  # min OUT-traffic to trust the ratio; below → unjudged
+EARNED_PPM_MAX_LOOKBACK_DAYS       = 90         # evidence widening: if the standard window holds
+                                                # < MIN_VOLUME, double it (21→42→84→90) until volume
+                                                # suffices or this cap is hit. Adverse evidence ages,
+                                                # it doesn't expire — without this, a profit-capped
+                                                # channel that goes quiet sheds its cap the moment the
+                                                # 21d window drains and the budget snaps back to full
+                                                # escalation (the "unjudged cliff"). Only a channel
+                                                # with < MIN_VOLUME out-traffic in 90d is unjudged.
 REBALANCE_PROFIT_HORIZON           = 1.25       # judged budget cap = earned_ppm × this.
                                                 # ≈ break-even: only refill if demonstrated
                                                 # willingness-to-pay (earned_ppm) roughly covers
@@ -217,6 +225,7 @@ _KNOB_NAMES = (
     "REBALANCE_BUDGET_ESCALATION_STEP", "REBALANCE_FEE_MARGIN",
     # profitability gate
     "EARNED_PPM_WINDOW_DAYS", "EARNED_PPM_MIN_VOLUME_SATS",
+    "EARNED_PPM_MAX_LOOKBACK_DAYS",
     "REBALANCE_PROFIT_HORIZON", "REBALANCE_STRUCTURAL_FAIL_THRESHOLD",
     # inbound fees / ladder
     "INBOUND_FEE_ENABLED", "INBOUND_DISCOUNT_MAX_PPM",

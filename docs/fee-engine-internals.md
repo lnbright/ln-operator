@@ -83,12 +83,25 @@ returns:
 ```
 escalated = (last_refill OR DEFAULT_BUDGET) × (1 + STEP × failures)
 earned_ppm, out_vol = get_channel_earned_ppm(chan)    # None if out_vol < MIN_VOLUME
+                                                      # (window widens 21→42→84→90d
+                                                      #  before giving up — see below)
 
 if earned_ppm is None:                 # UNJUDGED — full escalation, no cap
     budget = min(escalated, MAX_BUDGET)
 else:                                  # JUDGED — also cap at the recoup price
     budget = min(escalated, earned_ppm × REBALANCE_PROFIT_HORIZON, MAX_BUDGET)
 ```
+
+`get_channel_earned_ppm` widens its window when the standard 21 days hold less
+than `EARNED_PPM_MIN_VOLUME_SATS`: it doubles the lookback (21 → 42 → 84 →
+`EARNED_PPM_MAX_LOOKBACK_DAYS`, 90) until the volume suffices, and only returns
+the unjudged sentinel when even the max lookback is too quiet. This is the
+unjudged-cliff fix: a profit-capped channel that goes silent (often *because*
+it is depleted and can't forward) used to shed its cap — and its structural
+verdict — the moment the 21d window drained, snapping the budget back to full
+escalation (`last_refill × (1 + 0.2 × failures)`, up to `MAX_BUDGET`) with no
+profitability evidence consulted. Now adverse evidence ages gradually instead
+of expiring at a cliff.
 
 Escalation handles bootstrap, drift, and re-bootstrap. **Layer 1 — the
 profitability gate** adds the second clamp: for channels with enough trailing
@@ -132,7 +145,8 @@ outbound are set in one `/v1/chanpolicy` POST.
 | Refilled channel sits idle, floor prices it out | Floor decays toward the clearing fee (`floor↓`) so it can sell; doesn't sit dead at an unsellable price |
 | Decayed-floor channel forwards once | Floor HOLDS at the cleared level — does not snap back to full (no whipsaw); only a fresh refill re-arms it |
 | Judged channel, refill cost > earned×1.25 | `profit_capped` — budget held to the recoup price; if it keeps failing → `structural`, dropped from planning, capital alert |
-| Quiet/new channel, low out-volume | "unjudged" — no profit cap, full escalation (price discovery preserved) |
+| Quiet/new channel, low out-volume | "unjudged" — no profit cap, full escalation (price discovery preserved). Only if out-volume < MIN_VOLUME over the full 90d max lookback |
+| Judged channel goes silent (e.g. depleted, can't forward) | Stays judged on older evidence — the earned-ppm window widens up to 90d, so the profit cap and structural verdict persist instead of evaporating with the 21d window |
 
 ## When data is missing
 

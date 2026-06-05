@@ -25,10 +25,12 @@ on the recoup price): never pay more to refill than the channel can earn back.
 
 - **Judged** = trailing OUT-volume ≥ `EARNED_PPM_MIN_VOLUME_SATS` (2M over
   `EARNED_PPM_WINDOW_DAYS`), so `earned_ppm = Σ fee_earned / Σ amount_out` is
-  trustworthy. The cap applies.
-- **Unjudged** = too little volume to trust the ratio → **no cap, full
-  escalation** (capping a low-volume channel would kill price discovery and it'd
-  never bootstrap). The gate is opt-in by evidence.
+  trustworthy. The cap applies. If the standard 21d window is too quiet, it
+  **widens** (doubling, up to `EARNED_PPM_MAX_LOOKBACK_DAYS` = 90d) before the
+  channel is declared unjudged — evidence ages, it doesn't expire at a cliff.
+- **Unjudged** = too little volume *even over the max lookback* to trust the
+  ratio → **no cap, full escalation** (capping a low-volume channel would kill
+  price discovery and it'd never bootstrap). The gate is opt-in by evidence.
 
 A judged channel whose escalation exceeds the cap is `profit_capped`; if it has
 also failed `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` (5) times it is `structural` —
@@ -59,11 +61,16 @@ blind spot, so on a steady sink it tends to persist until you act:
 - **Earnings climb** until `earned_ppm × PROFIT_HORIZON > escalated_budget` →
   `profit_capped` false → cleared. Realistic only if the channel starts earning
   far more on outbound than it did.
-- **Channel goes UNJUDGED** — if trailing OUT-volume falls below
-  `EARNED_PPM_MIN_VOLUME_SATS` over the window, `earned_ppm` is `None`, the
-  profit cap evaporates, and `profit_capped` is false → cleared. A channel that
-  goes fully quiet sheds the flag for lack of evidence (and can re-trip if
-  traffic returns and it fails again — the flag can flap).
+- **Channel goes UNJUDGED** — only if OUT-volume falls below
+  `EARNED_PPM_MIN_VOLUME_SATS` over the *full max lookback*
+  (`EARNED_PPM_MAX_LOOKBACK_DAYS`, 90d): then `earned_ppm` is `None`, the
+  profit cap evaporates, and `profit_capped` is false → cleared. This used to
+  fire after just 21 quiet days — a dangerous cliff, since a structural channel
+  is quiet *because* it is depleted, and the budget that came back was the full
+  failure-escalation (e.g. `last_refill 2,601 × 2.0 → 5,000` ppm) with no
+  profitability evidence consulted. The earned-ppm window now widens
+  (21 → 42 → 84 → 90d) before giving up, so adverse evidence ages out gradually
+  and this path is realistic only after ~3 months of silence.
 
 There is also a fourth, automatic path:
 
