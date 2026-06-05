@@ -208,6 +208,31 @@ def _should_broadcast(target_ppm, current_ppm, signals, local_ratio, now):
     return True, f"normal (Δ={delta:+d})"
 
 
+def _structural_flag_ts(chan_id, prev_signals, budget, now, alias=None):
+    """Layer-1 structural-liquidity flag timestamp (first-stamp / keep / clear).
+
+    Stamps `now` on entry into the structural state, preserves the original
+    stamp while it persists, and clears to 0 on recovery. Alerts exactly once,
+    on entry. Returns the ts to persist. Called from both the 2h fee loop and
+    the nightly recompute so whichever runs first stamps promptly — the alert is
+    gated on the prior stamp, so it still fires only once.
+    """
+    prev_flag = int(prev_signals.get("structural_flag_ts") or 0)
+    if not budget["structural"]:
+        return 0
+    if prev_flag:
+        return prev_flag
+    ep = budget["earned_ppm"]
+    db.save_alert(
+        "structural_liquidity",
+        f"{alias or chan_id[:12]} structurally unprofitable to refill — earns "
+        f"{ep:.0f} ppm, refill needs ≫ that ({budget['failures_since_success']} "
+        "fails). Consider more inbound / splice / close rather than rebalancing.",
+        channel_id=chan_id,
+    )
+    return now
+
+
 def update_all_fees(dry_run=False):
     """Update fee policies on all channels.
 
@@ -300,12 +325,21 @@ def update_all_fees(dry_run=False):
                 new_ppm, old_ppm, signals, ch["local_ratio"], now
             )
 
+            # Budget/structural verdict — computed every run so the Layer-1
+            # structural flag is stamped promptly (within this 2h loop) when a
+            # channel first trips it, rather than waiting for the nightly
+            # recompute. Read-only; also reused by the Layer-3 block below.
+            from engine.rebalance_planner import get_channel_rebalance_budget
+            budget_info = get_channel_rebalance_budget(chan_id)
+
             # Persist soft-floor ratchet state every run (not just on broadcast) so
             # the level ratchets/holds/re-arms independent of broadcasts.
             if not dry_run:
                 ratchet_state = {
                     "floor_decay_started_ts": int(target_info.get("floor_decay_started_ts") or 0),
                     "floor_armed_refill_ts": int(target_info.get("floor_armed_refill_ts") or 0),
+                    "structural_flag_ts": _structural_flag_ts(
+                        chan_id, signals, budget_info, now, ch.get("peer_alias")),
                 }
                 level = target_info.get("floor_decay_anchor_ppm")
                 if level is not None:
@@ -315,8 +349,6 @@ def update_all_fees(dry_run=False):
             # Layer 3: inbound-fee decision (only when the feature is enabled —
             # otherwise inbound stays untouched and this is fully inert).
             if INBOUND_FEE_ENABLED:
-                from engine.rebalance_planner import get_channel_rebalance_budget
-                budget_info = get_channel_rebalance_budget(chan_id)
                 action_info = decide_channel_action(
                     ch, signals, budget_info, new_ppm, has_overfull_source, now)
                 inbound_target = action_info["inbound_fee_ppm"]
@@ -474,20 +506,8 @@ def recompute_all_signals():
         # avoids a load-order cycle in engine/__init__.
         from engine.rebalance_planner import get_channel_rebalance_budget
         budget = get_channel_rebalance_budget(chan_id)
-        prev_flag = int(prev.get("structural_flag_ts") or 0)
-        structural_ts = (prev_flag or now) if budget["structural"] else 0
-        # Alert once, on entry into the structural state — refilling this channel
-        # is a losing trade; it needs a capital decision, not more rebalancing.
-        if budget["structural"] and not prev_flag:
-            alias = ch.get("peer_alias", chan_id[:12])
-            ep = budget["earned_ppm"]
-            db.save_alert(
-                "structural_liquidity",
-                f"{alias} structurally unprofitable to refill — earns "
-                f"{ep:.0f} ppm, refill needs ≫ that ({budget['failures_since_success']} "
-                f"fails). Consider more inbound / splice / close rather than rebalancing.",
-                channel_id=chan_id,
-            )
+        structural_ts = _structural_flag_ts(
+            chan_id, prev, budget, now, ch.get("peer_alias"))
 
         db.upsert_channel_signals(
             chan_id,
