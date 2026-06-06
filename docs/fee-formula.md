@@ -34,7 +34,10 @@ REBALANCE_FEE_MARGIN` recoups refill cost, but if a channel sits idle at a floor
 that's pricing it out, the *effective* floor decays toward the market-clearing
 fee so it can find a price that sells. It ratchets DOWN while idle, HOLDS while
 forwarding (a forward does not snap it back up), and is re-armed to the full
-floor only by a fresh refill. See [Fee Engine Internals](fee-engine-internals.md).
+floor only by a fresh refill. Idle means **true silence** — recent
+INSUFFICIENT_BALANCE drops gate decay like forwards do, since a drop is a
+sender who accepted the current price but found the channel empty.
+See [Fee Engine Internals](fee-engine-internals.md).
 
 Base fee is always 0. See [Fee Engine Internals](fee-engine-internals.md) for
 the full pipeline, hysteresis, signals, profitability gate, and corner cases.

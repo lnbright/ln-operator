@@ -19,9 +19,16 @@ Runs unattended on a cron schedule. Four steps execute in sequence:
 **1. Fee adjustment** — Sets each channel's fee rate based on its local/remote
 balance ratio (sigmoid curve). Full channels get low fees to attract routing;
 depleted channels get high fees to protect remaining liquidity and to recoup
-refill cost. The refill-cost floor is a **soft ratchet** — it decays toward the
-market-clearing fee while a channel sits idle so it never gets priced out and
-stranded, and re-arms only on a fresh refill. Base fee is always zero.
+refill cost. On top of the balance curve sits a per-channel **market
+multiplier** — a slow demand signal that nudges the fee up while a channel
+forwards daily and back down when it goes quiet, with an immediate up-only
+bump when a depleted channel starts *dropping* forwards. The refill-cost floor
+is a **soft ratchet** — it decays toward the market-clearing fee while a
+channel sits truly idle (no forwards *and* no dropped forwards — senders
+attempting at the current price count as proof the price is right) so it never
+gets priced out and stranded, and re-arms only on a fresh refill. Base fee is
+always zero. Fee changes are rate-limited by hysteresis (tolerance + cooldown)
+so the node doesn't spam gossip.
 
 **2. Rebalancing** — Moves sats from overfull channels (>80% local) to depleted
 ones (<20% local) via circular self-payments through LND's Router SendPaymentV2.
@@ -30,9 +37,12 @@ by a profitability gate**: for channels with enough traffic to judge, we never
 pay more to refill than the channel can earn back. Channels that can't be
 profitably refilled are flagged as a capital decision rather than ground on. If
 the full amount can't route, it halves and retries down to 100k sats; if one
-source→target pair has no route, it tries alternatives before giving up.
-(Optional, off by default: a node-level **inbound-fee** ladder that pulls organic
-refill with a negative inbound fee instead of paying for a circular rebalance.)
+source→target pair has no route, it tries alternatives before giving up. With
+multiple channels to one peer, refills are attributed to the channel they
+**actually landed on** (read from the invoice's settled HTLCs), so per-channel
+cost history stays truthful. (Optional, off by default: a node-level
+**inbound-fee** ladder that pulls organic refill with a negative inbound fee
+instead of paying for a circular rebalance.)
 
 **3. Routing sync** — Pulls new forwarding events from LND into SQLite using
 offset-based pagination. Also detects manual rebalances done via `lncli` and
@@ -40,6 +50,23 @@ imports them so the dashboard tracks all rebalancing activity.
 
 **4. Health check** — Snapshots channel states, updates maturity tracking, fires
 alerts for depleted channels, offline peers, and repeated rebalance failures.
+
+### HTLC Failure Monitor — the Lost-Revenue Signal
+
+An always-on systemd daemon subscribed to LND's HTLC event stream, recording
+every forward the node **dropped** (and why) into `forward_fail_log`. LND keeps
+these events nowhere — the stream is live-only — so without the daemon a missed
+forward is invisible. This is the node's demand-you-couldn't-serve signal, and
+it drives real decisions: the fast-drain fee bump, the floor-decay gate, the
+dashboard's lost-revenue watch, and the daily check's capital suggestions
+(a channel dropping millions of sats at its advertised price needs more
+liquidity, not a better price).
+
+### Channel Backup — Off-Site, Event-Driven
+
+A systemd path unit watches `channel.backup` and rsyncs it to a backup host the
+moment it changes, with a 2h timer as heartbeat. Attempts are logged and the
+dashboard shows a freshness badge.
 
 ### Plan — Channel Investment Planner
 

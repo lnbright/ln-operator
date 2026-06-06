@@ -55,7 +55,8 @@ peer is undercharging or overcharging relative to you. The flags column surfaces
 only things needing attention — offline, private, refill state
 (`refilling ≤Nppm` / `refill capped` / `structural · needs capital`), an active
 inbound discount, and a decaying outbound floor. A muted dash means nothing is
-flagged.
+flagged. Sibling channels to the same peer share an alias; duplicates are
+tagged with a short scid suffix (`·12345`) so the rows stay distinguishable.
 
 ## Sat Flow
 

@@ -10,6 +10,7 @@ LND /v1/switch → sync_routing → forwarding_log (SQLite)
 LND SubscribeHtlcEvents → htlc_monitor → forward_fail_log (SQLite)
   ├─ Dashboard: dropped-forward glance (lost revenue)
   ├─ Fast-drain market-mult bump (INSUFFICIENT_BALANCE in the 2h loop)
+  ├─ Floor-decay gate: recent drops = demand at the current price → floor holds
   └─ Daily check: capital suggestions for structural channels
 
 LND /v1/payments → sync_rebalances → rebalance_log (SQLite)
@@ -24,4 +25,6 @@ LND /v1/payments → sync_rebalances → rebalance_log (SQLite)
 
 Offset-based sync — no duplicates. Manual rebalances detected by matching
 circular self-payments. Channel open time used as floor to prevent
-misattribution to new channels with the same peer.
+misattribution to new channels with the same peer. Targets resolved from the
+route's last-hop chan_id (sibling-safe); auto rebalances are written against
+the channel the invoice actually settled on, not the planned target.

@@ -126,6 +126,20 @@ is logged as its own success row in `rebalance_log` at the chunk's actual ppm,
 so `last_refill_ppm` reflects what we actually paid (very small chunks can
 appear inflated because LND's base fee dominates at low amounts).
 
+## Sibling Channels (2+ channels to one peer)
+
+`SendPaymentV2` pins the target by `last_hop_pubkey` — the **peer**, not the
+channel — and LND's non-strict forwarding pools sibling liquidity at forward
+time anyway, so a chunk may settle on either sibling. The books follow the
+sats, not the plan: after each successful chunk the executor resolves the
+actual landing channel from the invoice's settled HTLC records
+(`lnd_client.get_invoice_landing_chan`) and writes the `rebalance_log` row —
+hence `last_refill_ppm` and the fee floor — against that channel. The deficit
+ledger is credited the same way; sats landing on an untracked sibling leave
+the planned target's deficit open for later plans. `sync_rebalances` resolves
+manual rebalances from the route's last-hop chan_id (`resolve_target_chan`)
+and skips rather than guesses when ambiguous.
+
 ## Fallback Pairs
 
 For every depleted target, the planner emits one or more **primary** pairs

@@ -135,6 +135,20 @@ the two states are mutually exclusive.
 - The floor re-arms to the **full** `last_refill × margin` floor only on a
   **fresh refill** (new cost to recoup), never on a forward.
 
+### Dropped forwards gate decay too
+
+Decay's diagnosis is "idle because priced out" — but a **depleted** channel is
+idle because it's *empty*. The two look identical in `forwarding_log` and are
+distinguished by `forward_fail_log`: an INSUFFICIENT_BALANCE drop is a sender
+who already accepted the advertised fee (it's baked into their onion) but found
+no liquidity — demand *at the current price*. So `idle` means **true silence**:
+no forwards AND no such drops within `FLOOR_DECAY_IDLE_SECONDS`. Drops hold the
+floor like forwards do (and like forwards, never lift an already-decayed
+level). Without this gate, a stocked-out channel with senders queuing at its
+price would keep discounting anyway — selling the eventual refill below a
+proven price and dragging `earned_ppm` (hence the rebalance budget cap) down,
+blocking the very refills that would fix it.
+
 ### Can the target move while we converge?
 
 Yes, but tamely:
