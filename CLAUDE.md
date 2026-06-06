@@ -99,7 +99,10 @@
   `REBALANCE_BUDGET_ESCALATION_STEP`, `REBALANCE_FEE_MARGIN`, `EARNED_PPM_WINDOW_DAYS`,
   `EARNED_PPM_MIN_VOLUME_SATS`, `EARNED_PPM_MAX_LOOKBACK_DAYS` (earned-ppm window
   widens 21→42→84→90d before declaring unjudged — kills the "unjudged cliff" where a
-  quiet profit-capped channel re-entered planning at full escalation), `REBALANCE_PROFIT_HORIZON`,
+  quiet profit-capped channel re-entered planning at full escalation; rebalance
+  FAILURES expire on the same 90d clock — capped failures only ever tested the cap
+  price, so a re-entering channel resumes at last_refill × 1.0 instead of a
+  phantom-inflated bid, and a persistent structural flag re-probes ~quarterly), `REBALANCE_PROFIT_HORIZON`,
   `REBALANCE_STRUCTURAL_FAIL_THRESHOLD`, `SIGMOID_MAX_PPM`, `FLOOR_DECAY_*`,
   `MARKET_MULT_FASTDRAIN_STEP`, `INBOUND_*`.
 

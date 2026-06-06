@@ -825,13 +825,24 @@ def count_failures_since_last_success(chan_id):
     Returns 0 if no history or the last attempt was a success. Used to
     escalate the rebalance budget on persistent failure (bootstrap and
     upward-drift recovery).
+
+    Failures EXPIRE after EARNED_PPM_MAX_LOOKBACK_DAYS — the same clock that
+    ages out earned-ppm evidence. A refusal from months ago says nothing about
+    today's routing market, and counting it would inflate the re-entry bid of
+    a channel whose profit cap clamped its attempts (those failures only ever
+    tested the cap price, not the escalated ones). Expiry means a channel
+    re-entering planning after a long quiet resumes at last_refill × 1.0 and
+    rebuilds escalation from fresh attempts; a standing structural flag gets a
+    free 5-attempt re-probe roughly once a quarter instead of being permanent.
     """
+    now = int(time.time())
     with get_conn() as conn:
         last_ok = conn.execute("""
             SELECT MAX(ts) AS ts FROM rebalance_log
             WHERE target_chan_id = ? AND success = 1
         """, (chan_id,)).fetchone()
-        cutoff = last_ok["ts"] if last_ok and last_ok["ts"] else 0
+        last_ok_ts = last_ok["ts"] if last_ok and last_ok["ts"] else 0
+        cutoff = max(last_ok_ts, now - EARNED_PPM_MAX_LOOKBACK_DAYS * 86400)
         row = conn.execute("""
             SELECT COUNT(*) AS n FROM rebalance_log
             WHERE target_chan_id = ? AND success = 0 AND ts > ?

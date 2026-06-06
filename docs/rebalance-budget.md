@@ -97,6 +97,17 @@ the budget by `REBALANCE_BUDGET_ESCALATION_STEP` (20%) per cron cycle, capped
 at `REBALANCE_MAX_BUDGET_PPM` (5000). One success resets the counter and the
 budget anchors to the actual paid ppm.
 
+**Failures expire** after `EARNED_PPM_MAX_LOOKBACK_DAYS` (90d) — the same
+clock that ages out earned-ppm evidence. Escalation's semantics assume each
+failure tested a price; a profit-capped channel's failures all tested the
+*cap*, not the escalated levels, so carrying them into a later re-entry
+(e.g. after the channel goes unjudged) would bid prices that were never
+actually refused. With expiry, a channel returning from a long quiet resumes
+at `last_refill × 1.0` and rebuilds escalation from fresh attempts. Side
+effect, deliberate: a standing structural flag on a channel that stays judged
+gets a free 5-attempt re-probe roughly once a quarter instead of being
+permanent — markets move, and failed attempts cost nothing.
+
 Example: a channel where real market price is ~2300 ppm bootstraps as
 `500 → 600 → 720 → 864 → 1037 → 1244 → 1493 → 1791 → 2150 → 2580` and
 succeeds on the 9th attempt (≈18h at the 2h cron).
