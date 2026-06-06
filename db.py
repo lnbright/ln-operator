@@ -735,6 +735,21 @@ def count_forward_fails(chan_id, since_ts, detail="INSUFFICIENT_BALANCE"):
     return int(row["n"]) if row else 0
 
 
+def get_last_forward_fail_ts(chan_id, detail="INSUFFICIENT_BALANCE"):
+    """ts of the most recent dropped forward on this channel (as chan_out).
+
+    A drop is a sender who already accepted our advertised fee (it's baked
+    into their onion) but found the channel too depleted — proof of demand
+    AT the current price. Used to gate floor decay: a floor that drops are
+    validating must not drift down. Returns 0 if none recorded."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT MAX(ts) AS ts FROM forward_fail_log
+            WHERE chan_out = ? AND failure_detail = ?
+        """, (chan_id, detail)).fetchone()
+    return int(row["ts"]) if row and row["ts"] else 0
+
+
 def get_last_refill_ppm(chan_id):
     """Return the fee_ppm of the most recent SUCCESSFUL rebalance into this channel.
 

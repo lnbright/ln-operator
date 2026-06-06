@@ -54,7 +54,15 @@ The target outbound fee is `clamp(max(base × (1+mult), floor), 0, ceiling)`:
    half-life `FLOOR_DECAY_HALFLIFE_DAYS`), and does **not** snap back up on a
    forward (that would whipsaw a priced-out channel). It re-arms to the full
    floor only on a **fresh refill** (detected via `floor_armed_refill_ts` vs the
-   latest refill ts). State lives in `channel_signals.floor_decay_anchor_ppm`
+   latest refill ts). **Idle means true silence — no forwards AND no dropped
+   forwards.** An INSUFFICIENT_BALANCE drop is a sender who accepted the
+   advertised fee (it's in their onion) but found the channel empty: demand at
+   the current price. Decay's diagnosis is "idle because priced out"; a
+   stocked-out channel with drops is idle because it's *empty*, and decaying a
+   price the drops are validating just discounts the liquidity the eventual
+   refill delivers — and drags `earned_ppm` (and with it the rebalance budget
+   cap) down, blocking the recovery it's waiting for. Drops gate further decay
+   but never restore an already-decayed level (same no-whipsaw rule). State lives in `channel_signals.floor_decay_anchor_ppm`
    (current level), `floor_decay_started_ts` (last update), `floor_armed_refill_ts`.
    No refill history → no floor (sigmoid alone decides).
 

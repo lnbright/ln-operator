@@ -76,13 +76,21 @@ def _edge_zone(local_ratio):
     return "mid"
 
 
-def compute_fee_target(channel, signals, now, last_forward_ts=None, last_refill_ts=None):
+def compute_fee_target(channel, signals, now, last_forward_ts=None, last_refill_ts=None,
+                       last_drop_ts=None):
     """Compute the target outbound fee for a channel + decide whether to broadcast.
 
     The outbound floor recoups refill cost (last refill ppm × REBALANCE_FEE_MARGIN).
     It is a RATCHET, not a snap-back: it sits at the full recoup level while the
     channel forwards, and relaxes toward the market-clearing fee only while the
     channel is IDLE (no forwards for FLOOR_DECAY_IDLE_SECONDS), ratcheting DOWN.
+    Dropped forwards (last_drop_ts, INSUFFICIENT_BALANCE) count as activity too:
+    a drop is a sender who accepted the advertised fee but found the channel
+    empty — demand AT the current price. Decay's diagnosis is "idle because
+    priced out"; a stocked-out channel with drops is idle because it's EMPTY,
+    and lowering a price the drops are validating just discounts the liquidity
+    the eventual refill delivers. Decay therefore runs only on true silence:
+    no forwards AND no drops for the idle window.
     Crucially it does NOT jump back up when a forward lands — that would whipsaw a
     priced-out channel between a sellable price and an unsellable one. It is
     re-armed to the full floor ONLY by a FRESH refill (a refill newer than the one
@@ -125,7 +133,8 @@ def compute_fee_target(channel, signals, now, last_forward_ts=None, last_refill_
         effective_floor = float(hard_floor)
         new_level = None
     else:
-        idle = (now - (last_forward_ts or 0)) > FLOOR_DECAY_IDLE_SECONDS
+        last_activity = max(last_forward_ts or 0, last_drop_ts or 0)
+        idle = (now - last_activity) > FLOOR_DECAY_IDLE_SECONDS
         fresh_refill = (last_refill_ts or 0) > prev_armed_ts
         if prev_level is None or fresh_refill:
             level = float(hard_floor)            # (re)arm to the full recoup floor
@@ -318,7 +327,8 @@ def update_all_fees(dry_run=False):
 
             target_info = compute_fee_target(ch, signals, now,
                                               last_forward_ts=last_forward_ts,
-                                              last_refill_ts=last_refill_ts)
+                                              last_refill_ts=last_refill_ts,
+                                              last_drop_ts=db.get_last_forward_fail_ts(chan_id))
             new_ppm = target_info["target_ppm"]
             reason = target_info["reason"]
             broadcast, why = _should_broadcast(

@@ -170,6 +170,53 @@ class SoftFloorDecayTests(unittest.TestCase):
         self.assertLess(r["target_ppm"], hard)            # did NOT snap back to full
         self.assertEqual(r["floor_decay_anchor_ppm"], 350)
 
+    def test_recent_drops_gate_decay(self):
+        # Channel idle 10d by forwards, but senders keep ATTEMPTING at the
+        # current price (INSUFFICIENT_BALANCE drops) — demand at this price
+        # is proven, the floor must hold instead of decaying.
+        hard = int(round(1000 * config.REBALANCE_FEE_MARGIN))
+        started = self.NOW - int(config.FLOOR_DECAY_HALFLIFE_DAYS * 86400)
+        with patch("db.get_last_refill_ppm", return_value=1000):
+            r = engine.compute_fee_target(
+                self._channel(), self._signals(
+                    floor_decay_started_ts=started, floor_decay_anchor_ppm=hard),
+                now=self.NOW, last_forward_ts=self.NOW - 10 * 86400,
+                last_drop_ts=self.NOW - 3600,  # dropped a forward 1h ago
+            )
+        self.assertEqual(r["floor_ppm"], hard)
+        self.assertEqual(r["source"], "floor")
+
+    def test_stale_drops_do_not_gate_decay(self):
+        # Drops older than the idle window are no longer evidence — decay runs.
+        base = engine.sigmoid_fee_ppm(0.5)
+        hard = int(round(1000 * config.REBALANCE_FEE_MARGIN))
+        started = self.NOW - int(config.FLOOR_DECAY_HALFLIFE_DAYS * 86400)
+        with patch("db.get_last_refill_ppm", return_value=1000):
+            r = engine.compute_fee_target(
+                self._channel(), self._signals(
+                    floor_decay_started_ts=started, floor_decay_anchor_ppm=hard),
+                now=self.NOW, last_forward_ts=self.NOW - 10 * 86400,
+                last_drop_ts=self.NOW - 10 * 86400,  # drops dried up too
+            )
+        expected = base + (hard - base) * 0.5
+        self.assertAlmostEqual(r["target_ppm"], round(expected), delta=1)
+        self.assertEqual(r["source"], "floor-decaying")
+
+    def test_drops_hold_but_do_not_snap_back(self):
+        # Drops gate further decay but must NOT restore an already-decayed
+        # level — same no-whipsaw rule as forwards.
+        with patch("db.get_last_refill_ppm", return_value=1000):
+            r = engine.compute_fee_target(
+                self._channel(0.9),
+                self._signals(floor_decay_anchor_ppm=600,
+                              floor_decay_started_ts=self.NOW - 86400,
+                              floor_armed_refill_ts=1000),
+                now=self.NOW, last_forward_ts=self.NOW - 10 * 86400,
+                last_drop_ts=self.NOW - 3600,
+                last_refill_ts=1000,
+            )
+        self.assertEqual(r["target_ppm"], 600)  # held, not re-armed to 1100
+
     def test_fresh_refill_rearms_to_full_floor(self):
         # A refill newer than the armed ts re-arms the floor to the full recoup level.
         with patch("db.get_last_refill_ppm", return_value=553):

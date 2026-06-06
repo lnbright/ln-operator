@@ -73,7 +73,11 @@
     The `last_refill × REBALANCE_FEE_MARGIN` floor is HARD while forwarding but
     DECAYS toward the market-clearing fee once a channel sits idle
     (`FLOOR_DECAY_*`), so a priced-out channel can find a sellable price; resets on
-    the next forward / fresh refill. A separate up-only fast-drain market-mult bump
+    the next forward / fresh refill. Idle = true silence: recent
+    INSUFFICIENT_BALANCE drops gate decay like forwards do (a drop = sender
+    accepted the advertised fee but the channel was empty — demand at the current
+    price; decaying it would discount the eventual refill and drag earned_ppm /
+    the budget cap down). Drops hold the floor, never restore a decayed level. A separate up-only fast-drain market-mult bump
     (`MARKET_MULT_FASTDRAIN_STEP`, fired in the 2h loop on `forward_fail_log`
     INSUFFICIENT_BALANCE) raises the resting fee after the first bad cycle; the
     routine ±`MARKET_MULT_STEP` drift stays nightly.
