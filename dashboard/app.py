@@ -244,9 +244,17 @@ def get_dashboard_data():
     channels_raw, _ = lnd_get("/v1/channels?peer_alias_lookup=true")
     raw_channels = channels_raw.get("channels", []) if channels_raw else []
     our_pubkey = info.get("identity_pubkey", "")
+    # Sibling channels to the same peer share an alias — tag duplicates with
+    # a short scid suffix so the channel list can tell them apart.
+    alias_counts = {}
+    for ch in raw_channels:
+        a = ch.get("peer_alias") or ch.get("remote_pubkey", "")[:16]
+        alias_counts[a] = alias_counts.get(a, 0) + 1
     channels_enriched = []
     for ch in raw_channels:
         chan_id   = ch.get("chan_id", "")
+        a = ch.get("peer_alias") or ch.get("remote_pubkey", "")[:16]
+        ch["alias_tag"] = chan_id[-5:] if alias_counts.get(a, 0) > 1 else ""
         capacity  = int(ch.get("capacity", 0))
         local     = int(ch.get("local_balance", 0))
         ch["perf"]      = get_channel_perf(chan_id, days30)
@@ -1035,7 +1043,7 @@ TEMPLATE = """
           {% set bar_cls  = 'bar-depleted' if ratio < 20 else ('bar-saturated' if ratio > 80 else 'bar-healthy') %}
           <tr>
             <td>
-              <div style="font-weight:700;font-size:12px;">{{ ch.peer_alias if ch.peer_alias else ch.remote_pubkey[:16] ~ '...' }}</div>
+              <div style="font-weight:700;font-size:12px;">{{ ch.peer_alias if ch.peer_alias else ch.remote_pubkey[:16] ~ '...' }}{% if ch.alias_tag %} <span style="font-weight:400;font-size:10px;color:var(--muted);">·{{ ch.alias_tag }}</span>{% endif %}</div>
               <div style="font-size:10px;color:var(--muted);margin-top:2px;">{{ ch.commitment_type }}</div>
             </td>
             <td>

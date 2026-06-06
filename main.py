@@ -481,7 +481,20 @@ def execute_rebalance_plans(plans, log, executor=None):
 
         moved = result.get("amount", 0) if result.get("success") else 0
         if moved > 0:
-            target_deficits[target_id] = max(0, deficit - moved)
+            # Sats always left the planned source, but with sibling channels
+            # to the same peer they may have landed on a different channel
+            # than planned (last_hop_pubkey pins the peer, not the channel).
+            # Credit each landed channel's deficit if we track it; sats that
+            # landed on an untracked sibling leave the planned target's
+            # deficit open so later plans keep topping it up.
+            landed = result.get("moved_by_target") or {target_id: moved}
+            for tid, amt in landed.items():
+                if tid in target_deficits:
+                    target_deficits[tid] = max(0, target_deficits[tid] - amt)
+                elif tid != target_id:
+                    log.info("rebalance landed %s sats on untracked sibling %s "
+                             "(planned %s) — planned deficit left open",
+                             f"{amt:,}", tid, target_id)
             source_remaining[source_id] = max(0, available - moved)
             log.info("rebalance succeeded: %s→%s moved %s sats (fee %d sats, %.0f ppm)",
                      p["source_alias"], p["target_alias"],

@@ -251,5 +251,115 @@ class FallbackChainingTests(unittest.TestCase):
         self.assertEqual(stub.calls[3]["amount"], 1_000_000)
 
 
+class ChunkAttributionTests(unittest.TestCase):
+    """engine.execute_rebalance must write each successful chunk against the
+    channel the invoice actually settled on, not the planned target."""
+
+    def test_chunk_recorded_against_landed_sibling(self):
+        from unittest.mock import MagicMock
+        from engine import rebalance_executor as rex
+
+        plan = _plan("Boltz", "LNBigA", 200_000,
+                     source_surplus=1_000_000, target_deficit=200_000)
+
+        with patch.object(rex, "lnd_client") as mlnd, \
+                patch.object(rex, "db") as mdb:
+            mlnd.add_invoice.return_value = {"payment_request": "lnbc1fake"}
+            mlnd.send_payment_v2.return_value = {
+                "status": "SUCCEEDED", "fee_sat": 100, "payment_hash": "ab" * 32}
+            mlnd.get_invoice_landing_chan.return_value = "tgt-LNBigB"  # sibling
+
+            result = rex.execute_rebalance(plan)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["moved_by_target"], {"tgt-LNBigB": 200_000})
+        # The rebalance_log row carries the landed channel, so
+        # last_refill_ppm / fee floor accrue to the right sibling.
+        self.assertEqual(mdb.save_rebalance_attempt.call_args[0][1], "tgt-LNBigB")
+
+    def test_lookup_failure_falls_back_to_planned_target(self):
+        from engine import rebalance_executor as rex
+
+        plan = _plan("Boltz", "LNBigA", 200_000,
+                     source_surplus=1_000_000, target_deficit=200_000)
+
+        with patch.object(rex, "lnd_client") as mlnd, \
+                patch.object(rex, "db") as mdb:
+            mlnd.add_invoice.return_value = {"payment_request": "lnbc1fake"}
+            mlnd.send_payment_v2.return_value = {
+                "status": "SUCCEEDED", "fee_sat": 100, "payment_hash": "ab" * 32}
+            mlnd.get_invoice_landing_chan.return_value = None  # lookup failed
+
+            result = rex.execute_rebalance(plan)
+
+        self.assertEqual(result["moved_by_target"], {"tgt-LNBigA": 200_000})
+        self.assertEqual(mdb.save_rebalance_attempt.call_args[0][1], "tgt-LNBigA")
+
+
+class SiblingLandingTests(unittest.TestCase):
+    """With two channels to the same peer, last_hop_pubkey pins only the
+    peer — chunks may land on a sibling. The executor result carries
+    moved_by_target so the ledgers credit the channel that actually
+    received the sats."""
+
+    def test_landing_on_tracked_sibling_credits_that_deficit(self):
+        # Both siblings are depleted targets. The LNBigA plan's sats land
+        # entirely on sibling LNBigB → B's deficit is cleared, A's stays
+        # open, so A's own later plan still fires for the full amount.
+        plans = [
+            _plan("Boltz", "LNBigA", 2_000_000,
+                  source_surplus=6_000_000, target_deficit=2_000_000),
+            _plan("Kraken", "LNBigB", 2_000_000,
+                  source_surplus=6_000_000, target_deficit=2_000_000),
+        ]
+        landed_on_b = _success(2_000_000)
+        landed_on_b["moved_by_target"] = {"tgt-LNBigB": 2_000_000}
+        stub = StubExecutor([landed_on_b, _success(2_000_000)])
+
+        _run(plans, stub)
+
+        # LNBigB's deficit was cleared by the first plan's sats, so its own
+        # plan is skipped — only the first plan should have executed... but
+        # LNBigA's deficit is still open with no remaining plan for it.
+        self.assertEqual(len(stub.calls), 1)
+        self.assertEqual(stub.calls[0]["target"], "LNBigA")
+
+    def test_landing_on_untracked_sibling_leaves_deficit_open(self):
+        # Sats landed on a sibling that is NOT a planned target — the
+        # planned target's deficit must stay open so the fallback tops it up.
+        plans = [
+            _plan("Boltz", "LNBigA", 2_000_000,
+                  source_surplus=6_000_000, target_deficit=2_000_000),
+            _plan("Kraken", "LNBigA", 2_000_000,
+                  source_surplus=6_000_000, target_deficit=2_000_000,
+                  is_fallback=True),
+        ]
+        landed_elsewhere = _success(2_000_000)
+        landed_elsewhere["moved_by_target"] = {"tgt-LNBigB-sibling": 2_000_000}
+        stub = StubExecutor([landed_elsewhere, _success(2_000_000)])
+
+        _run(plans, stub)
+
+        # Fallback fires because the planned deficit was not credited.
+        self.assertEqual(len(stub.calls), 2)
+        self.assertEqual(stub.calls[1]["target"], "LNBigA")
+        self.assertEqual(stub.calls[1]["amount"], 2_000_000)
+
+    def test_missing_moved_by_target_falls_back_to_planned_target(self):
+        # Results without moved_by_target (legacy/stub) behave as before.
+        plans = [
+            _plan("Boltz", "ACINQ", 2_000_000,
+                  source_surplus=6_000_000, target_deficit=2_000_000),
+            _plan("Kraken", "ACINQ", 2_000_000,
+                  source_surplus=6_000_000, target_deficit=2_000_000,
+                  is_fallback=True),
+        ]
+        stub = StubExecutor([_success(2_000_000)])
+
+        _run(plans, stub)
+
+        self.assertEqual(len(stub.calls), 1)  # fallback skipped — deficit cleared
+
+
 if __name__ == "__main__":
     unittest.main()

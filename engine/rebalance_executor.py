@@ -111,6 +111,7 @@ def execute_rebalance(plan, dry_run=False, on_progress=None):
 
     total_moved = 0
     total_fees = 0
+    moved_by_target = {}     # chan_id -> sats that actually landed there
     remaining = plan["amount_sats"]
     chunk_amount = remaining  # start with full amount
     min_chunk = 100_000       # never try less than 100k sats
@@ -147,10 +148,23 @@ def execute_rebalance(plan, dry_run=False, on_progress=None):
                   f"{chunk_duration:.0f}s, fee {attempt['fee_paid']:,} sats "
                   f"({attempt['fee_ppm']:.0f} ppm)")
 
+            # Resolve where the chunk actually landed. last_hop_pubkey pins
+            # the PEER, not the channel — with sibling channels to the same
+            # peer LND may deliver into either one, and the books
+            # (last_refill_ppm, fee floor, earned attribution) must follow
+            # the sats, not the plan.
+            landed_chan = lnd_client.get_invoice_landing_chan(
+                attempt.get("payment_hash", "")) or plan["target_chan_id"]
+            if landed_chan != plan["target_chan_id"]:
+                log.info("  chunk landed on sibling channel %s (planned %s)",
+                         landed_chan, plan["target_chan_id"])
+            moved_by_target[landed_chan] = (
+                moved_by_target.get(landed_chan, 0) + chunk_amount)
+
             # Persist this chunk as its own row so sync_rebalances can dedup by
             # payment_hash instead of misattributing it to a "manual" send.
             db.save_rebalance_attempt(
-                plan["source_chan_id"], plan["target_chan_id"],
+                plan["source_chan_id"], landed_chan,
                 plan["source_alias"], plan["target_alias"],
                 chunk_amount, attempt["fee_paid"],
                 True, "", chunk_duration,
@@ -184,6 +198,7 @@ def execute_rebalance(plan, dry_run=False, on_progress=None):
     if total_moved > 0:
         result["success"] = True
         result["amount"] = total_moved
+        result["moved_by_target"] = moved_by_target
         result["fee_paid"] = total_fees
         result["fee_ppm"] = total_fees / total_moved * 1_000_000 if total_moved > 0 else 0
         log.info("rebalance complete: %s→%s moved %s of %s sats in %.1fs across %d chunk(s), "

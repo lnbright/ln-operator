@@ -42,7 +42,16 @@
   of their plans. Planner attaches `target_total_deficit` and
   `source_total_surplus` to each plan dict so the executor needs no extra
   LND calls.
-- Manual fee pins (`fee_overrides` table) suppress auto-fees per channel.
+- **Sibling channels (2+ channels to one peer) are handled by landing-channel
+  attribution, not route pinning**: `SendPaymentV2` can pin the last hop only by
+  pubkey, and LND's non-strict forwarding pools sibling liquidity at forward time
+  anyway — so the executor resolves where each chunk actually settled via
+  `lnd_client.get_invoice_landing_chan` (invoice HTLC records = ground truth) and
+  writes the rebalance_log row / decrements the deficit ledger against that
+  channel. `sync_rebalances` resolves targets from the route's last-hop chan_id
+  (`resolve_target_chan`), falling back to the peer map only when the peer has a
+  single channel; ambiguous → skip rather than misattribute. Dashboard tags
+  duplicate-alias channels with a short scid suffix.
   `engine.update_all_fees` checks the table first; pinned channels use the
   stored ppm with reason `manual pin: N ppm` instead of `calculate_fee_ppm`.
   Set via `ln-operator overwrite_fee`, cleared via `ln-operator clear_fee`, shown by `status`.

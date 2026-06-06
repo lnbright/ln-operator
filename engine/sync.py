@@ -90,6 +90,22 @@ def sync_forwarding_history():
     return total_synced
 
 
+def resolve_target_chan(last_hop_chan, peer_chans, our_chan_ids):
+    """Pick the channel a circular self-payment landed on.
+
+    The route's last hop names the exact channel into us — trust it when
+    it's one of ours. Fall back to the peer map only when that peer has a
+    single channel (unambiguous). With sibling channels and no usable route
+    chan_id, return "" — skipping beats misattributing the refill to the
+    wrong sibling's last_refill_ppm / fee floor.
+    """
+    if last_hop_chan in our_chan_ids:
+        return last_hop_chan
+    if len(peer_chans) == 1:
+        return peer_chans[0]
+    return ""
+
+
 def sync_rebalances():
     """Sync circular rebalance payments from LND into rebalance_log.
 
@@ -113,12 +129,12 @@ def sync_rebalances():
     channels = lnd_client.get_channels()
     channels = lnd_client.resolve_aliases(channels)
     chan_alias_map = {}
-    chan_peer_map = {}    # peer_pubkey -> chan_id
+    chan_peer_map = {}    # peer_pubkey -> [chan_id, ...] (peers can have sibling channels)
     chan_open_ts = {}     # chan_id -> timestamp when channel opened
     now = int(time.time())
     for ch in channels:
         chan_alias_map[ch["chan_id"]] = ch.get("peer_alias", ch["chan_id"][:12])
-        chan_peer_map[ch.get("peer_pubkey", "")] = ch["chan_id"]
+        chan_peer_map.setdefault(ch.get("peer_pubkey", ""), []).append(ch["chan_id"])
         chan_open_ts[ch["chan_id"]] = chan_open_ts_from_id(
             ch["chan_id"], current_block_height, now
         )
@@ -161,7 +177,11 @@ def sync_rebalances():
             # Second-to-last hop: the peer whose channel received the payment (target)
             second_last_hop = hops[-2]
             target_peer_pubkey = second_last_hop.get("pub_key", "")
-            target_chan_id = chan_peer_map.get(target_peer_pubkey, "")
+            target_chan_id = resolve_target_chan(
+                str(last_hop.get("chan_id", "") or ""),
+                chan_peer_map.get(target_peer_pubkey, []),
+                chan_alias_map,
+            )
 
             # Skip if source and target are the same channel — not a real rebalance
             # (e.g. a test self-payment that goes out and comes back on same peer)

@@ -357,6 +357,39 @@ def add_invoice(amount_sats, memo="ln-operator-rebalance", expiry=3600):
     return _post("/v1/invoices", data)
 
 
+def get_invoice_landing_chan(payment_hash_hex):
+    """Return the chan_id that actually received a settled invoice's HTLCs.
+
+    SendPaymentV2 can only pin the last hop by PUBKEY (last_hop_pubkey) —
+    with more than one channel to the same peer, LND (and the peer's
+    non-strict forwarding) may deliver into any sibling channel. The
+    invoice's settled HTLC records are the ground truth for where the sats
+    landed. Returns the chan_id carrying the largest settled amount, or
+    None if the lookup fails or no settled HTLC is found.
+    """
+    if not payment_hash_hex:
+        return None
+    try:
+        inv = _get(f"/v1/invoice/{payment_hash_hex}")
+    except Exception as e:
+        log.warning("get_invoice_landing_chan: lookup failed for %s: %s",
+                    payment_hash_hex[:16], e)
+        return None
+    if not inv:
+        return None
+    per_chan = {}
+    for htlc in inv.get("htlcs", []):
+        if htlc.get("state") != "SETTLED":
+            continue
+        cid = str(htlc.get("chan_id", "") or "")
+        if not cid or cid == "0":
+            continue
+        per_chan[cid] = per_chan.get(cid, 0) + int(htlc.get("amt_msat", 0) or 0)
+    if not per_chan:
+        return None
+    return max(per_chan, key=per_chan.get)
+
+
 # ─── Utility ─────────────────────────────────────────────────────
 
 def resolve_aliases(channels):
