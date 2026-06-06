@@ -633,18 +633,20 @@ def save_manual_rebalance(source_chan_id, target_chan_id, source_alias, target_a
 
 
 def get_repeated_rebalance_failures(chan_id, min_failures=3):
-    """Check if a channel has failed to rebalance N+ times in a row.
+    """Check if a channel has failed to be REFILLED N+ times in a row.
 
     Returns the count of consecutive failures if >= min_failures, else 0.
-    Looks at the most recent N rebalance attempts for this channel
-    and checks if they are all failures.
+    Looks at the most recent N rebalance attempts targeting this channel.
+    A failed attempt only reflects on the target — the source had outbound
+    to give; the route failure (timeout / no-route / fee-too-low) belongs
+    to the receiving side.
     """
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT success FROM rebalance_log
-            WHERE (source_chan_id = ? OR target_chan_id = ?)
+            WHERE target_chan_id = ?
             ORDER BY ts DESC LIMIT ?
-        """, (chan_id, chan_id, min_failures)).fetchall()
+        """, (chan_id, min_failures)).fetchall()
 
     if len(rows) < min_failures:
         return 0  # not enough history yet
