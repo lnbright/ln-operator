@@ -45,7 +45,7 @@ Key settings in `config.py`:
 |---------|---------|---|
 | `EARNED_PPM_WINDOW_DAYS` | 21 | Trailing window for per-channel earned-ppm |
 | `EARNED_PPM_MIN_VOLUME_SATS` | 2,000,000 | Min OUT-traffic to trust the ratio; below → "unjudged" (full escalation, no cap) |
-| `EARNED_PPM_MAX_LOOKBACK_DAYS` | 90 | Evidence widening: window doubles (21→42→84→90) until volume suffices; unjudged only if quieter than that. Prevents the unjudged cliff |
+| `EARNED_PPM_MAX_LOOKBACK_DAYS` | 90 | Evidence expiry clock, both directions: earned-ppm window doubles (21→42→84→90) until volume suffices (unjudged only if quieter — prevents the unjudged cliff), and rebalance *failures* older than this stop counting toward escalation/structural (a re-entering channel resumes at last_refill × 1.0) |
 | `REBALANCE_PROFIT_HORIZON` | 1.25 | Judged budget cap = earned_ppm × this (≈ break-even on the recoup price) |
 | `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` | 5 | Consecutive fails while profit-capped → flag structural (capital decision) |
 

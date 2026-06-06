@@ -72,7 +72,14 @@ blind spot, so on a steady sink it tends to persist until you act:
   (21 → 42 → 84 → 90d) before giving up, so adverse evidence ages out gradually
   and this path is realistic only after ~3 months of silence.
 
-There is also a fourth, automatic path:
+There are also two further automatic paths:
+
+- **Failures expire** — refusals older than `EARNED_PPM_MAX_LOOKBACK_DAYS`
+  (90d) stop counting (same clock as the earnings evidence), so a flag that
+  nothing else clears drops below the fail threshold roughly once a quarter
+  and the channel gets a free 5-attempt re-probe at the cap price. Still
+  refused → re-flags within hours at zero cost; market moved → it quietly
+  comes back to life.
 
 - **Liquidity recovers** — if the channel's `local_ratio` climbs back to
   `REBALANCE_TARGET` (≥50%), the structural verdict is cleared regardless of
