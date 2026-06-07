@@ -745,9 +745,10 @@ TEMPLATE = """
   .card { background: var(--card); border: 1px solid var(--border); padding: 20px; }
   .card-title { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
   .card-title::before { content: ''; display: block; width: 3px; height: 12px; background: var(--accent); }
-  .tab-group { margin-left: auto; display: flex; gap: 4px; }
   .tab-btn { background: none; border: 1px solid var(--border); color: var(--muted); font-family: 'Syne', sans-serif; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; padding: 3px 10px; cursor: pointer; }
   .tab-btn.active { color: var(--accent); border-color: var(--accent); }
+  .page-tabs { display: flex; gap: 6px; margin-bottom: 24px; }
+  .page-tabs .tab-btn { font-size: 11px; padding: 8px 24px; }
 
   .stat-row { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
   .stat-row:last-child { border-bottom: none; }
@@ -859,6 +860,15 @@ TEMPLATE = """
 
   {% if data.info %}
   {% set info = data.info %}
+
+  <!-- Page tabs: Node (health/infra) · Activity (flows) · Advanced (economics) -->
+  <nav class="page-tabs">
+    <button class="tab-btn active" id="ptab-node" onclick="pageTab('node')">Node</button>
+    <button class="tab-btn" id="ptab-activity" onclick="pageTab('activity')">Activity</button>
+    <button class="tab-btn" id="ptab-advanced" onclick="pageTab('advanced')">Advanced</button>
+  </nav>
+
+  <div id="tab-node">
 
   <!-- Top stats row -->
   <div class="grid-3">
@@ -976,6 +986,51 @@ TEMPLATE = """
   </div>
   {% endif %}
 
+  <!-- Channel Backup -->
+  {% if data.backup %}
+  {% set bk = data.backup %}
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">Channel Backup — Off-site</div>
+      {% set badge_class = {'fresh':'badge-green','error':'badge-yellow','stale':'badge-red','never':'badge-muted'}[bk.status] %}
+      {% set badge_label = {'fresh':'fresh','error':'last attempt failed','stale':'stale','never':'no backup yet'}[bk.status] %}
+      <div class="stat-row">
+        <span class="stat-label">Status</span>
+        <span><span class="badge {{ badge_class }}">{{ badge_label }}</span></span>
+      </div>
+      {% if bk.last_success %}
+      <div class="stat-row">
+        <span class="stat-label">Last successful upload</span>
+        <span class="stat-value">{{ bk.last_success.ts | format_ts }} &nbsp;<span style="color:var(--muted)">({{ bk.last_success.ts | format_age }})</span></span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">File size</span>
+        <span class="stat-value">{{ "{:,}".format(bk.last_success.file_bytes or 0) }} bytes</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Destination</span>
+        <span class="stat-value">{{ bk.last_success.destination }}</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Trigger</span>
+        <span class="stat-value">{{ bk.last_success.trigger }}</span>
+      </div>
+      {% else %}
+      <div class="stat-row">
+        <span class="stat-label">Last successful upload</span>
+        <span class="stat-value red">never</span>
+      </div>
+      {% endif %}
+      {% if bk.last_attempt and not bk.last_attempt.success %}
+      <div class="stat-row">
+        <span class="stat-label">Last error ({{ bk.last_attempt.ts | format_age }})</span>
+        <span class="stat-value red" style="max-width:75%;">{{ bk.last_attempt.error or '—' }}</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Node Balance -->
   <div class="grid-1">
     <div class="card">
@@ -1049,19 +1104,44 @@ TEMPLATE = """
     </div>
   </div>
 
+  <!-- Recent Alerts -->
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">Recent Alerts</div>
+      {% if data.alerts %}
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Time</th><th>Type</th><th>Message</th></tr></thead>
+        <tbody>
+          {% for a in data.alerts %}
+          <tr>
+            <td style="color:var(--muted);font-size:10px;white-space:nowrap;">{{ a.ts | format_ts }}</td>
+            <td>
+              {% if 'offline' in a.alert_type %}<span class="badge badge-red">offline</span>
+              {% elif 'depleted' in a.alert_type %}<span class="badge badge-yellow">depleted</span>
+              {% elif 'saturated' in a.alert_type %}<span class="badge badge-blue">saturated</span>
+              {% elif 'rebalance_failing' in a.alert_type %}<span class="badge badge-red">rebal failing</span>
+              {% else %}<span class="badge badge-muted">{{ a.alert_type }}</span>{% endif %}
+            </td>
+            <td style="color:var(--muted);">{{ a.message }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table></div>
+      {% else %}
+      <div class="empty-state">No alerts — all clear ✓</div>
+      {% endif %}
+    </div>
+  </div>
+
+  </div><!-- /tab-node -->
+  <div id="tab-activity" style="display:none;">
+
   <!-- Channel Details — enriched with operator performance data -->
   {% if data.channels %}
   <div class="grid-1">
     <div class="card">
-      <div class="card-title">Channel Details
-        <span class="tab-group">
-          <button class="tab-btn active" onclick="chanTab(this,'chan-simple')">Simple</button>
-          <button class="tab-btn" onclick="chanTab(this,'chan-advanced')">Advanced</button>
-        </span>
-      </div>
-
-      {# ── Simple tab: liquidity + headline economics ─────────────── #}
-      <div class="table-wrap" id="chan-simple"><table class="chan-table">
+      <div class="card-title">Channel Details</div>
+      <div class="table-wrap"><table class="chan-table">
         <thead>
           <tr>
             <th style="width:16%">Peer</th>
@@ -1120,261 +1200,9 @@ TEMPLATE = """
         </tbody>
       </table>
       </div>
-
-      {# ── Advanced tab: the full economics layer per channel ──────── #}
-      <div class="table-wrap" id="chan-advanced" style="display:none;"><table class="chan-table">
-        <thead>
-          <tr>
-            <th style="width:16%">Peer</th>
-            <th style="width:14%">Balance</th>
-            <th>Local Fee [ppm]</th>
-            <th>Clearing [ppm]</th>
-            <th>Mkt Mult</th>
-            <th>Floor [ppm]</th>
-            <th>Earned [ppm]</th>
-            <th>Refill Budget [ppm]</th>
-            <th>Rebal Cost 30d</th>
-            <th>Net Lifetime</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for ch in data.channels %}
-          {% set local    = ch.local_balance | int %}
-          {% set ratio    = ch.local_pct %}
-          {% set perf     = ch.perf %}
-          {% set bar_cls  = 'bar-depleted' if ratio < 20 else ('bar-saturated' if ratio > 80 else 'bar-healthy') %}
-          <tr>
-            <td>
-              <div style="font-weight:700;font-size:12px;">{{ ch.peer_alias if ch.peer_alias else ch.remote_pubkey[:16] ~ '...' }}{% if ch.alias_tag %} <span style="font-weight:400;font-size:10px;color:var(--muted);">·{{ ch.alias_tag }}</span>{% endif %}</div>
-            </td>
-            <td>
-              <div class="balance-bar"><div class="balance-bar-fill {{ bar_cls }}" style="width:{{ ratio }}%"></div></div>
-              <div style="font-size:10px;color:var(--muted);">{{ ratio }}% local</div>
-            </td>
-            <td style="font-size:11px;">
-              {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
-              {% if ch.gate and ch.gate.inbound_fee_ppm %}<div style="font-size:9px;color:var(--muted);" title="inbound fee — negative = discount pulling organic refill">(inbound {{ ch.gate.inbound_fee_ppm }})</div>{% endif %}
-            </td>
-            <td style="font-size:11px;">
-              {% if ch.gate and ch.gate.clearing_ppm is not none %}<span title="sigmoid(local ratio) × market multiplier — where the fee settles with no floor">{{ ch.gate.clearing_ppm }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
-            </td>
-            <td style="font-size:11px;color:{% if ch.gate and ch.gate.mult > 0 %}var(--green){% elif ch.gate and ch.gate.mult < 0 %}var(--red){% else %}var(--muted){% endif %};">
-              {% if ch.gate %}{{ "%+.2f" % ch.gate.mult }}{% else %}—{% endif %}
-            </td>
-            <td style="font-size:11px;">
-              {% if ch.gate and ch.gate.floor_ppm %}
-                <span title="outbound floor — recoups last refill ({{ ch.gate.last_refill_ppm }} ppm) × margin{% if ch.gate.floor_decaying %}; decaying toward the clearing fee while idle{% endif %}">{{ ch.gate.floor_ppm }}{% if ch.gate.floor_decaying %} ↓ <span style="color:var(--muted);font-size:9px;">of {{ ch.gate.hard_floor_ppm }}</span>{% endif %}</span>
-              {% else %}<span style="color:var(--muted);" title="no refill history — sigmoid alone drives the fee">—</span>{% endif %}
-            </td>
-            <td style="font-size:11px;">
-              {% if ch.gate and ch.gate.judged %}<span title="trailing revenue / out-volume over the earned-ppm window">{{ ch.gate.earned_ppm }}</span>
-              {% elif ch.gate %}<span style="color:var(--muted);" title="too little out-volume to judge profitability — keeps full rebalance escalation">unjudged</span>
-              {% else %}<span style="color:var(--muted);">—</span>{% endif %}
-            </td>
-            <td style="font-size:11px;">
-              {# What the pipeline will pay to refill this channel, and why. #}
-              {% if ch.gate %}
-                {% if ch.gate.structural %}<span style="color:var(--red);" title="{{ ch.gate.budget_reason }}">structural</span>
-                {% elif ch.gate.profit_capped %}<span style="color:var(--yellow);" title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }} ⛒</span>
-                {% else %}<span title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }}</span>{% endif %}
-              {% else %}<span style="color:var(--muted);">—</span>{% endif %}
-            </td>
-            <td class="{% if perf.reb_cost > 0 %}amount-negative{% else %}amount-muted{% endif %}">
-              {% if perf.reb_cost > 0 %}-{{ "{:,}".format(perf.reb_cost) }}{% else %}—{% endif %}
-            </td>
-            <td class="{% if perf.net_all > 0 %}amount-positive{% elif perf.net_all < 0 %}amount-negative{% else %}amount-muted{% endif %}">
-              {% if perf.net_all != 0 %}{% if perf.net_all > 0 %}+{% endif %}{{ "{:,}".format(perf.net_all) }}{% else %}—{% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      </div>
     </div>
   </div>
   {% endif %}
-
-  <!-- Channel Backup -->
-  {% if data.backup %}
-  {% set bk = data.backup %}
-  <div class="grid-1">
-    <div class="card">
-      <div class="card-title">Channel Backup — Off-site</div>
-      {% set badge_class = {'fresh':'badge-green','error':'badge-yellow','stale':'badge-red','never':'badge-muted'}[bk.status] %}
-      {% set badge_label = {'fresh':'fresh','error':'last attempt failed','stale':'stale','never':'no backup yet'}[bk.status] %}
-      <div class="stat-row">
-        <span class="stat-label">Status</span>
-        <span><span class="badge {{ badge_class }}">{{ badge_label }}</span></span>
-      </div>
-      {% if bk.last_success %}
-      <div class="stat-row">
-        <span class="stat-label">Last successful upload</span>
-        <span class="stat-value">{{ bk.last_success.ts | format_ts }} &nbsp;<span style="color:var(--muted)">({{ bk.last_success.ts | format_age }})</span></span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">File size</span>
-        <span class="stat-value">{{ "{:,}".format(bk.last_success.file_bytes or 0) }} bytes</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Destination</span>
-        <span class="stat-value">{{ bk.last_success.destination }}</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Trigger</span>
-        <span class="stat-value">{{ bk.last_success.trigger }}</span>
-      </div>
-      {% else %}
-      <div class="stat-row">
-        <span class="stat-label">Last successful upload</span>
-        <span class="stat-value red">never</span>
-      </div>
-      {% endif %}
-      {% if bk.last_attempt and not bk.last_attempt.success %}
-      <div class="stat-row">
-        <span class="stat-label">Last error ({{ bk.last_attempt.ts | format_age }})</span>
-        <span class="stat-value red" style="max-width:75%;">{{ bk.last_attempt.error or '—' }}</span>
-      </div>
-      {% endif %}
-    </div>
-  </div>
-  {% endif %}
-
-  <!-- Forwarding Failures — Lost-Revenue Watch -->
-  {% if data.fwd_fail %}
-  {% set ff = data.fwd_fail %}
-  <div class="grid-1">
-    <div class="card">
-      <div class="card-title">Forwarding Failures — Lost-Revenue Glance (24h)</div>
-      {#
-        Service badge tracks the htlc_monitor daemon. These events are live-only
-        (LND persists them nowhere), so a dead daemon = a blind window, NOT a
-        clean day — that's why an inactive service is flagged red even at 0.
-      #}
-      <div class="stat-row">
-        <span class="stat-label">Monitor service</span>
-        <span>
-          {% if ff.service == 'active' %}<span class="badge badge-green" title="lnd-htlc-monitor running — stream subscribed">alive &amp; polling</span>
-          {% elif ff.service == 'unknown' %}<span class="badge badge-muted" title="could not query systemctl">unknown</span>
-          {% else %}<span class="badge badge-red" title="lnd-htlc-monitor not running — failures going uncaptured">{{ ff.service }} — not capturing</span>{% endif %}
-        </span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Dropped forwards</span>
-        <span class="stat-value {% if ff.total_n > 0 %}yellow{% endif %}">
-          {{ ff.total_n }} {% if ff.total_n %}<span style="color:var(--muted);font-size:11px;">({{ "{:,}".format(ff.total_sats) }} sats of flow)</span>{% endif %}
-        </span>
-      </div>
-      {% if ff.liq_n > 0 %}
-      <div class="stat-row">
-        <span class="stat-label">↳ Empty-channel (insufficient balance)</span>
-        <span class="stat-value red">{{ ff.liq_n }} drops · {{ "{:,}".format(ff.liq_sats) }} sats</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Est. lost routing fees</span>
-        <span class="stat-value red" style="font-weight:700;" title="dropped sats × our outbound ppm on the starved channel">~{{ "{:,}".format(ff.est_lost_fee) }} sats</span>
-      </div>
-      {% if ff.top %}
-      <div class="stat-row">
-        <span class="stat-label">Worst channel</span>
-        <span class="stat-value">{{ ff.top.alias }} <span style="color:var(--muted);font-size:11px;">({{ "{:,}".format(ff.top.sats) }} sats over {{ ff.top.n }} drops)</span></span>
-      </div>
-      {% endif %}
-      {% endif %}
-      {% if ff.fee_n > 0 %}
-      <div class="stat-row">
-        <span class="stat-label">↳ Fee-too-low (our fee &gt; route)</span>
-        <span class="stat-value">{{ ff.fee_n }} <span style="color:var(--muted);font-size:11px;">— sender under-paid; not a liquidity issue</span></span>
-      </div>
-      {% endif %}
-      {% if ff.other_n > 0 %}
-      <div class="stat-row">
-        <span class="stat-label">↳ Other (expiry / misc)</span>
-        <span class="stat-value" style="color:var(--muted)">{{ ff.other_n }}</span>
-      </div>
-      {% endif %}
-      {% if ff.total_n == 0 %}
-      <div class="stat-row">
-        <span class="stat-label">{% if ff.service == 'active' %}Clean — no forwards dropped in 24h{% else %}No data{% endif %}</span>
-        <span class="stat-value {% if ff.service == 'active' %}green{% else %}red{% endif %}">{% if ff.service == 'active' %}✓{% else %}service down{% endif %}</span>
-      </div>
-      {% endif %}
-      {% if ff.last_event_ts %}
-      <div class="stat-row">
-        <span class="stat-label">Last drop captured</span>
-        <span class="stat-value" style="color:var(--muted)">{{ ff.last_event_ts | format_age }}</span>
-      </div>
-      {% endif %}
-    </div>
-  </div>
-  {% endif %}
-
-  <!-- Payments & Invoices -->
-  <div class="grid-2">
-    <div class="card">
-      <div class="card-title">Recent Payments</div>
-      {% if data.payments %}
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Date</th><th>Amount</th><th>Fee</th><th>Status</th></tr></thead>
-        <tbody>
-          {% for p in data.payments %}
-          <tr>
-            <td>{{ p.creation_date | int | format_ts }}</td>
-            <td class="amount-negative">{{ "{:,}".format(p.value_sat | int) }}</td>
-            <td style="color:var(--muted)">{{ p.fee_sat | int }}</td>
-            <td>{% if p.status == 'SUCCEEDED' %}<span class="badge badge-green">OK</span>{% else %}<span class="badge badge-red">{{ p.status }}</span>{% endif %}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table></div>
-      {% else %}
-      <div class="empty-state">No payments found</div>
-      {% endif %}
-    </div>
-    <div class="card">
-      <div class="card-title">Recent Invoices</div>
-      {% if data.invoices %}
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Date</th><th>Amount</th><th>Memo</th><th>Status</th></tr></thead>
-        <tbody>
-          {% for inv in data.invoices %}
-          <tr>
-            <td>{{ inv.creation_date | int | format_ts }}</td>
-            <td class="amount-positive">{{ "{:,}".format(inv.value | int) }}</td>
-            <td class="truncate" style="max-width:100px;">{{ inv.memo if inv.memo else '—' }}</td>
-            <td>{% if inv.state == 'SETTLED' %}<span class="badge badge-green">Paid</span>{% elif inv.state == 'OPEN' %}<span class="badge badge-yellow">Open</span>{% else %}<span class="badge badge-red">{{ inv.state }}</span>{% endif %}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table></div>
-      {% else %}
-      <div class="empty-state">No invoices found</div>
-      {% endif %}
-    </div>
-  </div>
-
-  <!-- Routing -->
-  <div class="grid-1">
-    <div class="card">
-      <div class="card-title">Recent Routing Events</div>
-      {% if data.forwarding %}
-      <table class="data-table">
-        <thead><tr><th>Date</th><th>Path</th><th>Amount</th><th>Fee Earned</th></tr></thead>
-        <tbody>
-          {% for fwd in data.forwarding %}
-          <tr>
-            <td>{{ fwd.timestamp | int | format_ts }}</td>
-            <td>{{ fwd.in_alias }} → {{ fwd.out_alias }}</td>
-            <td>{{ "{:,}".format(fwd.amt_out | int) }} sats</td>
-            <td class="amount-positive">{{ fwd.fee }} sats</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="empty-state">No routing events yet — run <code>main.py monitor</code> to sync from LND</div>
-      {% endif %}
-    </div>
-  </div>
 
   <!-- Sat Flow — routing map (in→out) -->
   {% if data.sat_flow %}
@@ -1462,7 +1290,73 @@ TEMPLATE = """
   </div>
   {% endif %}
 
-  <!-- ── Operator sections ─────────────────────────────────────── -->
+  <!-- Payments & Invoices -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Recent Payments</div>
+      {% if data.payments %}
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Date</th><th>Amount</th><th>Fee</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for p in data.payments %}
+          <tr>
+            <td>{{ p.creation_date | int | format_ts }}</td>
+            <td class="amount-negative">{{ "{:,}".format(p.value_sat | int) }}</td>
+            <td style="color:var(--muted)">{{ p.fee_sat | int }}</td>
+            <td>{% if p.status == 'SUCCEEDED' %}<span class="badge badge-green">OK</span>{% else %}<span class="badge badge-red">{{ p.status }}</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table></div>
+      {% else %}
+      <div class="empty-state">No payments found</div>
+      {% endif %}
+    </div>
+    <div class="card">
+      <div class="card-title">Recent Invoices</div>
+      {% if data.invoices %}
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Date</th><th>Amount</th><th>Memo</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for inv in data.invoices %}
+          <tr>
+            <td>{{ inv.creation_date | int | format_ts }}</td>
+            <td class="amount-positive">{{ "{:,}".format(inv.value | int) }}</td>
+            <td class="truncate" style="max-width:100px;">{{ inv.memo if inv.memo else '—' }}</td>
+            <td>{% if inv.state == 'SETTLED' %}<span class="badge badge-green">Paid</span>{% elif inv.state == 'OPEN' %}<span class="badge badge-yellow">Open</span>{% else %}<span class="badge badge-red">{{ inv.state }}</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table></div>
+      {% else %}
+      <div class="empty-state">No invoices found</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Routing -->
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">Recent Routing Events</div>
+      {% if data.forwarding %}
+      <table class="data-table">
+        <thead><tr><th>Date</th><th>Path</th><th>Amount</th><th>Fee Earned</th></tr></thead>
+        <tbody>
+          {% for fwd in data.forwarding %}
+          <tr>
+            <td>{{ fwd.timestamp | int | format_ts }}</td>
+            <td>{{ fwd.in_alias }} → {{ fwd.out_alias }}</td>
+            <td>{{ "{:,}".format(fwd.amt_out | int) }} sats</td>
+            <td class="amount-positive">{{ fwd.fee }} sats</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty-state">No routing events yet — run <code>main.py monitor</code> to sync from LND</div>
+      {% endif %}
+    </div>
+  </div>
 
   <!-- Daily Fee Revenue (30d) -->
   <div class="grid-1">
@@ -1491,8 +1385,182 @@ TEMPLATE = """
     </div>
   </div>
 
-  <!-- Rebalance History + Fee Updates -->
+  </div><!-- /tab-activity -->
+  <div id="tab-advanced" style="display:none;">
+
+  <!-- Channel Details — Economics (the full fee/rebalance layer per channel) -->
+  {% if data.channels %}
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">Channel Details — Economics</div>
+      <div class="table-wrap"><table class="chan-table">
+        <thead>
+          <tr>
+            <th style="width:16%">Peer</th>
+            <th style="width:14%">Balance</th>
+            <th>Local Fee [ppm]</th>
+            <th>Clearing [ppm]</th>
+            <th>Mkt Mult</th>
+            <th>Floor [ppm]</th>
+            <th>Earned [ppm]</th>
+            <th>Refill Budget [ppm]</th>
+            <th>Rebal Cost 30d</th>
+            <th>Net Lifetime</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for ch in data.channels %}
+          {% set ratio    = ch.local_pct %}
+          {% set perf     = ch.perf %}
+          {% set bar_cls  = 'bar-depleted' if ratio < 20 else ('bar-saturated' if ratio > 80 else 'bar-healthy') %}
+          <tr>
+            <td>
+              <div style="font-weight:700;font-size:12px;">{{ ch.peer_alias if ch.peer_alias else ch.remote_pubkey[:16] ~ '...' }}{% if ch.alias_tag %} <span style="font-weight:400;font-size:10px;color:var(--muted);">·{{ ch.alias_tag }}</span>{% endif %}</div>
+            </td>
+            <td>
+              <div class="balance-bar"><div class="balance-bar-fill {{ bar_cls }}" style="width:{{ ratio }}%"></div></div>
+              <div style="font-size:10px;color:var(--muted);">{{ ratio }}% local</div>
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+              {% if ch.gate and ch.gate.inbound_fee_ppm %}<div style="font-size:9px;color:var(--muted);" title="inbound fee — negative = discount pulling organic refill">(inbound {{ ch.gate.inbound_fee_ppm }})</div>{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.gate and ch.gate.clearing_ppm is not none %}<span title="sigmoid(local ratio) × market multiplier — where the fee settles with no floor">{{ ch.gate.clearing_ppm }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;color:{% if ch.gate and ch.gate.mult > 0 %}var(--green){% elif ch.gate and ch.gate.mult < 0 %}var(--red){% else %}var(--muted){% endif %};">
+              {% if ch.gate %}{{ "%+.2f" % ch.gate.mult }}{% else %}—{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.gate and ch.gate.floor_ppm %}
+                <span title="outbound floor — recoups last refill ({{ ch.gate.last_refill_ppm }} ppm) × margin{% if ch.gate.floor_decaying %}; decaying toward the clearing fee while idle{% endif %}">{{ ch.gate.floor_ppm }}{% if ch.gate.floor_decaying %} ↓ <span style="color:var(--muted);font-size:9px;">of {{ ch.gate.hard_floor_ppm }}</span>{% endif %}</span>
+              {% else %}<span style="color:var(--muted);" title="no refill history — sigmoid alone drives the fee">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.gate and ch.gate.judged %}<span title="trailing revenue / out-volume over the earned-ppm window">{{ ch.gate.earned_ppm }}</span>
+              {% elif ch.gate %}<span style="color:var(--muted);" title="too little out-volume to judge profitability — keeps full rebalance escalation">unjudged</span>
+              {% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {# What the pipeline will pay to refill this channel, and why. #}
+              {% if ch.gate %}
+                {% if ch.gate.structural %}<span style="color:var(--red);" title="{{ ch.gate.budget_reason }}">structural</span>
+                {% elif ch.gate.profit_capped %}<span style="color:var(--yellow);" title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }} ⛒</span>
+                {% else %}<span title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }}</span>{% endif %}
+              {% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td class="{% if perf.reb_cost > 0 %}amount-negative{% else %}amount-muted{% endif %}">
+              {% if perf.reb_cost > 0 %}-{{ "{:,}".format(perf.reb_cost) }}{% else %}—{% endif %}
+            </td>
+            <td class="{% if perf.net_all > 0 %}amount-positive{% elif perf.net_all < 0 %}amount-negative{% else %}amount-muted{% endif %}">
+              {% if perf.net_all != 0 %}{% if perf.net_all > 0 %}+{% endif %}{{ "{:,}".format(perf.net_all) }}{% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Forwarding Failures — Lost-Revenue Watch -->
+  {% if data.fwd_fail %}
+  {% set ff = data.fwd_fail %}
+  <div class="grid-1">
+    <div class="card">
+      <div class="card-title">Forwarding Failures — Lost-Revenue Glance (24h)</div>
+      {#
+        Service badge tracks the htlc_monitor daemon. These events are live-only
+        (LND persists them nowhere), so a dead daemon = a blind window, NOT a
+        clean day — that's why an inactive service is flagged red even at 0.
+      #}
+      <div class="stat-row">
+        <span class="stat-label">Monitor service</span>
+        <span>
+          {% if ff.service == 'active' %}<span class="badge badge-green" title="lnd-htlc-monitor running — stream subscribed">alive &amp; polling</span>
+          {% elif ff.service == 'unknown' %}<span class="badge badge-muted" title="could not query systemctl">unknown</span>
+          {% else %}<span class="badge badge-red" title="lnd-htlc-monitor not running — failures going uncaptured">{{ ff.service }} — not capturing</span>{% endif %}
+        </span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Dropped forwards</span>
+        <span class="stat-value {% if ff.total_n > 0 %}yellow{% endif %}">
+          {{ ff.total_n }} {% if ff.total_n %}<span style="color:var(--muted);font-size:11px;">({{ "{:,}".format(ff.total_sats) }} sats of flow)</span>{% endif %}
+        </span>
+      </div>
+      {% if ff.liq_n > 0 %}
+      <div class="stat-row">
+        <span class="stat-label">↳ Empty-channel (insufficient balance)</span>
+        <span class="stat-value red">{{ ff.liq_n }} drops · {{ "{:,}".format(ff.liq_sats) }} sats</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Est. lost routing fees</span>
+        <span class="stat-value red" style="font-weight:700;" title="dropped sats × our outbound ppm on the starved channel">~{{ "{:,}".format(ff.est_lost_fee) }} sats</span>
+      </div>
+      {% if ff.top %}
+      <div class="stat-row">
+        <span class="stat-label">Worst channel</span>
+        <span class="stat-value">{{ ff.top.alias }} <span style="color:var(--muted);font-size:11px;">({{ "{:,}".format(ff.top.sats) }} sats over {{ ff.top.n }} drops)</span></span>
+      </div>
+      {% endif %}
+      {% endif %}
+      {% if ff.fee_n > 0 %}
+      <div class="stat-row">
+        <span class="stat-label">↳ Fee-too-low (our fee &gt; route)</span>
+        <span class="stat-value">{{ ff.fee_n }} <span style="color:var(--muted);font-size:11px;">— sender under-paid; not a liquidity issue</span></span>
+      </div>
+      {% endif %}
+      {% if ff.other_n > 0 %}
+      <div class="stat-row">
+        <span class="stat-label">↳ Other (expiry / misc)</span>
+        <span class="stat-value" style="color:var(--muted)">{{ ff.other_n }}</span>
+      </div>
+      {% endif %}
+      {% if ff.total_n == 0 %}
+      <div class="stat-row">
+        <span class="stat-label">{% if ff.service == 'active' %}Clean — no forwards dropped in 24h{% else %}No data{% endif %}</span>
+        <span class="stat-value {% if ff.service == 'active' %}green{% else %}red{% endif %}">{% if ff.service == 'active' %}✓{% else %}service down{% endif %}</span>
+      </div>
+      {% endif %}
+      {% if ff.last_event_ts %}
+      <div class="stat-row">
+        <span class="stat-label">Last drop captured</span>
+        <span class="stat-value" style="color:var(--muted)">{{ ff.last_event_ts | format_age }}</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Fee Updates + Rebalance History -->
   <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Recent Fee Updates</div>
+      {% if data.fee_updates %}
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Time</th><th>Peer</th><th>Old</th><th>New</th><th>Local</th><th>Source</th></tr></thead>
+        <tbody>
+          {% for u in data.fee_updates %}
+          <tr>
+            <td style="color:var(--muted);font-size:10px;white-space:nowrap;">{{ u.ts | format_ts }}</td>
+            <td>{{ u.peer_alias }}</td>
+            <td style="color:var(--muted);">{{ u.old_fee_ppm }} ppm</td>
+            <td>
+              {% if u.new_fee_ppm > u.old_fee_ppm %}<span style="color:var(--red)">↑ {{ u.new_fee_ppm }} ppm</span>
+              {% else %}<span style="color:var(--green)">↓ {{ u.new_fee_ppm }} ppm</span>{% endif %}
+            </td>
+            <td style="color:var(--muted);">{{ "%.0f"|format(u.local_ratio * 100) }}%</td>
+            <td><span class="badge {{ u.layer_class }}" title="{{ u.reason }}">{{ u.layer }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table></div>
+      {% else %}
+      <div class="empty-state">No fee updates yet — run <code>main.py fees</code></div>
+      {% endif %}
+    </div>
+
     <div class="card">
       <div class="card-title">Rebalance History</div>
       {% if data.rebalances %}
@@ -1520,72 +1588,31 @@ TEMPLATE = """
       <div class="empty-state">No rebalances yet</div>
       {% endif %}
     </div>
-
-    <div class="card">
-      <div class="card-title">Recent Fee Updates</div>
-      {% if data.fee_updates %}
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Time</th><th>Peer</th><th>Old</th><th>New</th><th>Local</th><th>Source</th></tr></thead>
-        <tbody>
-          {% for u in data.fee_updates %}
-          <tr>
-            <td style="color:var(--muted);font-size:10px;white-space:nowrap;">{{ u.ts | format_ts }}</td>
-            <td>{{ u.peer_alias }}</td>
-            <td style="color:var(--muted);">{{ u.old_fee_ppm }} ppm</td>
-            <td>
-              {% if u.new_fee_ppm > u.old_fee_ppm %}<span style="color:var(--red)">↑ {{ u.new_fee_ppm }} ppm</span>
-              {% else %}<span style="color:var(--green)">↓ {{ u.new_fee_ppm }} ppm</span>{% endif %}
-            </td>
-            <td style="color:var(--muted);">{{ "%.0f"|format(u.local_ratio * 100) }}%</td>
-            <td><span class="badge {{ u.layer_class }}" title="{{ u.reason }}">{{ u.layer }}</span></td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="empty-state">No fee updates yet — run <code>main.py fees</code></div>
-      {% endif %}
-    </div>
   </div>
 
-  <!-- Recent Alerts -->
-  <div class="grid-1">
-    <div class="card">
-      <div class="card-title">Recent Alerts</div>
-      {% if data.alerts %}
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Time</th><th>Type</th><th>Message</th></tr></thead>
-        <tbody>
-          {% for a in data.alerts %}
-          <tr>
-            <td style="color:var(--muted);font-size:10px;white-space:nowrap;">{{ a.ts | format_ts }}</td>
-            <td>
-              {% if 'offline' in a.alert_type %}<span class="badge badge-red">offline</span>
-              {% elif 'depleted' in a.alert_type %}<span class="badge badge-yellow">depleted</span>
-              {% elif 'saturated' in a.alert_type %}<span class="badge badge-blue">saturated</span>
-              {% elif 'rebalance_failing' in a.alert_type %}<span class="badge badge-red">rebal failing</span>
-              {% else %}<span class="badge badge-muted">{{ a.alert_type }}</span>{% endif %}
-            </td>
-            <td style="color:var(--muted);">{{ a.message }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="empty-state">No alerts — all clear ✓</div>
-      {% endif %}
-    </div>
-  </div>
+  </div><!-- /tab-advanced -->
 
   {% endif %}
 
 </div>
 <script>
-function chanTab(btn, id) {
-  document.getElementById('chan-simple').style.display   = (id === 'chan-simple')   ? '' : 'none';
-  document.getElementById('chan-advanced').style.display = (id === 'chan-advanced') ? '' : 'none';
-  for (const b of btn.parentNode.children) b.classList.toggle('active', b === btn);
+function pageTab(name) {
+  for (const t of ['node', 'activity', 'advanced']) {
+    const pane = document.getElementById('tab-' + t);
+    if (pane) pane.style.display = (t === name) ? '' : 'none';
+    const btn = document.getElementById('ptab-' + t);
+    if (btn) btn.classList.toggle('active', t === name);
+  }
+  try { localStorage.setItem('dashTab', name); } catch (e) {}
 }
+// Restore the last-viewed tab across refreshes; sat-flow filter links reload
+// the page with #sat-flow, which lives on the Activity tab.
+(function () {
+  let t = null;
+  try { t = localStorage.getItem('dashTab'); } catch (e) {}
+  if (location.hash === '#sat-flow') t = 'activity';
+  if (t && t !== 'node' && document.getElementById('tab-' + t)) pageTab(t);
+})();
 </script>
 </body>
 </html>
