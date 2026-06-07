@@ -601,8 +601,11 @@ def get_sat_flow(now, channels, window_key="30", flow_in="", flow_out=""):
             GROUP BY chan_in, chan_out
         """, (now - days * 86400,))
 
+    # Sibling channels share an alias — keep the short-scid tag (set on the
+    # enriched channel list) so flows to each channel stay distinguishable.
     alias_by_chan = {str(ch.get("chan_id", "")): (ch.get("peer_alias")
                      or (ch.get("remote_pubkey", "") or "")[:10] or str(ch.get("chan_id", "")))
+                     + (" ·" + ch["alias_tag"] if ch.get("alias_tag") else "")
                      for ch in channels}
 
     def alias(scid):
