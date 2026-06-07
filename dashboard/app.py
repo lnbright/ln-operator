@@ -226,7 +226,7 @@ def get_channel_gate(chan_id, local_ratio=None):
             "clearing_ppm": clearing,
             "mult": round(float(sig.get("market_multiplier", 0.0) or 0.0), 2),
             "earned_ppm": round(ep) if ep is not None else None,
-            "judged": ep is not None,
+            "calibrated": ep is not None,
             "budget_ppm": b["max_fee_ppm"],
             "budget_reason": b["reason"],
             "profit_capped": b["profit_capped"],
@@ -837,6 +837,90 @@ TEMPLATE = """
   .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
 </style>
+{% if theme == 'midnight' %}
+<style>
+  /* ── midnight: deep-navy fintech, electric cyan + bitcoin amber (?theme=midnight) ── */
+  :root {
+    --bg: #060a14; --surface: #0b1322; --border: #1c2a44;
+    --accent: #22d3ee; --accent2: #f7931a;
+    --green: #2dd4a0; --red: #fb6f84; --yellow: #fbbf24;
+    --text: #e2eaf5; --muted: #64748f; --card: #0a111f;
+  }
+  body {
+    background:
+      radial-gradient(1200px 600px at 20% -20%, rgba(34,211,238,0.07), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(99,102,241,0.06), transparent 55%),
+      var(--bg);
+  }
+  ::selection { background: var(--accent); color: var(--bg); }
+  .logo span { background: linear-gradient(90deg, #22d3ee, #818cf8); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .card { border-radius: 10px; box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.35); }
+  .card-title::before { background: linear-gradient(180deg, #22d3ee, #818cf8); border-radius: 2px; }
+  .tab-btn { border-radius: 999px; }
+  .tab-btn.active { color: var(--accent); border-color: var(--accent); background: rgba(34,211,238,0.08); }
+  .refresh-btn { background: var(--accent); color: #04202a; border-radius: 6px; }
+  .balance-bar, .balance-bar-fill, .chart-bar { border-radius: 3px; }
+  .badge { border-radius: 999px; }
+  .balance-bar-fill.bar-healthy { background: var(--accent); }
+  .chart-bar { background: linear-gradient(180deg, #22d3ee, #0e7490); }
+</style>
+{% endif %}
+{% if theme == 'hybrid' %}
+<style>
+  /* ── hybrid: lnbright-site atmosphere, dashboard legibility (?theme=hybrid) ──
+     Green-black terminal backdrop + phosphor glow accents, but text stays
+     near-white and data colors keep their roles (orange/violet/green/red). */
+  :root {
+    --bg: #04100a; --surface: #081b10; --border: #14402a;
+    --accent: #f7931a; --accent2: #a48dff;
+    --green: #33ff66; --red: #ff4d6d; --yellow: #ffd60a;
+    --text: #e4f0e7; --muted: #7d9b88; --card: #071710;
+    --glow: 0 0 8px rgba(51,255,102,0.35);
+  }
+  body {
+    background:
+      radial-gradient(1100px 550px at 50% -15%, rgba(51,255,102,0.06), transparent 60%),
+      radial-gradient(900px 500px at 100% 10%, rgba(247,147,26,0.04), transparent 55%),
+      var(--bg);
+  }
+  ::selection { background: var(--green); color: var(--bg); }
+  .logo span { color: var(--green); text-shadow: var(--glow); }
+  .logo::after { content: '_'; color: var(--green); animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  .card { box-shadow: inset 0 1px 0 rgba(51,255,102,0.04); }
+  .card-title::before { background: var(--green); box-shadow: var(--glow); }
+  .tab-btn.active { color: var(--green); border-color: var(--green); box-shadow: 0 0 14px rgba(51,255,102,0.2); }
+  .balance-bar-fill.bar-healthy { background: var(--green); }
+  a { color: var(--green); }
+</style>
+{% endif %}
+{% if theme == 'phosphor' %}
+<style>
+  /* ── lnbright-site green-phosphor terminal theme (?theme=phosphor) ── */
+  :root {
+    --bg: #020803; --surface: #06160b; --border: #0e4f23;
+    --accent: #33ff66; --accent2: #f7931a; --accent3: #a48dff;
+    --green: #33ff66; --red: #ff5c6e; --yellow: #ffd60a;
+    --text: #c6efd2; --muted: #63b07e; --card: #061409;
+    --glow: 0 0 8px rgba(51,255,102,0.45);
+  }
+  body {
+    background:
+      radial-gradient(1100px 550px at 50% -15%, rgba(51,255,102,0.07), transparent 60%),
+      radial-gradient(900px 500px at 100% 10%, rgba(164,141,255,0.045), transparent 55%),
+      var(--bg);
+  }
+  ::selection { background: var(--accent); color: var(--bg); }
+  .logo, .card-title, .tab-btn { font-family: 'Space Mono', monospace; }
+  .logo { color: var(--accent); text-shadow: var(--glow); }
+  .logo::after { content: '_'; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  .card-title::before { content: '>>'; width: auto; height: auto; background: none; color: var(--accent3); opacity: .75; font-weight: 700; }
+  .card-title { color: var(--fg-dim, var(--muted)); }
+  .refresh-btn { background: var(--accent); color: var(--bg); }
+  .tab-btn.active { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 14px rgba(51,255,102,0.25); text-shadow: var(--glow); }
+</style>
+{% endif %}
 </head>
 <body>
 <div class="wrap">
@@ -861,10 +945,10 @@ TEMPLATE = """
   {% if data.info %}
   {% set info = data.info %}
 
-  <!-- Page tabs: Node (health/infra) · Activity (flows) · Advanced (economics) -->
+  <!-- Page tabs: Node (health/infra) · Flows (traffic & revenue) · Advanced (economics) -->
   <nav class="page-tabs">
     <button class="tab-btn active" id="ptab-node" onclick="pageTab('node')">Node</button>
-    <button class="tab-btn" id="ptab-activity" onclick="pageTab('activity')">Activity</button>
+    <button class="tab-btn" id="ptab-flows" onclick="pageTab('flows')">Flows</button>
     <button class="tab-btn" id="ptab-advanced" onclick="pageTab('advanced')">Advanced</button>
   </nav>
 
@@ -1134,7 +1218,7 @@ TEMPLATE = """
   </div>
 
   </div><!-- /tab-node -->
-  <div id="tab-activity" style="display:none;">
+  <div id="tab-flows" style="display:none;">
 
   <!-- Channel Details — enriched with operator performance data -->
   {% if data.channels %}
@@ -1385,7 +1469,7 @@ TEMPLATE = """
     </div>
   </div>
 
-  </div><!-- /tab-activity -->
+  </div><!-- /tab-flows -->
   <div id="tab-advanced" style="display:none;">
 
   <!-- Channel Details — Economics (the full fee/rebalance layer per channel) -->
@@ -1437,8 +1521,8 @@ TEMPLATE = """
               {% else %}<span style="color:var(--muted);" title="no refill history — sigmoid alone drives the fee">—</span>{% endif %}
             </td>
             <td style="font-size:11px;">
-              {% if ch.gate and ch.gate.judged %}<span title="trailing revenue / out-volume over the earned-ppm window">{{ ch.gate.earned_ppm }}</span>
-              {% elif ch.gate %}<span style="color:var(--muted);" title="too little out-volume to judge profitability — keeps full rebalance escalation">unjudged</span>
+              {% if ch.gate and ch.gate.calibrated %}<span title="trailing revenue / out-volume over the earned-ppm window">{{ ch.gate.earned_ppm }}</span>
+              {% elif ch.gate %}<span style="color:var(--muted);" title="calibrating — still measuring what this channel earns (too little out-volume yet); keeps full rebalance escalation">calibrating</span>
               {% else %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>
             <td style="font-size:11px;">
@@ -1597,7 +1681,7 @@ TEMPLATE = """
 </div>
 <script>
 function pageTab(name) {
-  for (const t of ['node', 'activity', 'advanced']) {
+  for (const t of ['node', 'flows', 'advanced']) {
     const pane = document.getElementById('tab-' + t);
     if (pane) pane.style.display = (t === name) ? '' : 'none';
     const btn = document.getElementById('ptab-' + t);
@@ -1606,11 +1690,11 @@ function pageTab(name) {
   try { localStorage.setItem('dashTab', name); } catch (e) {}
 }
 // Restore the last-viewed tab across refreshes; sat-flow filter links reload
-// the page with #sat-flow, which lives on the Activity tab.
+// the page with #sat-flow, which lives on the Flows tab.
 (function () {
   let t = null;
   try { t = localStorage.getItem('dashTab'); } catch (e) {}
-  if (location.hash === '#sat-flow') t = 'activity';
+  if (location.hash === '#sat-flow') t = 'flows';
   if (t && t !== 'node' && document.getElementById('tab-' + t)) pageTab(t);
 })();
 </script>
@@ -1653,7 +1737,10 @@ def format_age(ts):
 def index():
     """Single route — fetches fresh data on every page load."""
     data = get_dashboard_data()
-    return render_template_string(TEMPLATE, data=data)
+    # Theme: midnight (default) — deep-navy fintech. Alternatives kept for
+    # comparison: ?theme=classic (original orange/violet), hybrid, phosphor.
+    theme = request.args.get("theme", "midnight")
+    return render_template_string(TEMPLATE, data=data, theme=theme)
 
 
 if __name__ == "__main__":

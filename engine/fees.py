@@ -542,7 +542,7 @@ def recompute_all_signals():
                  "mult %+.2f → %+.2f (%s)%s",
                  ch.get("peer_alias", chan_id[:12]),
                  last_refill if last_refill is not None else "none",
-                 f"{budget['earned_ppm']:.0f}" if budget["earned_ppm"] is not None else "unjudged",
+                 f"{budget['earned_ppm']:.0f}" if budget["earned_ppm"] is not None else "calibrating",
                  failures, prev_mult, mult, mult_reason,
                  " [STRUCTURAL]" if budget["structural"] else "")
 
