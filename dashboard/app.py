@@ -44,7 +44,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     import db as _opdb
     from engine.rebalance_planner import get_channel_rebalance_budget as _get_budget
-    from config import REBALANCE_FEE_MARGIN as _FEE_MARGIN
+    from engine.fees import sigmoid_fee_ppm as _sigmoid
+    from config import (REBALANCE_FEE_MARGIN as _FEE_MARGIN,
+                        FEE_HYSTERESIS_EDGE_LOW as _EDGE_LOW)
     _GATE_OK = True
 except Exception:
     _GATE_OK = False
@@ -208,7 +210,21 @@ def get_channel_gate(chan_id, local_ratio=None):
         lr = b.get("last_refill_ppm")
         hard_floor = round(lr * _FEE_MARGIN) if lr else 0
         level = sig.get("floor_decay_anchor_ppm")
+        # Market-clearing fee — same formula as compute_fee_target's `adjusted`
+        # (sigmoid × market mult, mult never discounting in the defense zone).
+        clearing = None
+        if local_ratio is not None:
+            base = _sigmoid(local_ratio)
+            mult = float(sig.get("market_multiplier", 0.0) or 0.0)
+            adjusted = base * (1.0 + mult)
+            if local_ratio < _EDGE_LOW:
+                adjusted = max(adjusted, base)
+            clearing = round(adjusted)
         return {
+            "last_refill_ppm": lr,
+            "hard_floor_ppm": hard_floor,
+            "clearing_ppm": clearing,
+            "mult": round(float(sig.get("market_multiplier", 0.0) or 0.0), 2),
             "earned_ppm": round(ep) if ep is not None else None,
             "judged": ep is not None,
             "budget_ppm": b["max_fee_ppm"],
@@ -219,7 +235,7 @@ def get_channel_gate(chan_id, local_ratio=None):
             "floor_decaying": bool(hard_floor and level is not None and level < hard_floor),
             # Effective outbound floor: the persisted decayed level if it sits
             # below the full recoup floor, else last_refill × margin. 0 = none.
-            "floor_ppm": (level if (hard_floor and level is not None and level < hard_floor)
+            "floor_ppm": (int(round(level)) if (hard_floor and level is not None and level < hard_floor)
                           else hard_floor),
         }
     except Exception:
@@ -729,6 +745,9 @@ TEMPLATE = """
   .card { background: var(--card); border: 1px solid var(--border); padding: 20px; }
   .card-title { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
   .card-title::before { content: ''; display: block; width: 3px; height: 12px; background: var(--accent); }
+  .tab-group { margin-left: auto; display: flex; gap: 4px; }
+  .tab-btn { background: none; border: 1px solid var(--border); color: var(--muted); font-family: 'Syne', sans-serif; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; padding: 3px 10px; cursor: pointer; }
+  .tab-btn.active { color: var(--accent); border-color: var(--accent); }
 
   .stat-row { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
   .stat-row:last-child { border-bottom: none; }
@@ -1034,21 +1053,25 @@ TEMPLATE = """
   {% if data.channels %}
   <div class="grid-1">
     <div class="card">
-      <div class="card-title">Channel Details</div>
-      <div class="table-wrap"><table class="chan-table">
+      <div class="card-title">Channel Details
+        <span class="tab-group">
+          <button class="tab-btn active" onclick="chanTab(this,'chan-simple')">Simple</button>
+          <button class="tab-btn" onclick="chanTab(this,'chan-advanced')">Advanced</button>
+        </span>
+      </div>
+
+      {# ── Simple tab: liquidity + headline economics ─────────────── #}
+      <div class="table-wrap" id="chan-simple"><table class="chan-table">
         <thead>
           <tr>
             <th style="width:16%">Peer</th>
-            <th style="width:18%">Balance</th>
+            <th style="width:20%">Balance</th>
             <th>Capacity</th>
             <th>Sent / Received</th>
             <th>Local Fee [ppm]</th>
             <th>Remote Fee [ppm]</th>
-            <th>Refill Budget [ppm]</th>
             <th>Revenue 30d</th>
-            <th>Rebal Cost 30d</th>
             <th>Net 30d</th>
-            <th>Net Lifetime</th>
             <th>Flags</th>
           </tr>
         </thead>
@@ -1056,7 +1079,6 @@ TEMPLATE = """
           {% for ch in data.channels %}
           {% set capacity = ch.capacity | int %}
           {% set local    = ch.local_balance | int %}
-          {% set remote   = ch.remote_balance | int %}
           {% set ratio    = ch.local_pct %}
           {% set perf     = ch.perf %}
           {% set bar_cls  = 'bar-depleted' if ratio < 20 else ('bar-saturated' if ratio > 80 else 'bar-healthy') %}
@@ -1078,12 +1100,76 @@ TEMPLATE = """
             </td>
             <td style="font-size:11px;">
               {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
-              {% if ch.gate and ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="trailing earned ppm (revenue / out-volume)">earns {{ ch.gate.earned_ppm }}</div>
-              {% elif ch.gate and ch.gate.judged is defined and not ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="too little out-volume to judge profitability — keeps full rebalance escalation">unjudged</div>{% endif %}
-              {% if ch.gate and ch.gate.floor_ppm %}<div style="font-size:9px;color:var(--muted);" title="outbound fee floor = last_refill × margin{% if ch.gate.floor_decaying %} — currently decaying toward a clearing fee while idle{% endif %}">floor {{ ch.gate.floor_ppm }}{% if ch.gate.floor_decaying %} ↓{% endif %}</div>{% endif %}
             </td>
             <td style="font-size:11px;">
               {% if ch.remote_fee_ppm is not none %}{{ ch.remote_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td class="{% if perf.fee_rev > 0 %}amount-positive{% else %}amount-muted{% endif %}">
+              {% if perf.fee_rev > 0 %}+{{ "{:,}".format(perf.fee_rev) }}{% else %}—{% endif %}
+            </td>
+            <td class="{% if perf.net > 0 %}amount-positive{% elif perf.net < 0 %}amount-negative{% else %}amount-muted{% endif %}">
+              {% if perf.net != 0 %}{% if perf.net > 0 %}+{% endif %}{{ "{:,}".format(perf.net) }}{% else %}—{% endif %}
+            </td>
+            <td>
+              {% if not ch.active %}<span class="badge badge-red" title="peer offline — LND auto-reconnects when it returns">offline</span>{% endif %}
+              {% if ch.private %}<span class="badge badge-muted">private</span>{% endif %}
+              {% if ch.active and not ch.private %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+
+      {# ── Advanced tab: the full economics layer per channel ──────── #}
+      <div class="table-wrap" id="chan-advanced" style="display:none;"><table class="chan-table">
+        <thead>
+          <tr>
+            <th style="width:16%">Peer</th>
+            <th style="width:14%">Balance</th>
+            <th>Local Fee [ppm]</th>
+            <th>Earned [ppm]</th>
+            <th>Clearing [ppm]</th>
+            <th>Floor [ppm]</th>
+            <th>Mkt Mult</th>
+            <th>Refill Budget [ppm]</th>
+            <th>Rebal Cost 30d</th>
+            <th>Net Lifetime</th>
+            <th>Flags</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for ch in data.channels %}
+          {% set local    = ch.local_balance | int %}
+          {% set ratio    = ch.local_pct %}
+          {% set perf     = ch.perf %}
+          {% set bar_cls  = 'bar-depleted' if ratio < 20 else ('bar-saturated' if ratio > 80 else 'bar-healthy') %}
+          <tr>
+            <td>
+              <div style="font-weight:700;font-size:12px;">{{ ch.peer_alias if ch.peer_alias else ch.remote_pubkey[:16] ~ '...' }}{% if ch.alias_tag %} <span style="font-weight:400;font-size:10px;color:var(--muted);">·{{ ch.alias_tag }}</span>{% endif %}</div>
+            </td>
+            <td>
+              <div class="balance-bar"><div class="balance-bar-fill {{ bar_cls }}" style="width:{{ ratio }}%"></div></div>
+              <div style="font-size:10px;color:var(--muted);">{{ ratio }}% local</div>
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.gate and ch.gate.judged %}<span title="trailing revenue / out-volume over the earned-ppm window">{{ ch.gate.earned_ppm }}</span>
+              {% elif ch.gate %}<span style="color:var(--muted);" title="too little out-volume to judge profitability — keeps full rebalance escalation">unjudged</span>
+              {% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.gate and ch.gate.clearing_ppm is not none %}<span title="sigmoid(local ratio) × market multiplier — where the fee settles with no floor">{{ ch.gate.clearing_ppm }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {% if ch.gate and ch.gate.floor_ppm %}
+                <span title="outbound floor — recoups last refill ({{ ch.gate.last_refill_ppm }} ppm) × margin{% if ch.gate.floor_decaying %}; decaying toward the clearing fee while idle{% endif %}">{{ ch.gate.floor_ppm }}{% if ch.gate.floor_decaying %} ↓ <span style="color:var(--muted);font-size:9px;">of {{ ch.gate.hard_floor_ppm }}</span>{% endif %}</span>
+              {% else %}<span style="color:var(--muted);" title="no refill history — sigmoid alone drives the fee">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;color:{% if ch.gate and ch.gate.mult > 0 %}var(--green){% elif ch.gate and ch.gate.mult < 0 %}var(--red){% else %}var(--muted){% endif %};">
+              {% if ch.gate %}{{ "%+.2f" % ch.gate.mult }}{% else %}—{% endif %}
             </td>
             <td style="font-size:11px;">
               {# What the pipeline will pay to refill this channel, and why. #}
@@ -1093,14 +1179,8 @@ TEMPLATE = """
                 {% else %}<span title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }}</span>{% endif %}
               {% else %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>
-            <td class="{% if perf.fee_rev > 0 %}amount-positive{% else %}amount-muted{% endif %}">
-              {% if perf.fee_rev > 0 %}+{{ "{:,}".format(perf.fee_rev) }}{% else %}—{% endif %}
-            </td>
             <td class="{% if perf.reb_cost > 0 %}amount-negative{% else %}amount-muted{% endif %}">
               {% if perf.reb_cost > 0 %}-{{ "{:,}".format(perf.reb_cost) }}{% else %}—{% endif %}
-            </td>
-            <td class="{% if perf.net > 0 %}amount-positive{% elif perf.net < 0 %}amount-negative{% else %}amount-muted{% endif %}">
-              {% if perf.net != 0 %}{% if perf.net > 0 %}+{% endif %}{{ "{:,}".format(perf.net) }}{% else %}—{% endif %}
             </td>
             <td class="{% if perf.net_all > 0 %}amount-positive{% elif perf.net_all < 0 %}amount-negative{% else %}amount-muted{% endif %}">
               {% if perf.net_all != 0 %}{% if perf.net_all > 0 %}+{% endif %}{{ "{:,}".format(perf.net_all) }}{% else %}—{% endif %}
@@ -1519,6 +1599,13 @@ TEMPLATE = """
   {% endif %}
 
 </div>
+<script>
+function chanTab(btn, id) {
+  document.getElementById('chan-simple').style.display   = (id === 'chan-simple')   ? '' : 'none';
+  document.getElementById('chan-advanced').style.display = (id === 'chan-advanced') ? '' : 'none';
+  for (const b of btn.parentNode.children) b.classList.toggle('active', b === btn);
+}
+</script>
 </body>
 </html>
 """
