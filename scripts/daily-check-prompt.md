@@ -274,6 +274,34 @@ You're looking for things a human operator would notice as off:
 - Test failures or import errors
 - Anything else that catches your eye and doesn't fit the patterns above
 
+### Run the investigation yourself — don't delegate it as a suggestion
+
+When a finding admits a read-only investigation, DO it in this run and report
+the *conclusion*, not the hypothesis. "Likely max_htlc on their end — worth a
+manual look" is a failure mode when the data to rule it out was one query away.
+The toolbox:
+
+- **Channel policies (both sides)**: `GET /v1/graph/edge/<chan_id>` → each
+  side's `min_htlc`, `max_htlc_msat`, `fee_rate_milli_msat`, `disabled`.
+  Rules max_htlc/min_htlc/disabled theories in or out instantly — compare
+  against the dropped amounts in `forward_fail_log`.
+- **Peer connection history**: LND logs at
+  `/home/lnd/logs/bitcoin/mainnet/lnd.log` (+ rotated `.log.N.gz`, use
+  `sudo zgrep <pubkey-prefix>`). Disconnect/reconnect storms, `unable to read
+  init msg: EOF` (their daemon up at TCP but not handshaking = peer-side
+  outage), `handshake within 15s`, `link requested disconnect`.
+- **Timezone trap**: sqlite `datetime(ts,'unixepoch')` renders UTC; lnd.log
+  is local time (BST = UTC+1 in summer). Shift before declaring "no log
+  events in the drop window".
+- **Correlate, then conclude**: cluster the `forward_fail_log` timestamps; a
+  tight burst that sits inside a peer-flap window is a transient peer outage
+  — say so and close it. Drops spread evenly across the day with healthy
+  connectivity point at policy/liquidity instead.
+
+A "manual look" suggestion is only legitimate when the evidence is genuinely
+out of reach (peer's internal state, capital decisions, anything requiring
+spend authority you don't have).
+
 You are authorized to unblock yourself on anything code-related — real bugs,
 obvious dead code, broken imports, stale comments, missing edge-case
 handling, anything you'd flag in a normal code review. The loop is:
