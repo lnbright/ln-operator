@@ -297,6 +297,17 @@ def get_dashboard_data():
         FROM forwarding_log
         ORDER BY ts DESC LIMIT 10
     """)
+    # Resolve scids to peer aliases for the routing-events Path column.
+    # Sibling channels share an alias — keep the short-scid tag so the path
+    # names the actual channel. Closed channels fall back to the raw scid.
+    fwd_alias = {str(ch.get("chan_id", "")):
+                 (ch.get("peer_alias") or (ch.get("remote_pubkey", "") or "")[:10]
+                  or str(ch.get("chan_id", "")))
+                 + (" ·" + ch["alias_tag"] if ch.get("alias_tag") else "")
+                 for ch in channels_enriched}
+    for fwd in data["forwarding"]:
+        fwd["in_alias"]  = fwd_alias.get(str(fwd["chan_in"]), str(fwd["chan_in"]))
+        fwd["out_alias"] = fwd_alias.get(str(fwd["chan_out"]), str(fwd["chan_out"]))
 
     data["rebalances"] = db_all("""
         SELECT ts, source_alias, target_alias, amount_sats,
@@ -1026,6 +1037,7 @@ TEMPLATE = """
             <th>Sent / Received</th>
             <th>Local Fee [ppm]</th>
             <th>Remote Fee [ppm]</th>
+            <th>Refill Budget [ppm]</th>
             <th>Revenue 30d</th>
             <th>Rebal Cost 30d</th>
             <th>Net 30d</th>
@@ -1064,6 +1076,14 @@ TEMPLATE = """
             </td>
             <td style="font-size:11px;">
               {% if ch.remote_fee_ppm is not none %}{{ ch.remote_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            </td>
+            <td style="font-size:11px;">
+              {# What the pipeline will pay to refill this channel, and why. #}
+              {% if ch.gate %}
+                {% if ch.gate.structural %}<span style="color:var(--red);" title="{{ ch.gate.budget_reason }}">structural</span>
+                {% elif ch.gate.profit_capped %}<span style="color:var(--yellow);" title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }} ⛒</span>
+                {% else %}<span title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }}</span>{% endif %}
+              {% else %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>
             <td class="{% if perf.fee_rev > 0 %}amount-positive{% else %}amount-muted{% endif %}">
               {% if perf.fee_rev > 0 %}+{{ "{:,}".format(perf.fee_rev) }}{% else %}—{% endif %}
@@ -1269,14 +1289,14 @@ TEMPLATE = """
       <div class="card-title">Recent Routing Events</div>
       {% if data.forwarding %}
       <table class="data-table">
-        <thead><tr><th>Date</th><th>Amount In</th><th>Amount Out</th><th>Fee Earned</th></tr></thead>
+        <thead><tr><th>Date</th><th>Path</th><th>Amount</th><th>Fee Earned</th></tr></thead>
         <tbody>
           {% for fwd in data.forwarding %}
           <tr>
             <td>{{ fwd.timestamp | int | format_ts }}</td>
-            <td>{{ "{:,}".format(fwd.amt_in | int) }} sats</td>
+            <td>{{ fwd.in_alias }} → {{ fwd.out_alias }}</td>
             <td>{{ "{:,}".format(fwd.amt_out | int) }} sats</td>
-            <td class="amount-positive">{{ (fwd.amt_in | int) - (fwd.amt_out | int) }} sats</td>
+            <td class="amount-positive">{{ fwd.fee }} sats</td>
           </tr>
           {% endfor %}
         </tbody>
