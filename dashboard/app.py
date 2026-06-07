@@ -217,6 +217,10 @@ def get_channel_gate(chan_id, local_ratio=None):
             "structural": b["structural"],
             "inbound_fee_ppm": int(sig.get("inbound_fee_ppm") or 0),
             "floor_decaying": bool(hard_floor and level is not None and level < hard_floor),
+            # Effective outbound floor: the persisted decayed level if it sits
+            # below the full recoup floor, else last_refill × margin. 0 = none.
+            "floor_ppm": (level if (hard_floor and level is not None and level < hard_floor)
+                          else hard_floor),
         }
     except Exception:
         return {}
@@ -1076,6 +1080,7 @@ TEMPLATE = """
               {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
               {% if ch.gate and ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="trailing earned ppm (revenue / out-volume)">earns {{ ch.gate.earned_ppm }}</div>
               {% elif ch.gate and ch.gate.judged is defined and not ch.gate.judged %}<div style="font-size:9px;color:var(--muted);" title="too little out-volume to judge profitability — keeps full rebalance escalation">unjudged</div>{% endif %}
+              {% if ch.gate and ch.gate.floor_ppm %}<div style="font-size:9px;color:var(--muted);" title="outbound fee floor = last_refill × margin{% if ch.gate.floor_decaying %} — currently decaying toward a clearing fee while idle{% endif %}">floor {{ ch.gate.floor_ppm }}{% if ch.gate.floor_decaying %} ↓{% endif %}</div>{% endif %}
             </td>
             <td style="font-size:11px;">
               {% if ch.remote_fee_ppm is not none %}{{ ch.remote_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
