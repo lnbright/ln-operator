@@ -82,14 +82,20 @@
     INSUFFICIENT_BALANCE) raises the resting fee after the first bad cycle; the
     routine ±`MARKET_MULT_STEP` drift stays nightly.
   - **Layer 3 — node-level inbound fees + ladder** (`engine/liquidity_policy.py`,
-    off by default `INBOUND_FEE_ENABLED=False`): a depleted channel that can't be
+    enabled `INBOUND_FEE_ENABLED=True`): a depleted channel that can't be
     profitably rebalanced is defended with a NEGATIVE inbound fee (discount) to pull
-    organic refill — a rescue subsidy tapering to 0 by `INBOUND_DISCOUNT_CLEAR_RATIO`
-    (out of danger, not full target), capped at `our_outbound − safety_margin`.
-    `decide_channel_action` ladder: rebalance → inbound_discount → flag_structural
-    (alerts, capital decision) → optional inbound_charge on heavy sinks. Inbound +
-    outbound set in one `/v1/chanpolicy` POST; always send explicit inbound when
-    enabled (LND 0.20 resets an omitted `inbound_fee`).
+    organic refill — a rescue subsidy largest near 0% local, tapering to 0 by
+    `INBOUND_DISCOUNT_CLEAR_RATIO` (out of danger, not full target), capped at
+    `our_outbound − safety_margin`. `decide_channel_action` ladder (channel below
+    LOW): rebalance ONLY when not structural AND an overfull source exists → else
+    inbound_discount → flag_structural once the discount has defended for
+    `INBOUND_DEFENSE_WINDOW_DAYS` past `structural_flag_ts` without recovery
+    (organic demand absent → capital decision: splice/close, not a fee problem);
+    optional inbound_charge on overfull heavy sinks is off (`INBOUND_CHARGE_PPM=0`).
+    With `INBOUND_FEE_ENABLED=False` the ladder emits no inbound fee and non-rebalance
+    depleted channels collapse to "none", but the Layer-1 rebalance/skip grind-stop
+    is unchanged. Inbound + outbound set in one `/v1/chanpolicy` POST; always send
+    explicit inbound when enabled (LND 0.20 resets an omitted `inbound_fee`).
   No PROVEN/DISCOVERY/DEADWEIGHT tiers, no median/window smoothing. `channel_signals`
   holds `market_multiplier`, `last_fee_update_ts`, `last_local_ratio`,
   `signals_updated_ts`, plus (migration `_migrate_channel_signals_v2`)
