@@ -87,9 +87,9 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
         reason = (f"{anchor} {base} ppm escalated {escalated} capped to "
                   f"earn×{REBALANCE_PROFIT_HORIZON:g}={int(round(profit_cap))} ppm [profit gate]")
         if structural:
-            reason += f" — STRUCTURAL ({failures} fails)"
+            reason += f" — STRANDED ({failures} fails)"
         elif recovered:
-            reason += f" — structural cleared (local {local_ratio:.0%} ≥ target)"
+            reason += f" — stranded cleared (local {local_ratio:.0%} ≥ target)"
     elif failures > 0:
         reason = (f"{anchor} {base} ppm × (1 + {REBALANCE_BUDGET_ESCALATION_STEP:.0%}"
                   f" × {failures} fails) → {budget} ppm")

@@ -1528,7 +1528,7 @@ TEMPLATE = """
             <td style="font-size:11px;">
               {# What the pipeline will pay to refill this channel, and why. #}
               {% if ch.gate %}
-                {% if ch.gate.structural %}<span style="color:var(--red);" title="{{ ch.gate.budget_reason }}">structural</span>
+                {% if ch.gate.structural %}<span style="color:var(--red);" title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }} <span style="font-size:9px;">stranded</span></span>
                 {% elif ch.gate.profit_capped %}<span style="color:var(--yellow);" title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }} ⛒</span>
                 {% else %}<span title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }}</span>{% endif %}
               {% else %}<span style="color:var(--muted);">—</span>{% endif %}
