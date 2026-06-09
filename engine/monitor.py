@@ -83,11 +83,13 @@ def get_channel_health_report(channels=None):
         except Exception:
             pass
 
+        ch_report["structural"] = False
         try:
             budget = get_channel_rebalance_budget(
                 ch["chan_id"], local_ratio=ch.get("local_ratio"))
             ch_report["budget_ppm"] = budget["max_fee_ppm"]
             ch_report["budget_reason"] = budget["reason"]
+            ch_report["structural"] = bool(budget.get("structural"))
         except Exception:
             pass
 
@@ -118,10 +120,14 @@ def get_channel_health_report(channels=None):
                     "message": f"{ch['peer_alias']} saturated at {ch['local_ratio']:.0%} local",
                 })
 
-        # Check for repeated rebalance failures regardless of health status
+        # Check for repeated rebalance failures regardless of health status.
+        # Suppressed once the channel is structurally gated — the planner has
+        # stopped attempting rebalances, so the failure count is frozen and
+        # this alert would re-fire every cycle as pure noise. The structural
+        # flag itself is the meaningful signal.
         try:
             failure_count = db.get_repeated_rebalance_failures(ch["chan_id"], min_failures=3)
-            if failure_count >= 3:
+            if failure_count >= 3 and not ch_report.get("structural"):
                 report["alerts"].append({
                     "type": "rebalance_failing",
                     "chan_id": ch["chan_id"],
