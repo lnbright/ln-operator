@@ -792,9 +792,19 @@ def cmd_status(args):
 
         pins = db.get_fee_overrides()
 
+        # Siblings to the same peer share an alias — tag duplicates with a short
+        # scid suffix so the rows can be told apart (matches the dashboard).
+        alias_counts = {}
+        for ch in channels:
+            alias_counts[ch["peer_alias"]] = alias_counts.get(ch["peer_alias"], 0) + 1
+
+        def _label(ch):
+            tag = f" #{str(ch['chan_id'])[-5:]}" if alias_counts.get(ch["peer_alias"], 0) > 1 else ""
+            return f"{ch['peer_alias']}{tag}"
+
         print(f"\n  Per-channel breakdown:")
         print(f"  {'─'*72}")
-        print(f"  {'Channel':<22} {'Balance':<22} {'Our fee':>10} {'Their fee':>12} {'Their inbound':>14}")
+        print(f"  {'Channel':<26} {'Balance':<22} {'Our fee':>10} {'Their fee':>12} {'Their inbound':>14}")
         print(f"  {'─'*72}")
         for ch in sorted(channels, key=lambda c: c["local_ratio"]):
             bar = _balance_bar(ch["local_ratio"], 20)
@@ -809,7 +819,7 @@ def cmd_status(args):
             inbound_str = f"{their_inbound}ppm" if their_inbound else "—"
             my_ppm_str = f"{my_ppm}📌" if ch["chan_id"] in pins else f"{my_ppm} "
 
-            print(f"  {status} {ch['peer_alias'][:20]:20s} {bar} {ch['local_ratio']:.0%} "
+            print(f"  {status} {_label(ch)[:26]:26s} {bar} {ch['local_ratio']:.0%} "
                   f"| {my_ppm_str:>7}ppm | {their_str:>11} | {inbound_str:>12}")
         print(f"  {'─'*72}")
         print(f"  Our fee = what we charge to route payments out. Their fee = what they charge others to route to us.")
@@ -821,7 +831,7 @@ def cmd_status(args):
             print(f"  {'Channel':<22} {'Pinned':>9}  {'Set at':<18} Note")
             for chan_id, pin in pins.items():
                 ch = next((c for c in channels if c["chan_id"] == chan_id), None)
-                alias = ch["peer_alias"] if ch else "(channel closed?)"
+                alias = _label(ch) if ch else "(channel closed?)"
                 set_at = datetime.fromtimestamp(pin["set_at"]).strftime("%Y-%m-%d %H:%M")
                 note = pin.get("note") or ""
                 print(f"  {alias[:21]:<22} {pin['pinned_ppm']:>5} ppm  {set_at:<18} {note}")
@@ -1049,9 +1059,13 @@ def main():
     p_overwritefee = subparsers.add_parser("overwrite_fee",
         help="[feature]   Pin a channel's outbound fee — pipeline will leave it alone")
     p_overwritefee.add_argument("channel",
-        help="chan_id or peer alias (substring match)")
+        metavar="CHANNEL",
+        help="Channel to pin: numeric chan_id (scid), or a peer alias "
+             "substring (must match exactly one channel — use the chan_id "
+             "when a peer has multiple channels)")
     p_overwritefee.add_argument("ppm", type=int,
-        help="Fee rate in ppm to pin (e.g. 100)")
+        metavar="PPM",
+        help="Outbound fee rate in ppm to pin (integer >= 0, e.g. 100)")
     p_overwritefee.add_argument("--note", default="",
         help="Optional note recorded with the pin")
 
