@@ -224,6 +224,7 @@ def get_channel_gate(chan_id, local_ratio=None):
             "last_refill_ppm": lr,
             "hard_floor_ppm": hard_floor,
             "clearing_ppm": clearing,
+            "sigmoid_ppm": round(base) if local_ratio is not None else None,
             "mult": round(float(sig.get("market_multiplier", 0.0) or 0.0), 2),
             "earned_ppm": round(ep) if ep is not None else None,
             "calibrated": ep is not None,
@@ -771,6 +772,7 @@ TEMPLATE = """
   .chan-table td { padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; }
   .chan-table tr:last-child td { border-bottom: none; }
   .chan-table tr:hover td { background: rgba(247,147,26,0.03); }
+  .chan-table th.compart, .chan-table td.compart { border-left: 1px solid var(--border); }
 
   .balance-bar { margin: 6px 0 3px; height: 6px; background: var(--border); overflow: hidden; min-width: 80px; }
   .balance-bar-fill { height: 100%; transition: width 0.5s ease; }
@@ -1482,13 +1484,13 @@ TEMPLATE = """
           <tr>
             <th style="width:16%">Peer</th>
             <th style="width:14%">Balance</th>
-            <th>Local Fee [ppm]</th>
+            <th class="compart">Local Fee [ppm]</th>
             <th>Clearing [ppm]</th>
             <th>Mkt Mult</th>
             <th>Floor [ppm]</th>
-            <th>Earned [ppm]</th>
+            <th class="compart">Earned [ppm]</th>
             <th>Refill Budget [ppm]</th>
-            <th>Rebal Cost 30d</th>
+            <th class="compart">Rebal Cost 30d</th>
             <th>Net Lifetime</th>
           </tr>
         </thead>
@@ -1505,12 +1507,12 @@ TEMPLATE = """
               <div class="balance-bar"><div class="balance-bar-fill {{ bar_cls }}" style="width:{{ ratio }}%"></div></div>
               <div style="font-size:10px;color:var(--muted);">{{ ratio }}% local</div>
             </td>
-            <td style="font-size:11px;">
+            <td class="compart" style="font-size:11px;">
               {% if ch.local_fee_ppm is not none %}{{ ch.local_fee_ppm }}{% else %}<span style="color:var(--muted);">—</span>{% endif %}
               {% if ch.gate and ch.gate.inbound_fee_ppm %}<div style="font-size:9px;color:var(--muted);" title="inbound fee — negative = discount pulling organic refill">(inbound {{ ch.gate.inbound_fee_ppm }})</div>{% endif %}
             </td>
             <td style="font-size:11px;">
-              {% if ch.gate and ch.gate.clearing_ppm is not none %}<span title="sigmoid(local ratio) × market multiplier — where the fee settles with no floor">{{ ch.gate.clearing_ppm }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
+              {% if ch.gate and ch.gate.clearing_ppm is not none %}<span title="sigmoid({{ ratio }}% local) = {{ ch.gate.sigmoid_ppm }} ppm × (1 + mkt mult {{ "%+.2f" % ch.gate.mult }}) = {{ ch.gate.clearing_ppm }} ppm — where the fee settles with no floor">{{ ch.gate.clearing_ppm }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>
             <td style="font-size:11px;color:{% if ch.gate and ch.gate.mult > 0 %}var(--green){% elif ch.gate and ch.gate.mult < 0 %}var(--red){% else %}var(--muted){% endif %};">
               {% if ch.gate %}{{ "%+.2f" % ch.gate.mult }}{% else %}—{% endif %}
@@ -1520,7 +1522,7 @@ TEMPLATE = """
                 <span title="outbound floor — recoups last refill ({{ ch.gate.last_refill_ppm }} ppm) × margin{% if ch.gate.floor_decaying %}; decaying toward the clearing fee while idle{% endif %}">{{ ch.gate.floor_ppm }}{% if ch.gate.floor_decaying %} ↓ <span style="color:var(--muted);font-size:9px;">of {{ ch.gate.hard_floor_ppm }}</span>{% endif %}</span>
               {% else %}<span style="color:var(--muted);" title="no refill history — sigmoid alone drives the fee">—</span>{% endif %}
             </td>
-            <td style="font-size:11px;">
+            <td class="compart" style="font-size:11px;">
               {% if ch.gate and ch.gate.calibrated %}<span title="trailing revenue / out-volume over the earned-ppm window">{{ ch.gate.earned_ppm }}</span>
               {% elif ch.gate %}<span style="color:var(--muted);" title="calibrating — still measuring what this channel earns (too little out-volume yet); keeps full rebalance escalation">calibrating</span>
               {% else %}<span style="color:var(--muted);">—</span>{% endif %}
@@ -1533,7 +1535,7 @@ TEMPLATE = """
                 {% else %}<span title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }}</span>{% endif %}
               {% else %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>
-            <td class="{% if perf.reb_cost > 0 %}amount-negative{% else %}amount-muted{% endif %}">
+            <td class="compart {% if perf.reb_cost > 0 %}amount-negative{% else %}amount-muted{% endif %}">
               {% if perf.reb_cost > 0 %}-{{ "{:,}".format(perf.reb_cost) }}{% else %}—{% endif %}
             </td>
             <td class="{% if perf.net_all > 0 %}amount-positive{% elif perf.net_all < 0 %}amount-negative{% else %}amount-muted{% endif %}">
