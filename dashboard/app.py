@@ -838,6 +838,15 @@ TEMPLATE = """
   /* Ensure all tables scroll horizontally on small screens */
   .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
+  /* Tap-to-show tooltip bubble (mobile equivalent of native title= hover) */
+  .tip-pop {
+    position: absolute; z-index: 9999; max-width: 280px;
+    background: var(--card); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 10px; font-size: 11px; line-height: 1.45;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.5); pointer-events: none;
+  }
+
 </style>
 {% if theme == 'midnight' %}
 <style>
@@ -1698,6 +1707,39 @@ function pageTab(name) {
   try { t = localStorage.getItem('dashTab'); } catch (e) {}
   if (location.hash === '#sat-flow') t = 'flows';
   if (t && t !== 'node' && document.getElementById('tab-' + t)) pageTab(t);
+})();
+
+// Tap-to-show tooltips: native title= only appears on hover, which touch
+// devices have no equivalent for. Surface the same text in a tap-driven
+// bubble. Markup is untouched — we read the live title at click time, so
+// desktop hover keeps working and mobile gains tap. Tapping anywhere that
+// isn't a title element (including the bubble, pointer-events:none) dismisses.
+(function () {
+  let pop = null, anchor = null;
+  function hide() { if (pop) { pop.remove(); pop = null; anchor = null; } }
+  document.addEventListener('click', function (e) {
+    const el = e.target.closest('[title]');
+    const sameEl = el && el === anchor;
+    hide();
+    if (!el || sameEl) return;
+    anchor = el;
+    const text = el.getAttribute('title');
+    if (!text) return;
+    pop = document.createElement('div');
+    pop.className = 'tip-pop';
+    pop.textContent = text;
+    document.body.appendChild(pop);
+    const r = el.getBoundingClientRect();
+    const pad = 8;
+    let left = r.left + window.scrollX;
+    let top = r.bottom + window.scrollY + 6;
+    const maxLeft = window.scrollX + document.documentElement.clientWidth - pop.offsetWidth - pad;
+    if (left > maxLeft) left = maxLeft;
+    if (left < window.scrollX + pad) left = window.scrollX + pad;
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+  });
+  window.addEventListener('scroll', hide, true);
 })();
 </script>
 </body>
