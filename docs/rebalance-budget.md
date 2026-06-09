@@ -33,7 +33,8 @@ on the recoup price): never pay more to refill than the channel can earn back.
   price discovery and it'd never bootstrap). The gate is opt-in by evidence.
 
 A judged channel whose escalation exceeds the cap is `profit_capped`; if it has
-also failed `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` (5) times it is `structural` —
+also failed `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` (5) **runs** (see
+[Failure unit](#failure-unit-the-run-not-the-attempt)) it is `structural` —
 `plan_rebalances` drops it (refilling is a losing trade), the verdict stamps
 `structural_flag_ts` and fires a one-time `structural_liquidity` alert, and the
 fix becomes a capital decision (open inbound / splice / resize). With Layer 3
@@ -77,7 +78,7 @@ There are also two further automatic paths:
 - **Failures expire** — refusals older than `EARNED_PPM_MAX_LOOKBACK_DAYS`
   (90d) stop counting (same clock as the earnings evidence), so a flag that
   nothing else clears drops below the fail threshold roughly once a quarter
-  and the channel gets a free 5-attempt re-probe at the cap price. Still
+  and the channel gets a free 5-run re-probe at the cap price. Still
   refused → re-flags within hours at zero cost; market moved → it quietly
   comes back to life.
 
@@ -96,13 +97,43 @@ There are also two further automatic paths:
 > recovered. `profit_capped` is *not* affected by recovery — only the
 > `structural` escalation clears.
 
+## Failure unit: the run, not the attempt
+
+`failures_since_last_success` counts failed **pipeline runs** (refill cycles),
+not individual rebalance attempts. This matters because one run fans out a
+primary plan plus several *fallback* plans at the same depleted channel — each
+is its own `execute_rebalance` call and writes its own failure row. Counting
+those as N separate failures would escalate the budget and trip the structural
+threshold inside a single ~hour-long run, stranding a channel before it ever
+got a real refill-discovery window (this is exactly how a freshly-opened
+channel could go "stranded" in under an hour).
+
+So every plan executed in one run shares a `run_id` (stamped in
+`execute_rebalance_plans`, the run's start ts), and
+`count_failures_since_last_success` counts **distinct failed `run_id`s** since
+the last success. A run that landed *any* sats — a fallback or chunk that
+succeeded, writing a success row under that `run_id` — is a partial refill, not
+a failed cycle, and is excluded. Rows with no `run_id` (legacy pre-migration
+rows, one-off manual sends) each count as their own episode, preserving the old
+per-row behaviour for them.
+
+> **Why keep `TIMEOUT`/`NO_ROUTE` counted?** A rebalance runs `SendPaymentV2`
+> with a fee limit, and LND's pathfinder won't return routes above that limit —
+> so `NO_ROUTE`/`TIMEOUT` can genuinely mean "a route exists, but only above
+> your cap," which *is* price evidence the structural gate wants. We can't
+> cleanly separate "priced out" from "no path at all" from the failure reason,
+> so all failure reasons count. The only fix was the *unit* (cycle, not attempt).
+
+The `run_id` column is added (and historical rows backfilled by time-clustering,
+>1h gap = new run) by the `_migrate_rebalance_run_id` migration.
+
 ## Bootstrap & drift recovery — failure escalation
 
 A channel with no successful refill yet starts at `REBALANCE_DEFAULT_BUDGET_PPM`
-(500). Each consecutive *whole-attempt* failure since the last success raises
-the budget by `REBALANCE_BUDGET_ESCALATION_STEP` (20%) per cron cycle, capped
-at `REBALANCE_MAX_BUDGET_PPM` (5000). One success resets the counter and the
-budget anchors to the actual paid ppm.
+(500). Each consecutive failed *run* since the last success raises the budget by
+`REBALANCE_BUDGET_ESCALATION_STEP` (20%) per cron cycle, capped at
+`REBALANCE_MAX_BUDGET_PPM` (5000). One success resets the counter and the budget
+anchors to the actual paid ppm.
 
 **Failures expire** after `EARNED_PPM_MAX_LOOKBACK_DAYS` (90d) — the same
 clock that ages out earned-ppm evidence. Escalation's semantics assume each
@@ -110,9 +141,9 @@ failure tested a price; a profit-capped channel's failures all tested the
 *cap*, not the escalated levels, so carrying them into a later re-entry
 (e.g. after the channel goes unjudged) would bid prices that were never
 actually refused. With expiry, a channel returning from a long quiet resumes
-at `last_refill × 1.0` and rebuilds escalation from fresh attempts. Side
+at `last_refill × 1.0` and rebuilds escalation from fresh runs. Side
 effect, deliberate: a standing structural flag on a channel that stays judged
-gets a free 5-attempt re-probe roughly once a quarter instead of being
+gets a free 5-run re-probe roughly once a quarter instead of being
 permanent — markets move, and failed attempts cost nothing.
 
 Example: a channel where real market price is ~2300 ppm bootstraps as

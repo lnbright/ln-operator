@@ -59,7 +59,19 @@
   `last_refill_ppm` (most recent successful rebalance into a channel) still
   anchors BOTH the rebalance budget and the outbound fee floor. Base budget =
   `last_refill × (1 + 0.20 × failures_since_last_success)`, capped at 5000;
-  bootstrap `REBALANCE_DEFAULT_BUDGET_PPM = 500`. On top of that:
+  bootstrap `REBALANCE_DEFAULT_BUDGET_PPM = 500`. **`failures_since_last_success`
+  counts failed pipeline RUNS, not attempts**: one run fans out a primary plan
+  plus fallbacks at the same channel, each writing its own failure row, so they
+  share a `run_id` (stamped in `execute_rebalance_plans`) and
+  `count_failures_since_last_success` counts distinct failed `run_id`s — a run
+  that landed any sats (a success row under that `run_id`) is a partial refill,
+  not a failed cycle, and is excluded; NULL-`run_id` rows (legacy/manual) count
+  per-row. Without this a freshly-opened channel's primary+fallback fan-out in
+  ONE run crossed `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` and got stranded in
+  under an hour. `TIMEOUT`/`NO_ROUTE` still count (a fee-capped `SendPaymentV2`
+  reports them when the only route exceeds the cap — real price evidence).
+  Column added + historical rows backfilled (time-clustering, >1h gap = new run)
+  by `_migrate_rebalance_run_id`. On top of that:
   - **Layer 1 — profitability gate** (`get_channel_rebalance_budget`): for
     channels with enough trailing OUT-volume to JUDGE (≥ `EARNED_PPM_MIN_VOLUME_SATS`),
     the budget is also capped at `earned_ppm × REBALANCE_PROFIT_HORIZON` — never
@@ -132,7 +144,9 @@
   stream is live-only with no replay — so any daemon downtime is a data gap, not a
   clean day. chan_out = the channel that lacked capacity; failure_detail
   INSUFFICIENT_BALANCE = lost revenue + rebalance signal.
-- rebalance_log has payment_hash and triggered_by columns (migration added)
+- rebalance_log has payment_hash, triggered_by, budget_ppm and run_id columns
+  (migrations added). run_id groups all plans executed in one pipeline run so
+  failure counting is per-cycle, not per-attempt (see Layer-1 note above).
 - fee_overrides table: chan_id (PK), pinned_ppm, set_at, note — manual fee pins
 
 ## Services

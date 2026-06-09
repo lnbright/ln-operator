@@ -419,6 +419,11 @@ def execute_rebalance_plans(plans, log, executor=None):
 
     MIN_CHUNK = 50_000
 
+    # One id for the whole run — every plan (primary + fallbacks) at any channel
+    # shares it, so count_failures_since_last_success counts failed CYCLES, not
+    # the fallback fan-out within a single run.
+    run_id = int(time.time())
+
     target_deficits = {}
     source_remaining = {}
     for p in plans:
@@ -457,6 +462,7 @@ def execute_rebalance_plans(plans, log, executor=None):
             continue
 
         capped = dict(p)
+        capped["run_id"] = run_id
         capped["amount_sats"] = attempt_amount
         capped["max_fee_sats"] = int(
             attempt_amount * p["max_fee_ppm"] / 1_000_000 * 1.1

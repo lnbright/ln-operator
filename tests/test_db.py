@@ -149,5 +149,72 @@ class FailureExpiryTests(unittest.TestCase):
         self.assertEqual(db.count_failures_since_last_success("chan"), 1)
 
 
+class FailureRunDedupTests(unittest.TestCase):
+    """Failure unit is the refill RUN, not the attempt.
+
+    One pipeline run fans out a primary plan plus fallbacks at the same channel,
+    all sharing a run_id; the budget escalation / structural threshold must
+    advance once per run, not once per fallback. A run that landed any sats is
+    not a failed cycle."""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self._patch = patch("db.DB_PATH", self.db_path)
+        self._patch.start()
+        db.init_db()
+        self.now = int(time.time())
+
+    def tearDown(self):
+        self._patch.stop()
+        os.unlink(self.db_path)
+
+    def _attempt(self, age_days, success, run_id):
+        with db.get_conn() as conn:
+            conn.execute("""
+                INSERT INTO rebalance_log
+                    (ts, source_chan_id, target_chan_id, amount_sats, success, run_id)
+                VALUES (?, 'src', 'chan', 500000, ?, ?)
+            """, (self.now - int(age_days * DAY), 1 if success else 0, run_id))
+
+    def test_same_run_counts_once(self):
+        # Primary + 5 fallbacks in one run (bfx's actual failure shape).
+        for _ in range(6):
+            self._attempt(1, success=False, run_id=42)
+        self.assertEqual(db.count_failures_since_last_success("chan"), 1)
+
+    def test_distinct_runs_count_separately(self):
+        self._attempt(3, success=False, run_id=1)
+        self._attempt(2, success=False, run_id=2)
+        self._attempt(1, success=False, run_id=3)
+        self.assertEqual(db.count_failures_since_last_success("chan"), 3)
+
+    def test_run_that_landed_sats_is_not_a_failure(self):
+        # A fallback in the run succeeded → partial refill, not a failed cycle.
+        self._attempt(1, success=False, run_id=7)
+        self._attempt(1, success=True, run_id=7)
+        self._attempt(1, success=False, run_id=7)
+        self.assertEqual(db.count_failures_since_last_success("chan"), 0)
+
+    def test_null_run_id_counts_per_row(self):
+        # Legacy / manual rows with no run_id keep the old per-attempt behaviour.
+        self._attempt(2, success=False, run_id=None)
+        self._attempt(1, success=False, run_id=None)
+        self.assertEqual(db.count_failures_since_last_success("chan"), 2)
+
+    def test_backfill_clusters_by_time(self):
+        # Six NULL-run_id failures within ~an hour backfill to one run.
+        base = self.now - 3 * DAY
+        for mins in (0, 11, 23, 34, 35, 46):
+            with db.get_conn() as conn:
+                conn.execute("""
+                    INSERT INTO rebalance_log
+                        (ts, source_chan_id, target_chan_id, amount_sats, success)
+                    VALUES (?, 'src', 'chan', 500000, 0)
+                """, (base + mins * 60,))
+        db._migrate_rebalance_run_id()
+        self.assertEqual(db.count_failures_since_last_success("chan"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

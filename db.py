@@ -42,6 +42,39 @@ def _migrate_rebalance_log():
             conn.execute("ALTER TABLE rebalance_log ADD COLUMN budget_ppm REAL")
 
 
+def _migrate_rebalance_run_id():
+    """Add rebalance_log.run_id and backfill historical rows by time-clustering.
+
+    A single pipeline run fans out a primary plan plus several fallback plans at
+    the SAME depleted channel — each is its own execute_rebalance call and writes
+    its own failure row. Counting those as N separate failures (escalating the
+    budget and tripping the structural threshold inside one ~hour-long run) was a
+    bug: the failure unit should be the refill CYCLE, not the attempt. run_id ties
+    every plan in one run together so count_failures_since_last_success can count
+    distinct failed runs.
+
+    Backfill: existing rows have no run_id, so cluster them by ts — attempts more
+    than RUN_GAP apart belong to different runs (cron fires every 2h; a single
+    run's plans land within minutes of each other). Stamp each cluster with its
+    first ts. Idempotent: only NULL run_id rows are touched.
+    """
+    RUN_GAP = 3600  # >1h between attempts ⇒ a new run (runs are 2h apart)
+    with get_conn() as conn:
+        cols = [row["name"] for row in conn.execute("PRAGMA table_info(rebalance_log)")]
+        if "run_id" not in cols:
+            conn.execute("ALTER TABLE rebalance_log ADD COLUMN run_id INTEGER")
+        rows = conn.execute(
+            "SELECT id, ts FROM rebalance_log WHERE run_id IS NULL ORDER BY ts, id"
+        ).fetchall()
+        run_id = None
+        prev_ts = None
+        for r in rows:
+            if prev_ts is None or (r["ts"] - prev_ts) > RUN_GAP:
+                run_id = r["ts"]          # cluster id = its first attempt's ts
+            conn.execute("UPDATE rebalance_log SET run_id=? WHERE id=?", (run_id, r["id"]))
+            prev_ts = r["ts"]
+
+
 def _migrate_drop_unused_columns():
     """Drop vestigial columns left over from removed features (idempotent).
 
@@ -102,6 +135,7 @@ def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
     _migrate_rebalance_log()
+    _migrate_rebalance_run_id()
     _migrate_drop_unused_columns()
     _migrate_channel_signals_v2()
 
@@ -375,23 +409,29 @@ def save_fee_update(chan_id, peer_alias, old_ppm, new_ppm, old_base, new_base,
 
 def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
                            amount, fee_paid, success, failure_reason="",
-                           duration=0.0, payment_hash=None, budget_ppm=None):
+                           duration=0.0, payment_hash=None, budget_ppm=None,
+                           run_id=None):
     """Log a rebalance attempt.
 
     budget_ppm is the max-fee ppm cap the attempt was made under (from the
     planner). Stored on both successes and failures so the dashboard can show
-    what we were willing to pay even when the payment failed and fee_ppm is 0."""
+    what we were willing to pay even when the payment failed and fee_ppm is 0.
+
+    run_id groups every plan (primary + fallbacks) executed in one pipeline run,
+    so count_failures_since_last_success counts failed CYCLES, not attempts. None
+    for callers outside the run loop (e.g. one-off manual rebalances) — each then
+    counts as its own episode."""
     fee_ppm = (fee_paid / amount * 1_000_000) if amount > 0 and fee_paid else 0
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO rebalance_log
             (source_chan_id, target_chan_id, source_alias, target_alias,
              amount_sats, fee_paid_sats, fee_ppm, success, failure_reason,
-             duration_seconds, payment_hash, triggered_by, budget_ppm)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?)
+             duration_seconds, payment_hash, triggered_by, budget_ppm, run_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)
         """, (source_chan, target_chan, source_alias, target_alias,
               amount, fee_paid, fee_ppm, int(success), failure_reason, duration,
-              payment_hash, budget_ppm))
+              payment_hash, budget_ppm, run_id))
 
 
 def record_knob_snapshot(knobs: dict):
@@ -820,11 +860,20 @@ def get_last_refill_ts(chan_id):
 
 
 def count_failures_since_last_success(chan_id):
-    """Count failed rebalance attempts into this channel since its last success.
+    """Count failed rebalance RUNS into this channel since its last success.
 
-    Returns 0 if no history or the last attempt was a success. Used to
-    escalate the rebalance budget on persistent failure (bootstrap and
-    upward-drift recovery).
+    The unit is the refill CYCLE, not the attempt: one pipeline run fans out a
+    primary plan plus several fallback plans at the same channel, all sharing a
+    run_id, and the budget escalation / structural threshold should advance once
+    per run — not once per fallback. So we count distinct run_ids among failure
+    rows, and a run that landed ANY sats (a fallback or chunk that succeeded →
+    a success row under that run_id) is not a failed cycle and is excluded. Rows
+    with no run_id (legacy un-backfilled rows, one-off manual sends) each count
+    as their own episode via -id, preserving the old per-row behaviour for them.
+
+    Returns 0 if no history or the last attempt was a success. Used to escalate
+    the rebalance budget on persistent failure (bootstrap and upward-drift
+    recovery).
 
     Failures EXPIRE after EARNED_PPM_MAX_LOOKBACK_DAYS — the same clock that
     ages out earned-ppm evidence. A refusal from months ago says nothing about
@@ -833,7 +882,7 @@ def count_failures_since_last_success(chan_id):
     tested the cap price, not the escalated ones). Expiry means a channel
     re-entering planning after a long quiet resumes at last_refill × 1.0 and
     rebuilds escalation from fresh attempts; a standing structural flag gets a
-    free 5-attempt re-probe roughly once a quarter instead of being permanent.
+    free 5-run re-probe roughly once a quarter instead of being permanent.
     """
     now = int(time.time())
     with get_conn() as conn:
@@ -844,9 +893,18 @@ def count_failures_since_last_success(chan_id):
         last_ok_ts = last_ok["ts"] if last_ok and last_ok["ts"] else 0
         cutoff = max(last_ok_ts, now - EARNED_PPM_MAX_LOOKBACK_DAYS * 86400)
         row = conn.execute("""
-            SELECT COUNT(*) AS n FROM rebalance_log
-            WHERE target_chan_id = ? AND success = 0 AND ts > ?
-        """, (chan_id, cutoff)).fetchone()
+            SELECT COUNT(*) AS n FROM (
+                SELECT COALESCE(run_id, -id) AS episode
+                FROM rebalance_log
+                WHERE target_chan_id = ? AND success = 0 AND ts > ?
+                  AND COALESCE(run_id, -id) NOT IN (
+                      SELECT run_id FROM rebalance_log
+                      WHERE target_chan_id = ? AND success = 1
+                        AND run_id IS NOT NULL
+                  )
+                GROUP BY episode
+            )
+        """, (chan_id, cutoff, chan_id)).fetchone()
     return int(row["n"]) if row else 0
 
 
@@ -875,6 +933,7 @@ else:
     # Run migrations on import to reconcile schema if the DB already exists
     try:
         _migrate_rebalance_log()
+        _migrate_rebalance_run_id()
         _migrate_drop_unused_columns()
         _migrate_channel_signals_v2()
     except Exception:
