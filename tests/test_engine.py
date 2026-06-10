@@ -305,16 +305,101 @@ class RebalanceBudgetTests(unittest.TestCase):
 
     def test_profitable_channel_not_capped(self):
         # Earns well above the recoup price → cap (earned×horizon) exceeds the
-        # escalated budget, so escalation wins and the channel isn't capped.
+        # escalated budget, so the channel isn't capped. With the earn-ceiling
+        # accelerator the anchor (2000) sits below the ceiling, so each failure
+        # also closes STEP of the gap toward it — budget climbs ABOVE plain
+        # escalation but never past the cap.
         earned = 4000.0
         with patch("db.get_last_refill_ppm", return_value=2000), \
              patch("db.count_failures_since_last_success", return_value=3), \
              patch("db.get_channel_earned_ppm", return_value=(earned, 50_000_000)):
             r = engine.get_channel_rebalance_budget("chan")
-        escalated = int(round(2000 * (1 + 0.20 * 3)))
-        self.assertGreater(earned * config.REBALANCE_PROFIT_HORIZON, escalated)  # guard the premise
-        self.assertEqual(r["max_fee_ppm"], escalated)
+        plain = int(round(2000 * (1 + 0.20 * 3)))                       # 3200
+        ceiling = min(earned * config.REBALANCE_PROFIT_HORIZON, config.REBALANCE_MAX_BUDGET_PPM)
+        gap_climb = int(round(2000 + (ceiling - 2000) * min(1.0, 0.20 * 3)))  # 3800
+        self.assertGreater(gap_climb, plain)                            # guard the premise
+        self.assertEqual(r["max_fee_ppm"], gap_climb)
+        self.assertTrue(r["accelerated"])
         self.assertFalse(r["profit_capped"])
+
+    def test_accelerator_lifts_poisoned_anchor_to_ceiling(self):
+        # The bfx case: one lucky-cheap refill pinned last_refill to 7 ppm on a
+        # channel earning 576. Plain escalation after 5 fails = 14 ppm and never
+        # finds a route. The accelerator closes the full gap (STEP×5 = 1.0) to
+        # the affordable ceiling (earned×horizon), so it bids that instead.
+        fails = config.REBALANCE_STRUCTURAL_FAIL_THRESHOLD             # 5
+        earned = 576.0
+        with patch("db.get_last_refill_ppm", return_value=7), \
+             patch("db.count_failures_since_last_success", return_value=fails), \
+             patch("db.get_channel_earned_ppm", return_value=(earned, 50_000_000)):
+            r = engine.get_channel_rebalance_budget("chan")
+        ceiling = int(round(min(earned * config.REBALANCE_PROFIT_HORIZON,
+                                config.REBALANCE_MAX_BUDGET_PPM)))
+        self.assertEqual(r["max_fee_ppm"], ceiling)
+        self.assertTrue(r["accelerated"])
+        self.assertFalse(r["profit_capped"])   # reached the cap, never exceeded it
+        self.assertFalse(r["structural"])       # so never strands a profitable channel
+
+    def test_accelerator_at_fractional_cap_does_not_strand(self):
+        # Regression: with a fractional earned_ppm the cap is non-integer, and
+        # rounding gap_climb up could land `escalated` a hair above the unrounded
+        # cap — which must NOT register as profit_capped/structural (that would
+        # strand the profitable channel the accelerator is rescuing). bfx live
+        # case: earned 576.77 → cap 720.96, gap_climb rounds to 721.
+        earned = 576.7713156017998
+        with patch("db.get_last_refill_ppm", return_value=7), \
+             patch("db.count_failures_since_last_success",
+                   return_value=config.REBALANCE_STRUCTURAL_FAIL_THRESHOLD), \
+             patch("db.get_channel_earned_ppm", return_value=(earned, 50_000_000)):
+            r = engine.get_channel_rebalance_budget("chan")
+        self.assertEqual(r["max_fee_ppm"], int(round(earned * config.REBALANCE_PROFIT_HORIZON)))
+        self.assertTrue(r["accelerated"])
+        self.assertFalse(r["profit_capped"])
+        self.assertFalse(r["structural"])
+
+    def test_accelerator_partial_gap_below_full_close(self):
+        # Fewer failures than 1/STEP → only a fraction of the gap is closed.
+        with patch("db.get_last_refill_ppm", return_value=7), \
+             patch("db.count_failures_since_last_success", return_value=2), \
+             patch("db.get_channel_earned_ppm", return_value=(576.0, 50_000_000)):
+            r = engine.get_channel_rebalance_budget("chan")
+        ceiling = min(576.0 * config.REBALANCE_PROFIT_HORIZON, config.REBALANCE_MAX_BUDGET_PPM)
+        gap_climb = int(round(7 + (ceiling - 7) * (0.20 * 2)))         # 40% of the gap
+        self.assertEqual(r["max_fee_ppm"], gap_climb)
+        self.assertTrue(r["accelerated"])
+
+    def test_accelerator_inert_when_earnings_marginal(self):
+        # Ceiling only ~1.5× the anchor (< 2×) → the gap never beats plain
+        # escalation, so the accelerator is a no-op and price discovery is
+        # unchanged.
+        earned = 360.0  # cap = 450, anchor 300 → ceiling < 2×anchor (600)
+        with patch("db.get_last_refill_ppm", return_value=300), \
+             patch("db.count_failures_since_last_success", return_value=1), \
+             patch("db.get_channel_earned_ppm", return_value=(earned, 50_000_000)):
+            r = engine.get_channel_rebalance_budget("chan")
+        plain = int(round(300 * (1 + 0.20 * 1)))                       # 360
+        self.assertEqual(r["max_fee_ppm"], plain)
+        self.assertFalse(r["accelerated"])
+        self.assertFalse(r["profit_capped"])
+
+    def test_accelerator_skipped_for_unjudged(self):
+        # No earned-ppm judgement → no ceiling to accelerate toward; plain
+        # escalation runs free, preserving bootstrap price discovery.
+        with patch("db.get_last_refill_ppm", return_value=7), \
+             patch("db.count_failures_since_last_success", return_value=5), \
+             patch("db.get_channel_earned_ppm", return_value=(None, 500_000)):
+            r = engine.get_channel_rebalance_budget("chan")
+        self.assertEqual(r["max_fee_ppm"], int(round(7 * (1 + 0.20 * 5))))
+        self.assertFalse(r["accelerated"])
+
+    def test_accelerator_off_without_failures(self):
+        # Zero failures → no escalation and no acceleration; budget is the anchor.
+        with patch("db.get_last_refill_ppm", return_value=7), \
+             patch("db.count_failures_since_last_success", return_value=0), \
+             patch("db.get_channel_earned_ppm", return_value=(576.0, 50_000_000)):
+            r = engine.get_channel_rebalance_budget("chan")
+        self.assertEqual(r["max_fee_ppm"], 7)
+        self.assertFalse(r["accelerated"])
 
     def test_structural_when_capped_and_failing(self):
         # Profit-capped AND failures past the structural threshold → structural.

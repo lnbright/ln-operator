@@ -78,8 +78,21 @@
     pay more to refill than the channel earns back in ~horizon cycles. UNJUDGED
     channels (`db.get_channel_earned_ppm` returns None) keep full escalation
     untouched (capping them would kill price discovery). Budget dict carries
-    `earned_ppm`, `profit_capped`, `structural`. `plan_rebalances` drops targets
-    whose ladder verdict ≠ `rebalance`, so structural channels stop being ground.
+    `earned_ppm`, `profit_capped`, `structural`, `accelerated`. `plan_rebalances`
+    drops targets whose ladder verdict ≠ `rebalance`, so structural channels stop
+    being ground. **Earn-ceiling accelerator**: a JUDGED channel whose anchor sits
+    far below its earnings — e.g. one lucky-cheap refill pins `last_refill` to
+    7 ppm on a channel earning 576 — would crawl `7→8→10→11→14…` and never route,
+    sitting depleted with no alarm (it's profitable, so not structural). Instead
+    each failed run closes `REBALANCE_BUDGET_ESCALATION_STEP` of the gap between
+    the anchor and the affordable ceiling (`min(earned×horizon, MAX)`), reaching
+    it in `1/STEP` (=5) runs (bfx 14→721). Reuses STEP (no new knob); only RAISES
+    the budget (a `max()`); judged-only; climbs only UP TO the ceiling. Because
+    rounding `gap_climb` up can land one ppm above a fractional `profit_cap`,
+    `profit_capped` is measured against PLAIN escalation, not the accelerated
+    value — so the accelerator can never spuriously strand the channel it rescues
+    (accelerator-firing and `profit_capped` are mutually exclusive). Inert unless
+    `earned×horizon > 2×anchor`; self-limiting (first success re-anchors).
   - **Layer 2 — soft outbound floor + raised ceiling** (`compute_fee_target`):
     `SIGMOID_MAX_PPM` is 750 (was 250) so a draining channel can defend with price.
     The `last_refill × REBALANCE_FEE_MARGIN` floor is HARD while forwarding but

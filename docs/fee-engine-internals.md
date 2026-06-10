@@ -96,9 +96,24 @@ earned_ppm, out_vol = get_channel_earned_ppm(chan)    # None if out_vol < MIN_VO
 
 if earned_ppm is None:                 # UNJUDGED — full escalation, no cap
     budget = min(escalated, MAX_BUDGET)
-else:                                  # JUDGED — also cap at the recoup price
-    budget = min(escalated, earned_ppm × REBALANCE_PROFIT_HORIZON, MAX_BUDGET)
+else:                                  # JUDGED — earn-ceiling accelerator + cap
+    ceiling   = min(earned_ppm × REBALANCE_PROFIT_HORIZON, MAX_BUDGET)
+    escalated = max(escalated, anchor + (ceiling − anchor) × min(1, STEP × failures))
+    budget    = min(escalated, earned_ppm × REBALANCE_PROFIT_HORIZON, MAX_BUDGET)
+
+# profit_capped is measured against PLAIN escalation (pre-accelerator): the
+# accelerator climbs up TO the ceiling, so it must never register as "capped".
 ```
+
+**Earn-ceiling accelerator** — when a judged channel's anchor sits far below
+what it earns (e.g. a single lucky-cheap refill pinned `last_refill` to 7 ppm on
+a channel earning 576), plain `STEP × tiny-anchor` escalation crawls and never
+rediscovers the clearing price. Each failed run instead closes `STEP` of the gap
+to the affordable ceiling, reaching it in `1/STEP` (= 5) runs. It only ever
+*raises* the budget, only for judged channels, and only up to the ceiling — so
+it never creates a `profit_capped`/`structural` state and leaves unjudged price
+discovery untouched. Inert unless `earned × horizon > 2 × anchor`. The dict adds
+`accelerated: bool`. Full detail in [Rebalance Budget](rebalance-budget.md#earn-ceiling-accelerator-poisoned-anchor-escape).
 
 `get_channel_earned_ppm` widens its window when the standard 21 days hold less
 than `EARNED_PPM_MIN_VOLUME_SATS`: it doubles the lookback (21 → 42 → 84 →
@@ -153,6 +168,7 @@ outbound are set in one `/v1/chanpolicy` POST.
 | Refilled channel sits idle, floor prices it out | Floor decays toward the clearing fee (`floor↓`) so it can sell; doesn't sit dead at an unsellable price |
 | Decayed-floor channel forwards once | Floor HOLDS at the cleared level — does not snap back to full (no whipsaw); only a fresh refill re-arms it |
 | Judged channel, refill cost > earned×1.25 | `profit_capped` — budget held to the recoup price; if it keeps failing → `structural`, dropped from planning, capital alert |
+| Judged channel, anchor ≪ earnings (lucky-cheap refill poisoned `last_refill`) | **Earn-ceiling accelerator** — each failed run closes 20% of the gap to `earned×1.25`, reaching it in 5 runs instead of crawling. `accelerated` flag set; never strands (climbs only up to the cap) |
 | Quiet/new channel, low out-volume | "unjudged" — no profit cap, full escalation (price discovery preserved). Only if out-volume < MIN_VOLUME over the full 90d max lookback |
 | Judged channel goes silent (e.g. depleted, can't forward) | Stays judged on older evidence — the earned-ppm window widens up to 90d, so the profit cap and structural verdict persist instead of evaporating with the 21d window |
 

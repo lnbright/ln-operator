@@ -9,6 +9,11 @@ The most recent successful refill ppm for a channel anchors both:
 escalated = (last_refill_ppm OR DEFAULT_BUDGET)
              × (1 + ESCALATION_STEP × failures_since_last_success)
 
+# JUDGED channels only — earn-ceiling accelerator (raises escalated, never lowers):
+ceiling   = min(earned_ppm × PROFIT_HORIZON, MAX_BUDGET)
+escalated = max(escalated,
+                anchor + (ceiling − anchor) × min(1, ESCALATION_STEP × failures))
+
 budget    = min(escalated, MAX_BUDGET)                     # if UNJUDGED
 budget    = min(escalated, earned_ppm × PROFIT_HORIZON, MAX_BUDGET)  # if JUDGED
 
@@ -153,6 +158,51 @@ succeeds on the 9th attempt (≈18h at the 2h cron).
 The same mechanism handles upward market drift after bootstrap — when the
 last-known price stops succeeding, failures re-escalate until a new price is
 discovered, then `last_refill_ppm` and the fee floor track the new market.
+
+## Earn-ceiling accelerator (poisoned-anchor escape)
+
+Plain escalation grows by `STEP × base` per run, so when `base` (the anchor) is
+tiny the budget barely moves. A **single lucky-cheap refill** can pin
+`last_refill_ppm` far below the real clearing price — e.g. one fluke fill at
+7 ppm on a channel that *earns* 576 ppm. From there `7 → 8 → 10 → 11 → 14 …`
+crawls for days, never high enough to route, so the channel sits depleted
+losing revenue with no alarm (it isn't `structural` — it's plainly profitable).
+
+For a **judged** channel the accelerator fixes this by escalating against what
+the channel can *afford* instead of the poisoned anchor. Each failed run closes
+`STEP` of the gap between the anchor and the affordable ceiling
+(`min(earned_ppm × PROFIT_HORIZON, MAX_BUDGET)`):
+
+```
+escalated = max(escalated,
+                anchor + (ceiling − anchor) × min(1, STEP × failures))
+```
+
+So it reaches the ceiling in `1/STEP` (= 5) failed runs — the bfx case jumps
+from 14 to ~721 ppm. Properties (all deliberate, all tested):
+
+- **No new knob** — reuses `REBALANCE_BUDGET_ESCALATION_STEP` as both the
+  per-run rate and the fraction-of-gap-per-failure.
+- **Up-only** — it's a `max()`, so it can only raise the budget. Channels
+  earning at or below their refill cost are untouched.
+- **Judged-only** — `earned_ppm is None` (unjudged) → skipped entirely, so
+  bootstrap price discovery on low-volume channels is unchanged.
+- **Inert unless it matters** — the gap only beats plain escalation once
+  `ceiling > 2 × anchor` (i.e. `earned × horizon > 2 × last_refill`). A channel
+  earning roughly what it last paid sees no change.
+- **Never strands** — it climbs only *up to* the ceiling, so it can never make
+  `escalated` exceed the cap. `profit_capped` is therefore measured against
+  *plain* escalation, not the accelerated value (rounding `gap_climb` up could
+  otherwise land one ppm over a fractional cap and spuriously flag
+  `structural` — exactly the channel the accelerator is rescuing). The
+  accelerator firing and `profit_capped` are mutually exclusive.
+- **Self-limiting** — it only climbs while runs keep failing; the first success
+  resets `failures` and re-anchors `last_refill_ppm`, so it stops at the real
+  clearing price and never overshoots.
+
+The budget dict carries `accelerated: bool` alongside `profit_capped` /
+`structural`, and the reason string reads
+`last_refill 7 ppm accelerated toward earn-ceiling (20% of gap × 5 failed runs) → 721 ppm`.
 
 ## Outbound fee impact
 

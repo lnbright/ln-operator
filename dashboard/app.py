@@ -232,6 +232,7 @@ def get_channel_gate(chan_id, local_ratio=None):
             "budget_reason": b["reason"],
             "profit_capped": b["profit_capped"],
             "structural": b["structural"],
+            "accelerated": b.get("accelerated", False),
             "inbound_fee_ppm": int(sig.get("inbound_fee_ppm") or 0),
             "floor_decaying": bool(hard_floor and level is not None and level < hard_floor),
             # Effective outbound floor: the persisted decayed level if it sits
@@ -1541,6 +1542,7 @@ TEMPLATE = """
               {% if ch.gate %}
                 {% if ch.gate.structural %}<span style="color:var(--red);" title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }} <span style="font-size:9px;">stranded</span></span>
                 {% elif ch.gate.profit_capped %}<span style="color:var(--yellow);" title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }} ⛒</span>
+                {% elif ch.gate.accelerated %}<span style="color:var(--accent);" title="earn-ceiling accelerator: a profitable channel whose last refill ({{ ch.gate.last_refill_ppm }} ppm) sits far below what it earns ({{ ch.gate.earned_ppm }} ppm). Plain escalation would crawl up too slowly to ever route, so each failed run closes 20% of the gap toward the affordable ceiling (earned × horizon), reaching it in ~5 runs. — {{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }} ⤴</span>
                 {% else %}<span title="{{ ch.gate.budget_reason }}">{{ ch.gate.budget_ppm }}</span>{% endif %}
               {% else %}<span style="color:var(--muted);">—</span>{% endif %}
             </td>

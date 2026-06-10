@@ -45,6 +45,17 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
     if it has also failed REBALANCE_STRUCTURAL_FAIL_THRESHOLD times it is
     `structural` (rebalancing is the wrong tool — needs the Layer-3 ladder/capital).
 
+    Earn-ceiling accelerator: for a JUDGED channel whose anchor sits well below
+    what it can profitably afford (a single lucky-cheap refill can poison
+    `last_refill` to a value far under `earned_ppm`), plain escalation crawls up
+    at STEP-of-a-tiny-base per run and never rediscovers the clearing price. So
+    each failed run instead closes STEP of the gap between the anchor and the
+    affordable ceiling (`min(profit_cap, MAX)`), reaching it in 1/STEP (=5) runs.
+    It reuses ESCALATION_STEP (no new knob), only ever RAISES the budget (a max),
+    only fires for judged channels, and climbs only up TO the ceiling — so it
+    never creates a `profit_capped`/`structural` state and leaves unjudged price
+    discovery untouched. It is inert unless `earned_ppm × horizon > 2 × anchor`.
+
     Recovery escape: `structural` describes a depleted channel that can't be
     profitably refilled. If `local_ratio` is supplied and has climbed back to
     REBALANCE_TARGET (≥50%), the channel is no longer depleted, so the structural
@@ -64,19 +75,46 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
         base = last_refill
         anchor = "last_refill"
 
-    escalated = base * (1.0 + REBALANCE_BUDGET_ESCALATION_STEP * failures)
-    escalated = int(round(escalated))
+    plain_escalated = int(round(base * (1.0 + REBALANCE_BUDGET_ESCALATION_STEP * failures)))
+    escalated = plain_escalated
 
     profit_cap = None
     if earned_ppm is not None:
         profit_cap = earned_ppm * REBALANCE_PROFIT_HORIZON
+
+    # Earn-ceiling accelerator: when a JUDGED channel's anchor sits well below
+    # what it can profitably afford — e.g. one lucky-cheap refill poisoned
+    # last_refill to 7 ppm on a channel earning 576 — plain escalation crawls
+    # up at STEP-of-a-tiny-base per run and effectively never rediscovers the
+    # clearing price. Instead let each failed run close STEP of the gap between
+    # the anchor and the affordable ceiling, reaching it in 1/STEP (=5) runs.
+    # Reuses STEP — no new knob. It only ever RAISES escalated (a max), only for
+    # judged channels, and only up TO the ceiling (= the profit cap), so it can
+    # never create a profit_capped/structural state and never touches unjudged
+    # price discovery. Inert when earnings don't justify it: the gap is only
+    # positive once ceiling > 2·base (earned×horizon > 2·last_refill).
+    accelerated = False
+    if profit_cap is not None and failures > 0:
+        ceiling = min(profit_cap, REBALANCE_MAX_BUDGET_PPM)
+        gap_climb = base + (ceiling - base) * min(
+            1.0, REBALANCE_BUDGET_ESCALATION_STEP * failures)
+        escalated = max(escalated, int(round(gap_climb)))
+        accelerated = escalated > plain_escalated
 
     budget = escalated
     if profit_cap is not None:
         budget = min(budget, int(round(profit_cap)))
     budget = min(budget, REBALANCE_MAX_BUDGET_PPM)
 
-    profit_capped = profit_cap is not None and escalated > profit_cap
+    # `profit_capped` asks whether failure-escalation ALONE wants to bid past the
+    # affordable cap — use the plain value, not the accelerated one. The
+    # accelerator deliberately climbs UP TO the ceiling (= the cap), and rounding
+    # `gap_climb` can land it a hair above the unrounded `profit_cap`; counting
+    # that as "capped" would spuriously strand the very profitable channel the
+    # accelerator exists to rescue. plain_escalated > profit_cap and the
+    # accelerator firing are mutually exclusive (the accelerator's max() is a
+    # no-op once plain escalation already exceeds the ceiling).
+    profit_capped = profit_cap is not None and plain_escalated > profit_cap
     structural = profit_capped and failures >= REBALANCE_STRUCTURAL_FAIL_THRESHOLD
     recovered = (structural and local_ratio is not None
                  and local_ratio >= REBALANCE_TARGET)
@@ -90,6 +128,10 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
             reason += f" — STRANDED ({failures} failed runs)"
         elif recovered:
             reason += f" — stranded cleared (local {local_ratio:.0%} ≥ target)"
+    elif accelerated:
+        reason = (f"{anchor} {base} ppm accelerated toward earn-ceiling "
+                  f"({REBALANCE_BUDGET_ESCALATION_STEP:.0%} of gap × {failures} "
+                  f"failed runs) → {budget} ppm")
     elif failures > 0:
         reason = (f"{anchor} {base} ppm × (1 + {REBALANCE_BUDGET_ESCALATION_STEP:.0%}"
                   f" × {failures} failed runs) → {budget} ppm")
@@ -106,6 +148,7 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
         "escalated_ppm": escalated,
         "profit_capped": profit_capped,
         "structural": structural,
+        "accelerated": accelerated,
     }
 
 

@@ -53,8 +53,10 @@ The channel table shows local and remote outbound fees side-by-side, pulled
 per-channel from `/v1/graph/edge/{chan_id}` so you can see at a glance whether a
 peer is undercharging or overcharging relative to you. The flags column surfaces
 only things needing attention — offline, private, refill state
-(`refilling ≤Nppm` / `refill capped` / `<budget> stranded`), an active
-inbound discount, and a decaying outbound floor. A muted dash means nothing is
+(`refilling ≤Nppm` / `refill capped ⛒` / `<budget> stranded` /
+`<budget> ⤴` earn-ceiling accelerated — a profitable channel whose anchor sits
+far below its earnings, climbing the budget toward what it can afford; hover for
+the gap math), an active inbound discount, and a decaying outbound floor. A muted dash means nothing is
 flagged. Sibling channels to the same peer share an alias; duplicates are
 tagged with a short scid suffix (`·12345`) so the rows stay distinguishable.
 
