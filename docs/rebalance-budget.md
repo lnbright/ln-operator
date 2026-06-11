@@ -62,8 +62,10 @@ blind spot, so on a steady sink it tends to persist until you act:
   `failures_since_last_success` → not structural. **Catch:** `plan_rebalances`
   drops structural targets, so the pipeline never *attempts* a refill and never
   produces the success that would clear it. In practice this path needs an
-  **operator-forced rebalance** (`ln-operator rebalance --force …` against that
-  channel) that lands.
+  **operator-forced rebalance** that lands. The precise tool is
+  `ln-operator manual_rebalance <src> <tgt> <amount_sats> <max_ppm>`, which pins
+  exactly that pair and bypasses the gate (`rebalance_channels --force` also
+  bypasses the gate but auto-selects pairs across all channels by ratio).
 - **Earnings climb** until `earned_ppm × PROFIT_HORIZON > escalated_budget` →
   `profit_capped` false → cleared. Realistic only if the channel starts earning
   far more on outbound than it did.

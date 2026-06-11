@@ -7,9 +7,10 @@ split keeps the fast loop cheap and the slow signals stable.
 
 ```
 Every 2h (cron):
-  1. adjust_fees       ← reads channel_signals, decides target,
-                          gated broadcast (hysteresis)
-  2. rebalance_channels
+  1. rebalance_channels ← refills depleted channels; each landed chunk writes
+                          last_refill_ppm BEFORE fees are computed
+  2. adjust_fees        ← reads channel_signals + the refill cost just paid,
+                          decides target, gated broadcast (hysteresis)
   3. sync_routing
   4. healthcheck
 

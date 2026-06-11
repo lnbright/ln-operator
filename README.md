@@ -209,6 +209,13 @@ ln-operator rebalance_channels                   # auto-rebalance using the 20/8
 ln-operator rebalance_channels --dry-run         # show channel status + per-force-level scenarios
 ln-operator rebalance_channels --force           # ignore thresholds, target 50% local on all
 ln-operator rebalance_channels --force 0.4       # ignore thresholds, target 40% local on all
+ln-operator manual_rebalance <src> <tgt> <amount_sats> <max_ppm>  # pin ONE pair, bypass the gate (recorded as manual)
+ln-operator manual_rebalance Boltz bfx-lnd0 1778389 773 --dry-run # preview that exact pair; move nothing
+# manual_rebalance forces the source→target you name (alias or chan_id), skipping
+# both the ratio-based pair selection AND the profit/structural gate — the only way
+# to refill a channel flagged STRANDED. Streams the engine's INFO logs live, auto-
+# chunks down to 100k on failure, and writes a triggered_by='manual' row (blue badge
+# on the dashboard). A success re-anchors last_refill_ppm like any rebalance.
 
 # ── FEE ADJUSTMENT ─────────────────────────────────────────
 ln-operator adjust_fees                          # recompute + broadcast outbound fees (one pipeline step)

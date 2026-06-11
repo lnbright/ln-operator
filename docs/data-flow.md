@@ -23,8 +23,12 @@ LND /v1/payments → sync_rebalances → rebalance_log (SQLite)
       (decays while idle, re-arms on fresh refill — state in channel_signals)
 ```
 
-Offset-based sync — no duplicates. Manual rebalances detected by matching
-circular self-payments. Channel open time used as floor to prevent
-misattribution to new channels with the same peer. Targets resolved from the
-route's last-hop chan_id (sibling-safe); auto rebalances are written against
-the channel the invoice actually settled on, not the planned target.
+Offset-based sync — no duplicates. Manual rebalances are detected two ways and
+both land as `triggered_by='manual'`: (1) circular self-payments made outside
+the tool (e.g. via `lncli`), matched here by `sync_rebalances`; and (2) the
+`manual_rebalance` command, which writes its row directly through the executor
+(deduped by payment_hash, so sync won't re-import it). Channel open time used as
+a floor to prevent misattribution to new channels with the same peer. Targets
+resolved from the route's last-hop chan_id (sibling-safe); auto rebalances are
+written against the channel the invoice actually settled on, not the planned
+target.
