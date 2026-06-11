@@ -16,20 +16,7 @@ Visit **[www.lnbright.com](https://www.lnbright.com)** for more info.
 
 Runs unattended on a cron schedule. Four steps execute in sequence:
 
-**1. Automatic Fee adjustment** — Sets each channel's fee rate based on its local/remote
-balance ratio. Full channels get low fees to attract routing;
-depleted channels get high fees to protect remaining liquidity and to recoup
-refill cost. On top of this, a per-channel **market
-multiplier** — a slow demand signal that nudges the fee up while a channel
-forwards daily and back down when it goes quiet, with an immediate up-only
-bump when a depleted channel starts *dropping* forwarding requests. There is a **refill-cost floor** which is a *soft ratchet* — it decays toward the market-clearing fee while a
-channel sits truly idle (no forwards *and* no dropped forwards — senders
-attempting at the current price count as proof the price is right) so it never
-gets priced out and stranded, and re-arms only on a fresh refill. Base fee is
-always zero. Fee changes are rate-limited by hysteresis (tolerance + cooldown)
-so the node doesn't spam gossip.
-
-**2. Rebalancing** — Moves sats from overfull channels (>80% local) to depleted
+**1. Rebalancing** — Moves sats from overfull channels (>80% local) to depleted
 ones (<20% local) via circular self-payments.
 Each channel's "rebalance fee budget" is its refill history with failure escalation, **capped
 by a profitability gate**: after a period of observation, we never
@@ -39,6 +26,20 @@ the full amount can't route, it halves and retries several times, down to 100k s
 source→target pair has no route, it tries alternatives before giving up. Optional, off by default: a node-level
 **inbound-fee** ladder that pulls organic refill with a negative inbound fee
 instead of paying for a circular rebalance.
+
+**2. Automatic Fee adjustment** — Sets each channel's fee rate based on its local/remote
+balance ratio. Full channels get low fees to attract routing;
+depleted channels get high fees to protect remaining liquidity and to recoup
+refill cost. Runs *after* rebalancing so each refilled channel is priced off the
+cost it actually paid this run, not the previous cycle's anchor. On top of this, a per-channel **market
+multiplier** — a slow demand signal that nudges the fee up while a channel
+forwards daily and back down when it goes quiet, with an immediate up-only
+bump when a depleted channel starts *dropping* forwarding requests. There is a **refill-cost floor** which is a *soft ratchet* — it decays toward the market-clearing fee while a
+channel sits truly idle (no forwards *and* no dropped forwards — senders
+attempting at the current price count as proof the price is right) so it never
+gets priced out and stranded, and re-arms only on a fresh refill. Base fee is
+always zero. Fee changes are rate-limited by hysteresis (tolerance + cooldown)
+so the node doesn't spam gossip.
 
 **3. Manual rebalancing sync** — Pulls new forwarding events from LND into SQLite, to detect manual rebalances done via `lncli` and
 imports them so the dashboard tracks all rebalancing activity.
@@ -195,7 +196,7 @@ Without the symlink, run it from the repo as `./ln-operator <command>`.
 
 ```bash
 # ── AUTOMATED ──────────────────────────────────────────────
-ln-operator pipeline                             # full 2h loop: fees → rebalance → sync → health
+ln-operator pipeline                             # full 2h loop: rebalance → fees → sync → health
 ln-operator pipeline --dry-run                   # preview the loop; broadcast & move nothing
 
 # ── PLANNING ───────────────────────────────────────────────

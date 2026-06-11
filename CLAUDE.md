@@ -55,6 +55,13 @@
   `engine.update_all_fees` checks the table first; pinned channels use the
   stored ppm with reason `manual pin: N ppm` instead of `calculate_fee_ppm`.
   Set via `ln-operator overwrite_fee`, cleared via `ln-operator clear_fee`, shown by `status`.
+- **Pipeline order is rebalance → fees** (`main.cmd_run`): the executor writes
+  each chunk's `rebalance_log` row (and thus `last_refill_ppm`) as it settles, so
+  running rebalance FIRST lets `update_all_fees` floor every refilled channel off
+  the cost it actually paid THIS run, not the previous cycle's anchor. (Was
+  fees-first to bump a depleted channel's defensive price before refilling; the
+  later fee step still bumps a channel that fails to rebalance, since it still
+  reads as depleted.)
 - **`last_refill_ppm` budget + fee floor, now profitability-gated (3 layers)**:
   `last_refill_ppm` (most recent successful rebalance into a channel) still
   anchors BOTH the rebalance budget and the outbound fee floor. Base budget =
