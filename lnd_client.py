@@ -243,7 +243,7 @@ def describe_graph(include_unannounced=False):
 # ─── Payments & Invoices ─────────────────────────────────────────
 
 def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
-                    fee_limit_sat, timeout_seconds=120):
+                    fee_limit_sat, timeout_seconds=120, on_probe=None):
     """Send a circular rebalance payment using the Router RPC.
 
     Forces the payment out through a specific channel (outgoing_chan_id)
@@ -289,10 +289,18 @@ def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
     r.raise_for_status()
 
     last_result = None
-    htlc_seq = {}        # attempt key -> human sequence number (order dispatched)
-    htlc_status = {}     # attempt key -> last status we logged a transition for
+    seen_htlcs = set()   # attempt keys we've already counted as a probe
     start = time.monotonic()
 
+    # on_probe(event) lets an interactive caller render a progress indicator
+    # without this module knowing anything about terminals. event is one of
+    # "start" (stream opened), "tick" (a new route is being tested), "end"
+    # (stream closed). The cron path passes no callback and stays silent.
+    def _probe(event):
+        if on_probe:
+            on_probe(event)
+
+    _probe("start")
     for line in r.iter_lines():
         if not line:
             continue
@@ -303,6 +311,7 @@ def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
             continue
         # Each chunk is wrapped: {"result": {...}} or {"error": {...}}
         if "error" in chunk:
+            _probe("end")
             return {
                 "status": "FAILED",
                 "fee_sat": 0,
@@ -312,39 +321,26 @@ def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
         last_result = result
         status = result.get("status", "")
 
-        # Narrate each HTLC the router dispatches and resolves, so a long route
-        # search is a running commentary instead of a silent 2-minute gap. LND
-        # streams the full htlc list on every update (no_inflight_updates=False);
-        # we log only NEW attempts and status TRANSITIONS, tagged with elapsed
-        # time vs the timeout budget so you can see it racing the expiry.
+        # LND streams the full htlc list on every update
+        # (no_inflight_updates=False). Each NEW attempt key = one route the
+        # router is testing: tick the indicator and keep a DEBUG breadcrumb in
+        # the file (hop count / quoted fee).
         for h in result.get("htlcs", []):
             key = h.get("attempt_id") or h.get("attempt_time_ns") or id(h)
-            hstatus = h.get("status", "")
-            if key not in htlc_seq:
-                htlc_seq[key] = len(htlc_seq) + 1
-            n = htlc_seq[key]
+            if key in seen_htlcs:
+                continue
+            seen_htlcs.add(key)
+            _probe("tick")
             route = h.get("route", {})
             hops = route.get("hops", [])
             fee_sats = int(route.get("total_fees_msat") or 0) // 1000
-            elapsed = int(time.monotonic() - start)
-            if key not in htlc_status:
-                htlc_status[key] = hstatus
-                log.info("    htlc %d: probing route via %d hop(s), quoted fee %d sats  [+%ds/%ds]",
-                         n, len(hops), fee_sats, elapsed, timeout_seconds)
-            elif htlc_status[key] != hstatus:
-                htlc_status[key] = hstatus
-                if hstatus == "FAILED":
-                    fail = h.get("failure", {}) or {}
-                    code = fail.get("code", "?")
-                    src = fail.get("failure_source_index")
-                    where = f" at hop {src}/{len(hops)}" if src is not None else ""
-                    log.info("    htlc %d: failed — %s%s  [+%ds/%ds]",
-                             n, code, where, elapsed, timeout_seconds)
-                elif hstatus == "SUCCEEDED":
-                    log.info("    htlc %d: settled ✓  [+%ds]", n, elapsed)
+            log.debug("  htlc probe %d: %d hop(s), quoted fee %d sats [+%ds/%ds]",
+                      len(seen_htlcs), len(hops), fee_sats,
+                      int(time.monotonic() - start), timeout_seconds)
 
         if status in ("SUCCEEDED", "FAILED", "FAILED_NO_ROUTE"):
             break
+    _probe("end")
 
     if last_result is None:
         return {"status": "FAILED", "fee_sat": 0, "failure_reason": "no response from router"}

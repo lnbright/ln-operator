@@ -16,10 +16,9 @@ console to `INFO` for the duration of the run (via
 `logging_config.set_console_level`) so the operator sees the run narrated live
 in the terminal. The file handler is unaffected.
 
-The `/v2/router/send` stream is narrated per-HTLC: as LND dispatches and
-resolves each route attempt it logs `htlc N: probing route via H hop(s), quoted
-fee F sats [+Es/Ts]` and, on resolution, the failure code and which hop failed
-(or `settled ✓`). The `[+Es/Ts]` tag is elapsed-vs-timeout seconds, so a long
-route search shows progress against the expiry instead of a silent gap. These
-lines log on every rebalance (so the file always has them); only the manual
-command surfaces them on the console.
+While the `/v2/router/send` stream tests routes, `manual_rebalance` prints a
+lightweight `testing paths ....` line — one dot per route the router probes —
+so a long search shows progress instead of a silent gap. The noisy per-HTLC
+detail (hop count, quoted fee, elapsed-vs-timeout) is kept at DEBUG in the file
+only. Driven by an `on_probe(event)` callback (`start`/`tick`/`end`); the cron
+path passes none and stays silent.

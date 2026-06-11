@@ -685,12 +685,23 @@ def cmd_manual_rebalance(args):
     # default console handler is WARNING-only. (file always has full DEBUG.)
     import logging
     set_console_level(logging.INFO)
-    print("  ── live log ──")
+
+    # Lightweight per-route progress: print "testing paths " then a dot for each
+    # route the router tests, closing the line when the attempt ends. Keeps the
+    # noisy per-HTLC detail in the DEBUG file, not the terminal.
+    def on_probe(event):
+        if event == "start":
+            sys.stdout.write("  testing paths ")
+        elif event == "tick":
+            sys.stdout.write(".")
+        elif event == "end":
+            sys.stdout.write("\n")
+        sys.stdout.flush()
 
     log.info("manual_rebalance: %s→%s %s sats (cap %d ppm)",
              source["peer_alias"], target["peer_alias"],
              f"{args.amount_sats:,}", args.max_ppm)
-    result = engine.execute_rebalance(plan, dry_run=False)
+    result = engine.execute_rebalance(plan, dry_run=False, on_probe=on_probe)
     if result["success"]:
         print(f"\n  ✓ moved {result['amount']:,} sats — fee {result['fee_paid']:,} sat "
               f"({result['fee_ppm']:.0f} ppm)")

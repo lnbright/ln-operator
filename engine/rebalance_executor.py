@@ -20,10 +20,12 @@ from logging_config import get_logger
 log = get_logger('engine.rebalance_executor')
 
 
-def _attempt_single_rebalance(plan, amount, max_fee_sats):
+def _attempt_single_rebalance(plan, amount, max_fee_sats, on_probe=None):
     """Attempt one circular rebalance payment at a specific amount.
 
-    Returns dict with: success, fee_paid, fee_ppm, failure_reason
+    on_probe(event) is forwarded to send_payment_v2 so an interactive caller can
+    render a progress indicator as routes are tested. Returns dict with:
+    success, fee_paid, fee_ppm, failure_reason
     """
     try:
         # Create invoice
@@ -37,8 +39,8 @@ def _attempt_single_rebalance(plan, amount, max_fee_sats):
             return {"success": False, "fee_paid": 0, "fee_ppm": 0,
                     "failure_reason": "failed to create invoice"}
 
-        log.info("  attempt %s sats (fee limit %d sats) via /v2/router/send",
-                 f"{amount:,}", max_fee_sats)
+        log.debug("  attempt %s sats (fee limit %d sats) via /v2/router/send",
+                  f"{amount:,}", max_fee_sats)
 
         pay_result = lnd_client.send_payment_v2(
             payment_request=payment_request,
@@ -46,6 +48,7 @@ def _attempt_single_rebalance(plan, amount, max_fee_sats):
             last_hop_pubkey=plan["target_peer_pubkey"],
             fee_limit_sat=max_fee_sats,
             timeout_seconds=120,
+            on_probe=on_probe,
         )
 
         if pay_result["status"] == "SUCCEEDED":
@@ -64,7 +67,7 @@ def _attempt_single_rebalance(plan, amount, max_fee_sats):
                 "failure_reason": str(e), "payment_hash": ""}
 
 
-def execute_rebalance(plan, dry_run=False, on_progress=None):
+def execute_rebalance(plan, dry_run=False, on_progress=None, on_probe=None):
     """Execute a circular rebalance using Router SendPaymentV2.
 
     If the full amount fails (e.g. no route with enough liquidity), automatically
@@ -78,8 +81,10 @@ def execute_rebalance(plan, dry_run=False, on_progress=None):
 
     on_progress, if given, is called with short status strings at each chunk
     boundary so an interactive caller can show live progress during the
-    (potentially minute-long) SendPaymentV2 attempts. It is purely cosmetic —
-    the pipeline/cron path leaves it None.
+    (potentially minute-long) SendPaymentV2 attempts. on_probe(event) is
+    forwarded to the payment stream to drive a per-route progress indicator
+    ("start"/"tick"/"end"). Both are cosmetic — the pipeline/cron path leaves
+    them None.
     """
     def _emit(msg):
         if on_progress:
@@ -134,7 +139,8 @@ def execute_rebalance(plan, dry_run=False, on_progress=None):
               f"(≤{chunk_fee_limit:,} sat fee, up to 120s)…")
 
         chunk_start = time.time()
-        attempt = _attempt_single_rebalance(plan, chunk_amount, chunk_fee_limit)
+        attempt = _attempt_single_rebalance(plan, chunk_amount, chunk_fee_limit,
+                                            on_probe=on_probe)
         chunk_duration = time.time() - chunk_start
 
         if attempt["success"]:
