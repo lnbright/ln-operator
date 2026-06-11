@@ -26,7 +26,7 @@ from datetime import datetime
 import db
 import engine
 from config import REBALANCE_LOW_THRESHOLD, REBALANCE_HIGH_THRESHOLD, REBALANCE_MAX_AMOUNT_RATIO
-from logging_config import setup_logging, get_logger
+from logging_config import setup_logging, get_logger, set_console_level
 import advisor
 import telegram_bot
 import lnd_client
@@ -680,11 +680,17 @@ def cmd_manual_rebalance(args):
         engine.execute_rebalance(plan, dry_run=True)
         return
 
+    # Stream the engine's INFO logs live so the operator sees each chunk
+    # attempt, the landing channel, and the final summary as it happens — the
+    # default console handler is WARNING-only. (file always has full DEBUG.)
+    import logging
+    set_console_level(logging.INFO)
+    print("  ── live log ──")
+
     log.info("manual_rebalance: %s→%s %s sats (cap %d ppm)",
              source["peer_alias"], target["peer_alias"],
              f"{args.amount_sats:,}", args.max_ppm)
-    result = engine.execute_rebalance(plan, dry_run=False,
-                                      on_progress=lambda m: print(f"  {m}"))
+    result = engine.execute_rebalance(plan, dry_run=False)
     if result["success"]:
         print(f"\n  ✓ moved {result['amount']:,} sats — fee {result['fee_paid']:,} sat "
               f"({result['fee_ppm']:.0f} ppm)")

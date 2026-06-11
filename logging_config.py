@@ -56,6 +56,20 @@ def setup_logging(name="ln_operator", log_dir=None):
     return logger
 
 
+def set_console_level(level, name="ln_operator"):
+    """Raise/lower the terminal handler's level at runtime (file stays DEBUG).
+
+    The default console handler is WARNING-only so the 2h cron path stays quiet.
+    Interactive, foreground commands (e.g. manual_rebalance) call this with
+    logging.INFO so the operator sees the engine's step-by-step logs live —
+    route attempts, per-chunk outcomes, landing channel, final summary."""
+    logger = logging.getLogger(name)
+    for h in logger.handlers:
+        # the console handler is the StreamHandler that is NOT a FileHandler
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            h.setLevel(level)
+
+
 def get_logger(module_name):
     """Get a child logger for a specific module."""
     return logging.getLogger(f"ln_operator.{module_name}")
