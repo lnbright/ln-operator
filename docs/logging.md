@@ -13,6 +13,13 @@ file above.
 
 The interactive `manual_rebalance` command is the exception: it bumps the
 console to `INFO` for the duration of the run (via
-`logging_config.set_console_level`) so the operator sees each chunk attempt, the
-landing channel, and the final summary stream live in the terminal. The file
-handler is unaffected.
+`logging_config.set_console_level`) so the operator sees the run narrated live
+in the terminal. The file handler is unaffected.
+
+The `/v2/router/send` stream is narrated per-HTLC: as LND dispatches and
+resolves each route attempt it logs `htlc N: probing route via H hop(s), quoted
+fee F sats [+Es/Ts]` and, on resolution, the failure code and which hop failed
+(or `settled ✓`). The `[+Es/Ts]` tag is elapsed-vs-timeout seconds, so a long
+route search shows progress against the expiry instead of a silent gap. These
+lines log on every rebalance (so the file always has them); only the manual
+command surfaces them on the console.
