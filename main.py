@@ -679,7 +679,7 @@ def cmd_healthcheck(args):
 
 
 def cmd_run(args):
-    """Full pipeline: adjust_fees → rebalance_channels → sync_routing → healthcheck."""
+    """Full pipeline: rebalance_channels → adjust_fees → sync_routing → healthcheck."""
     log_main = get_logger("main")
     started = time.time()
     dry = " [DRY RUN]" if args.dry_run else ""
@@ -687,18 +687,10 @@ def cmd_run(args):
     print(f"\n⚡ LN Operator — Pipeline Run ({datetime.now().strftime('%Y-%m-%d %H:%M')}){dry}")
     print("=" * 55)
 
-    # Step 1: Adjust fees FIRST — protects reputation on depleted channels
-    print("\n── Step 1: Adjust Fees ──")
-    fee_updates = engine.update_all_fees(dry_run=args.dry_run)
-    if fee_updates:
-        for u in fee_updates:
-            d = "↑" if u["new_ppm"] > u["old_ppm"] else "↓"
-            print(f"  {d} {u['alias']}: {u['old_ppm']}→{u['new_ppm']} ppm (local {u['local_ratio']:.0%})")
-    else:
-        print("  No fee changes needed.")
-
-    # Step 2: Rebalance channels
-    print("\n── Step 2: Rebalance Channels ──")
+    # Step 1: Rebalance FIRST — each successful chunk writes its rebalance_log row
+    # (and thus last_refill_ppm) before fees are computed, so Step 2 prices every
+    # refilled channel off the cost it ACTUALLY paid this run, not last run's anchor.
+    print("\n── Step 1: Rebalance Channels ──")
     plans, reason = engine.plan_rebalances()
     rebalance_results = []
     if not plans:
@@ -719,6 +711,16 @@ def cmd_run(args):
         # their target still needs sats (no over-rebalancing). Same path as the
         # interactive rebalance_channels command.
         rebalance_results = execute_rebalance_plans(plans, log_main)
+
+    # Step 2: Adjust fees — floors each channel at the fee just paid to refill it
+    print("\n── Step 2: Adjust Fees ──")
+    fee_updates = engine.update_all_fees(dry_run=args.dry_run)
+    if fee_updates:
+        for u in fee_updates:
+            d = "↑" if u["new_ppm"] > u["old_ppm"] else "↓"
+            print(f"  {d} {u['alias']}: {u['old_ppm']}→{u['new_ppm']} ppm (local {u['local_ratio']:.0%})")
+    else:
+        print("  No fee changes needed.")
 
     # Step 3: Sync routing history from LND
     print("\n── Step 3: Sync Routing ──")
