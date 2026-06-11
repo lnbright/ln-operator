@@ -31,6 +31,15 @@
 - Plan command is pure local graph — no Claude API agent layer (removed)
 - Rebalance auto-chunks on failure (halves down to 100k min). Each successful
   chunk is its own success row in rebalance_log at its actual ppm.
+- **`ln-operator manual_rebalance <src> <tgt> <amount_sats> <max_ppm>`** pins ONE
+  operator-chosen source→target pair (alias substring or scid), bypassing both the
+  auto planner's ratio-based pair selection AND the profit/structural ladder gate —
+  the only way to refill a channel the gate has flagged STRANDED. Builds a plan with
+  `triggered_by='manual'` (threaded through `execute_rebalance` →
+  `save_rebalance_attempt`, default still `'auto'`) so the row is tagged manual like
+  sync-detected ones; `run_id=None` (own episode). A success still re-anchors
+  `last_refill_ppm` and clears the failure count like any rebalance. Same chunking +
+  sibling landing-channel attribution as the auto path. `cmd_manual_rebalance` in main.py.
 - Rebalance executor (`main.execute_rebalance_plans`) carries two ledgers:
   `target_deficits` (sats each depleted target still needs) and `source_remaining`
   (sats each overfull source can still send). Every plan is capped at

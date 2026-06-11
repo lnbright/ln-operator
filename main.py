@@ -7,6 +7,7 @@ Usage:
     ln-operator pipeline [--dry-run]            — run full pipeline (for crontab)
     ln-operator adjust_fees [--dry-run]         — adjust channel fee rates
     ln-operator rebalance_channels [--dry-run]  — rebalance depleted/overfull channels
+    ln-operator manual_rebalance <src> <tgt> <amount_sats> <max_ppm> [--dry-run] — pin one pair (recorded as manual)
     ln-operator sync_routing                    — sync routing events from LND
     ln-operator healthcheck                     — check channel health + fire alerts
     ln-operator backup [--trigger ...]          — push channel.backup off-site (called by systemd)
@@ -629,6 +630,69 @@ def cmd_rebalance_channels(args):
     return results
 
 
+def cmd_manual_rebalance(args):
+    """Operator-driven one-off rebalance of a SPECIFIC source→target pair.
+
+    Unlike `rebalance_channels` (which auto-selects pairs by balance ratio and
+    is gated by the profit/structural ladder), this pins exactly the pair you
+    name, bypasses the gate, and records the row as triggered_by='manual' so the
+    dashboard tags it like any other manual rebalance. The executor still
+    auto-chunks on failure (halving down to 100k) and resolves the real landing
+    channel for sibling-safe attribution.
+    """
+    log = get_logger("main")
+    print("\n⚡ LN Operator — Manual Rebalance")
+    print("=" * 40)
+
+    if args.amount_sats < 50_000:
+        print(f"  ✗ amount must be >= 50,000 sats (got {args.amount_sats:,})")
+        sys.exit(1)
+    if args.max_ppm < 0:
+        print(f"  ✗ max-ppm must be >= 0 (got {args.max_ppm})")
+        sys.exit(1)
+
+    source = _resolve_channel(args.source)
+    target = _resolve_channel(args.target)
+    if source["chan_id"] == target["chan_id"]:
+        print("  ✗ source and target are the same channel")
+        sys.exit(1)
+
+    plan = {
+        "source_chan_id": source["chan_id"],
+        "source_alias": source["peer_alias"],
+        "target_chan_id": target["chan_id"],
+        "target_alias": target["peer_alias"],
+        "target_peer_pubkey": target["peer_pubkey"],
+        "amount_sats": args.amount_sats,
+        "max_fee_ppm": args.max_ppm,
+        "max_fee_sats": int(args.amount_sats * args.max_ppm / 1_000_000 * 1.1),
+        "triggered_by": "manual",
+        # run_id stays None — a manual one-off is its own episode, not part of a
+        # pipeline cycle's primary+fallback fan-out.
+    }
+
+    print(f"  {source['peer_alias']} ({source['local_ratio']:.0%}) → "
+          f"{target['peer_alias']} ({target['local_ratio']:.0%})")
+    print(f"  amount: {args.amount_sats:,} sats   cap: {args.max_ppm} ppm "
+          f"(≤{plan['max_fee_sats']:,} sat)")
+    if args.dry_run:
+        print("  [DRY RUN] no payment executed.")
+        engine.execute_rebalance(plan, dry_run=True)
+        return
+
+    log.info("manual_rebalance: %s→%s %s sats (cap %d ppm)",
+             source["peer_alias"], target["peer_alias"],
+             f"{args.amount_sats:,}", args.max_ppm)
+    result = engine.execute_rebalance(plan, dry_run=False,
+                                      on_progress=lambda m: print(f"  {m}"))
+    if result["success"]:
+        print(f"\n  ✓ moved {result['amount']:,} sats — fee {result['fee_paid']:,} sat "
+              f"({result['fee_ppm']:.0f} ppm)")
+    else:
+        print(f"\n  ✗ failed: {result['failure_reason']}")
+        sys.exit(1)
+
+
 def cmd_sync_routing(args):
     """Sync forwarding events and manual rebalances from LND into the local database."""
     log = get_logger("main")
@@ -1052,6 +1116,19 @@ def main():
         metavar="RATIO",
         help="Ignore thresholds — target RATIO on all channels (default: 0.5 if flag set without value)")
 
+    p_manual = subparsers.add_parser("manual_rebalance",
+        help="[feature]   Rebalance a SPECIFIC source→target pair (recorded as manual)")
+    p_manual.add_argument("source", metavar="SOURCE",
+        help="Source channel (overfull): chan_id or unique peer alias substring")
+    p_manual.add_argument("target", metavar="TARGET",
+        help="Target channel (depleted): chan_id or unique peer alias substring")
+    p_manual.add_argument("amount_sats", type=int, metavar="AMOUNT_SATS",
+        help="Sats to move (>= 50,000; auto-chunks down to 100k on failure)")
+    p_manual.add_argument("max_ppm", type=int, metavar="MAX_PPM",
+        help="Max routing fee in ppm of the amount (the fee cap)")
+    p_manual.add_argument("--dry-run", action="store_true",
+        help="Show the plan without executing the payment")
+
     p_sync = subparsers.add_parser("sync_routing",
         help="[debug]     Sync routing events from LND into the local database")
 
@@ -1109,6 +1186,8 @@ def main():
         cmd_adjust_fees(args)
     elif args.command == "rebalance_channels":
         cmd_rebalance_channels(args)
+    elif args.command == "manual_rebalance":
+        cmd_manual_rebalance(args)
     elif args.command == "sync_routing":
         cmd_sync_routing(args)
     elif args.command == "healthcheck":
