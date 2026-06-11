@@ -1126,7 +1126,8 @@ def main():
         help="Show what would change without applying")
 
     p_rebal = subparsers.add_parser("rebalance_channels",
-        help="[debug]     Move sats from overfull to depleted channels")
+        help="[debug]     Move sats from overfull to depleted channels "
+             "(auto-chunks: halves down to 100k on route failure)")
     p_rebal.add_argument("--dry-run", action="store_true",
         help="Show plan without executing payments")
     p_rebal.add_argument("--force", type=float, nargs="?", const=0.5, default=None,
