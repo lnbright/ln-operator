@@ -1,9 +1,9 @@
 """
-LN Operator — Network graph cache (B1).
+LN Operator — Network graph cache.
 
 `describe_graph()` is a multi-MB pull (up to ~300s on the Pi), so we pull it once
 (from a cron — `ln-operator refresh_graph`) and cache a compact, processed digest
-to disk. The daily-check agent and the B2 peer-finder read the digest with `load()`
+to disk. The daily-check agent and the peer-finder read the digest with `load()`
 instead of re-pulling LND — for structural / counterfactual reasoning only:
 reachability, who-connects-to-whom, candidate metrics, "if I opened to Y, what
 does Y reach".
@@ -11,7 +11,7 @@ does Y reach".
 LIQUIDITY-BLIND by design. This is announced topology + fee policy, NEVER used for
 costed pathfinding or "will it route" decisions — that is QueryRoutes' job, which
 sees real (mission-control) liquidity the gossip graph cannot. See CLAUDE.md
-(B1/B2 design notes).
+(graph-cache / peer-finder design notes).
 
 The digest:
     {
@@ -46,7 +46,7 @@ def build_digest(graph, our_pubkey, our_peers, now=None):
 
     No LND calls — testable in isolation. Every node with at least one public
     channel gets {alias, channels, capacity, avg_fee_ppm, neighbors}; channel-less
-    nodes (stale gossip / phantoms) are dropped. `neighbors` is the adjacency B2
+    nodes (stale gossip / phantoms) are dropped. `neighbors` is the adjacency the peer-finder
     walks for reachability. Pubkeys, not interned indices — simple over compact;
     it's a once-a-day file.
     """

@@ -212,41 +212,61 @@ The escalation ladder and the earn-ceiling accelerator both *discover* the clear
 price by **failing** over several runs. A **QueryRoutes dry-run** reads it directly
 — it's the same pathfinder `SendPaymentV2` uses (mission-control liquidity included),
 run with no payment. So the planner can act on the real route price now instead of
-groping toward it over days. (`lnd_client.query_routes`; runs only in the planner —
-`get_channel_rebalance_budget` stays call-free, since fees/monitor invoke it per
-channel every run.) Knobs: `REBALANCE_QUERYROUTES_ENABLED`,
+groping toward it over days. (`_queryroutes_probe` → `lnd_client.query_routes`; runs
+only in the planner — `get_channel_rebalance_budget` stays call-free, since
+fees/monitor invoke it per channel every run.) Knobs: `REBALANCE_QUERYROUTES_ENABLED`,
 `REBALANCE_QUERYROUTES_EARLYOUT_ENABLED`, `REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`.
 
 Each depleted target's budget dict gains `affordable_ceiling_ppm` =
 `min(profit_cap, MAX)` for a judged channel, else `MAX` — the most it could ever
-justify paying. The two halves:
+justify paying.
 
-**v1 — acceleration (`_accelerate_budget_with_queryroutes`).** Probe the primary
-pair (most-overfull source → target, pinned via `outgoing_chan_id`, at the size we'd
-attempt) capped at the affordable ceiling. If a route exists between the current
-escalated bid and the ceiling, **jump this run's bid straight to that live cost** —
-an affordable refill lands now instead of after ~5 escalations. It only ever *raises*
-the bid and only up to the ceiling the profit gate already permits (never overpays),
-never skips an attempt, and never moves `last_refill`. Any probe error or no-route
-leaves the budget untouched, so a flaky probe can't change spend. It's the informed
-primary; the blind earn-ceiling accelerator above is now its **fallback** for when
-the probe is off/unavailable or for chunked refills v1 doesn't probe.
+### One probe per source, doing two jobs
 
-**v2 — infeasibility early-out (`_queryroutes_early_out`).** In the planner's
-gate-drop, a *judged* depleted target the ladder says to rebalance is probed at the
-**minimum chunk** (`REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`, smallest amount = strictly
-easiest to route) capped at the ceiling. If no route exists, refilling is a capital
-problem, not price discovery: the channel is dropped from planning (skip the wasted
-attempt) **and** — only on a real run, never a dry-run preview — a synthetic failed
-cycle is recorded (`rebalance_log` row, `failure_reason='QR_NO_AFFORDABLE_ROUTE'`,
-fee 0, its own `run_id`). That row advances `count_failures_since_last_success` like
-a real failed cycle, so the structural ladder still reaches its threshold and
-surfaces the capital decision — *the early-out replaces the wasted attempts, not the
-stranding they would eventually trigger.* Safety rails: judged-only (unjudged keep
-full price discovery via real attempts); a probe that's **unavailable** (LND down)
-raises and we do *not* early-out, so a transport blip can never strand a channel;
-`force` bypasses it. (These rows show as a muted `skipped` badge on the dashboard,
-not a failed attempt.)
+For each *judged* depleted target the planner runs **one min-chunk probe per overfull
+source**, capped at the ceiling, and that single set of probes drives both halves
+(sources are ranked cheapest-first on the way out so the executor pays the cheapest):
+
+- **Pricing.** Price the bid off the **cheapest feasible source** — raise this run's
+  `max_fee_ppm` up to its live cost (bounded by the ceiling). An affordable refill
+  lands now *and* via the cheapest source, instead of the ~5-run grind (bfx 14→721) or
+  paying whichever source happens to be most overfull. The bid only ever *raises*
+  (a `max`) and never above the ceiling → never overpays, never moves `last_refill`.
+- **Early-out.** If **every** source returns a definite no-route, refilling is a
+  capital problem, not price discovery: the channel is dropped from planning (skip the
+  wasted attempt) **and** — only on a real run, never a dry-run — a synthetic failed
+  cycle is recorded (`failure_reason='QR_NO_AFFORDABLE_ROUTE'`, fee 0, its own
+  `run_id`). That advances `count_failures_since_last_success` to the structural
+  threshold — *the early-out replaces the wasted attempts, not the stranding they'd
+  eventually trigger.* Gated by `REBALANCE_QUERYROUTES_EARLYOUT_ENABLED`; off → the
+  probe still prices/ranks but never strands. (These rows show a muted `skipped` badge
+  on the dashboard, not a failed attempt.)
+
+### Why it works this way (the design reasoning)
+
+- **Probe every source, not just the most-overfull.** *Feasibility is existential* —
+  one working source proves a channel is refillable, and a cheaper source might exist.
+  *Infeasibility is universal* — only **all** sources failing justifies a drop. Since
+  the drop is consequential (it advances stranding), a single source's no-route must
+  never strand a channel, nor price the bid. The old single-source version could both
+  falsely strand a channel another source would refill, and overpay by pricing off the
+  overfull source when a cheaper one existed. Probing every source fixes both.
+- **Min chunk for pricing too** (so there's no separate full-amount probe). ppm is
+  amount-dependent: each hop charges `base_fee + amount × rate`, and the fixed base
+  fee amortises over fewer sats, so a 100k chunk reads a *higher* effective ppm than
+  the whole amount. That makes the 100k price the **worst case** — a safe upper bound
+  for the cap (larger/whole-amount routes settle comfortably under it), and one probe
+  also covers refills that can only go through in chunks. The budget is a *cap*, not
+  the price paid: the executor's pathfinder still finds and pays the cheapest route
+  under it, and `last_refill` anchors to the actual paid ppm, so the conservative cap
+  never inflates anything.
+- **Safety rails.** Judged-only (unjudged keep full price discovery via real
+  attempts); a probe that's **unavailable** (LND down) is *unknown*, never no-route,
+  so a transport blip can't strand; `force` bypasses the probe entirely.
+
+The probe returns `{drop, budget, source_order}`; the planner threads `source_order`
+into both the primary and fallback plan loops so the cheapest feasible source is
+tried first.
 
 ## Outbound fee impact
 

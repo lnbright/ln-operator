@@ -150,28 +150,33 @@ REBALANCE_PROFIT_HORIZON           = 1.25       # judged budget cap = earned_ppm
                                                 # our older, lower outbound fees.
 REBALANCE_STRUCTURAL_FAIL_THRESHOLD= 5          # consecutive fails while profit-capped → flag structural
 
-# B8 — QueryRoutes-informed budget acceleration. When True, the planner runs a
-# QueryRoutes dry-run (no payment) for each depleted target's primary pair and,
-# if a route exists between the current escalated bid and the affordable ceiling,
-# raises THIS run's bid straight to that live route cost — so an affordable refill
-# lands now instead of grinding up the ×ESCALATION_STEP ladder over several runs.
-# It only ever RAISES the bid and only up TO the ceiling the profit gate already
-# permits (never overpays), never skips an attempt, and never touches the failure
-# counter or last_refill anchor. Set False to disable (one-line kill switch).
+# QueryRoutes intelligence. When True, the planner runs ONE QueryRoutes
+# dry-run (no payment) per overfull SOURCE for each JUDGED depleted target, at the
+# minimum chunk (smallest amount = strictly easiest to route) capped at the
+# affordable ceiling. That single set of probes drives BOTH halves:
+#   - pricing: price the bid off the CHEAPEST feasible source (raise the budget up
+#     to its live cost, bounded by the ceiling) and rank sources cheapest-first, so
+#     an affordable refill lands now (and via the cheapest source) instead of
+#     grinding up the ×ESCALATION_STEP ladder.
+#   - early-out: if NO source has a route (see EARLYOUT flag below).
+# Probing EVERY source — not just the most-overfull — is deliberate: feasibility is
+# existential (one working source proves it) but a cheaper source might exist; the
+# bid only ever RAISES and only up TO the ceiling (never overpays). Set False to
+# disable the probe entirely (one-line kill switch).
 REBALANCE_QUERYROUTES_ENABLED      = True
 
-# B8 v2 — QueryRoutes infeasibility early-out. When True, the planner probes a
-# JUDGED depleted target at the minimum chunk (smallest amount = strictly easiest
-# to route) capped at its affordable ceiling; if NO route exists, refilling is a
-# capital problem, not price discovery, so it skips the wasted attempt AND records
-# a synthetic failed cycle (failure_reason QR_NO_AFFORDABLE_ROUTE) so the failure
-# count still climbs to the structural threshold and surfaces the capital decision.
-# Safety: judged-only (unjudged keep discovering via real attempts); a probe that
-# is UNAVAILABLE (LND down) raises and never strands — only a definite no-route
-# does; never records on a dry-run preview. Set False to disable independently of
-# the v1 acceleration above.
+# Infeasibility early-out (the drop/strand half of the probe above). When
+# True, if EVERY source returns a definite no-route within the ceiling, refilling
+# is a capital problem, not price discovery: the planner drops the channel AND
+# records a synthetic failed cycle (failure_reason QR_NO_AFFORDABLE_ROUTE) so the
+# failure count still climbs to the structural threshold and surfaces the capital
+# decision. Infeasibility is UNIVERSAL — only ALL sources failing justifies the
+# drop, never a single source's no-route. Safety: judged-only; a probe that is
+# UNAVAILABLE (LND down) is UNKNOWN, never no-route, so a transport blip can't
+# strand; never records on a dry-run. Set False to keep the pricing/ranking benefit
+# of the probe while never stranding (a no-route channel just attempts normally).
 REBALANCE_QUERYROUTES_EARLYOUT_ENABLED = True
-REBALANCE_QUERYROUTES_MIN_CHUNK_SATS   = 100_000  # feasibility-probe size (chunk floor)
+REBALANCE_QUERYROUTES_MIN_CHUNK_SATS   = 100_000  # per-source probe size (chunk floor)
 
 # What counts as "balanced" for status reporting (no longer gates budget tiers)
 REBALANCE_BALANCED_RATIO = 0.30      # local must be above 30%...

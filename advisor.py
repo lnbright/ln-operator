@@ -83,7 +83,7 @@ def _gather_node_state():
 
 
 def _candidates_from_digest(digest, state):
-    """Build the candidate list from the B1 graph-cache digest (no live pull).
+    """Build the candidate list from the cached graph digest (no live pull).
 
     Mirrors the live path's tiering/ranking but reads precomputed node metrics.
     Recomputes the 2-hop reachable set from OUR CURRENT peers (via the digest
@@ -190,7 +190,7 @@ def _fetch_candidates_from_graph(state):
     # don't KeyError if the graph isn't available.
     state.setdefault("reachable_2hop", set())
 
-    # Prefer the B1 cache (built daily by `refresh_graph`) over a fresh multi-MB
+    # Prefer the graph cache (built daily by `refresh_graph`) over a fresh multi-MB
     # describe_graph() pull. The digest carries node metrics + adjacency, so both
     # candidate generation here AND the diversity enrichment can read it — no live
     # graph pull, no per-candidate get_node_info round-trips. Live pull stays as a
@@ -199,7 +199,7 @@ def _fetch_candidates_from_graph(state):
     state["graph_digest"] = digest
     if digest:
         age_h = (graph_cache.age_seconds() or 0) // 3600
-        log.info("using B1 graph cache (%dh old) — no live describe_graph pull", age_h)
+        log.info("using cached graph (%dh old) — no live describe_graph pull", age_h)
         return _candidates_from_digest(digest, state)
 
     log.info("no graph cache — falling back to a live describe_graph() pull "
@@ -373,7 +373,7 @@ def _enrich_candidates_with_graph_data(candidates, state):
 
     Sets c["graph_data"] and c["diversity_score_computed"] in place.
     One get_node_info call per candidate — slow, so callers should prefilter
-    (see _rerank_tiers_by_diversity). When the B1 graph cache is available it is
+    (see _rerank_tiers_by_diversity). When the graph cache is available it is
     served from the digest's adjacency instead — no live round-trips at all.
     """
     digest = state.get("graph_digest")

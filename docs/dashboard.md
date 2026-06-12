@@ -9,7 +9,7 @@ updates, the forwarding-failure lost-revenue watch, alerts, payments, and
 invoices.
 
 In the rebalance history, a row with `failure_reason='QR_NO_AFFORDABLE_ROUTE'` is a
-B8 early-out (a QueryRoutes dry-run found no route within the affordable ceiling, so
+QueryRoutes early-out (a dry-run found no route within the affordable ceiling, so
 no payment was attempted) — it shows a muted **`skipped`** badge with an explanatory
 tooltip, distinct from a red ✗ failed attempt, so it isn't counted as a tried-and-
 failed rebalance.

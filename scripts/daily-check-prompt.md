@@ -34,7 +34,7 @@ do and a human won't:
 - **Grounded capital decisions** (§4) — for a channel rebalancing can't fix, a
   reasoned recommendation *with the numbers*, not a restatement of its state.
 
-**Don't repeat yourself across days — use the dedup store (B6), not your judgement.**
+**Don't repeat yourself across days — use the dedup store, not your judgement.**
 A deterministic finding store decides what's new vs a repeat, so you never re-derive
 that from the log. As the LAST step before composing the summary, build the list of
 findings you'd report this run — each a dict `{"key","kind","entity","state","summary"}`
@@ -91,7 +91,7 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
   that should feed Diagnose and Suggestions, not just sit in a flows total.
 - **rebalance_log** — successes/failures, fees paid, per-channel breakdown,
   cost ppm distribution. Note any channel with repeated failures. NOTE rows with
-  `failure_reason='QR_NO_AFFORDABLE_ROUTE'` are NOT real attempts — they're B8 v2
+  `failure_reason='QR_NO_AFFORDABLE_ROUTE'` are NOT real attempts — they're QueryRoutes
   early-outs (a QueryRoutes dry-run found no route ≤ the affordable ceiling, so the
   attempt was skipped and a synthetic failed cycle recorded to advance stranding).
   fee_paid is 0. Count them toward the structural/capital story, not as wasted
@@ -208,7 +208,7 @@ Also run:
 These are the silent-failure modes — pipelines that look fine but are
 quietly producing wrong numbers. Always check, every day.
 
-**Run the deterministic checks first — don't redo their arithmetic by hand (B3).**
+**Run the deterministic checks first — don't redo their arithmetic by hand.**
 The DB-only reconciliations are now Python (an LLM doing arithmetic over SQLite gets
 it subtly, invisibly wrong). Call:
 
@@ -429,7 +429,7 @@ Based on the day's data, think about whether to suggest:
     - **Dead-weight** — ~0 in AND ~0 out over 30d; the peer neither sources nor
       sinks meaningful flow. Capital is just parked.
 
-  **Naming the peer (B2).** Whenever the action is "open a channel" (source-starved,
+  **Naming the peer.** Whenever the action is "open a channel" (source-starved,
   or a sink you judge worth feeding), DON'T hand-wave "add a 2nd source" — name
   candidates. Call the targeted peer-finder with the sink's PEER pubkey:
 

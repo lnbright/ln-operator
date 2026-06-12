@@ -165,7 +165,7 @@ def cmd_plan(args):
         print(f"     Existing portfolio: {portfolio['hub_count']} hub connection(s), "
               f"{portfolio['mid_tier_count']} mid-tier connection(s)")
 
-        # Stage 2: enrich top N per tier, rerank by diversity. Served from the B1
+        # Stage 2: enrich top N per tier, rerank by diversity. Served from the
         # graph cache when present (no round-trips), else live get_node_info.
         print(f"  3) Enriching top {advisor.ENRICH_PER_TIER}/tier and reranking by "
               f"diversity vs. 2-hop horizon...", flush=True)
@@ -277,11 +277,11 @@ def cmd_monitor_htlcs(args):
 
 
 def cmd_refresh_graph(args):
-    """Pull the network graph and refresh the B1 cache.
+    """Pull the network graph and refresh the cache.
 
     describe_graph() is a multi-MB pull (up to ~300s on the Pi), so this runs from
     a daily cron (ahead of the daily-check) rather than inline. The daily agent and
-    the B2 peer-finder read the cached digest instead of re-pulling LND.
+    the peer-finder read the cached digest instead of re-pulling LND.
     """
     import graph_cache
     log = get_logger("main")
@@ -299,9 +299,9 @@ def cmd_refresh_graph(args):
 
 
 def cmd_suggest_peers(args):
-    """Suggest peers to open a channel to so refills toward a target get cheaper (B2).
+    """Suggest peers to open a channel to so refills toward a target get cheaper.
 
-    Stage 1 reads the B1 graph cache (the target's neighbours, scored by hub
+    Stage 1 reads the cached graph (the target's neighbours, scored by hub
     quality); stage 2 validates each finalist with a live QueryRoutes probe (cheapest
     route FROM the candidate TO the target, source_pubkey=candidate — the path a refill
     would take after we open to it). An empty result means resize/close, not open.
@@ -1243,7 +1243,7 @@ def main():
         help="[automated] Refresh slow per-channel signals (market multiplier). Designed for a nightly cron.")
 
     p_refresh_graph = subparsers.add_parser("refresh_graph",
-        help="[automated] Pull the network graph into the B1 cache (multi-MB; daily cron ahead of daily-check).")
+        help="[automated] Pull the network graph into the local cache (multi-MB; daily cron ahead of daily-check).")
 
     p_suggest_peers = subparsers.add_parser("suggest_peers",
         help="[feature]   Suggest peers to open toward a target (alias or pubkey) for cheaper refills.")

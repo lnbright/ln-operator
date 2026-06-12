@@ -25,8 +25,8 @@
   Using only direct peers (`state["existing_peers"]`) instead skewed the
   metric heavily toward hubs when our channel count was low — almost
   every candidate's peers were "new" by that definition. Top
-  `SHOW_PER_TIER` (10) per tier are surfaced. Both stages now read the B1 graph
-  cache (`graph_cache.load()` → `_candidates_from_digest` / `_enrich_from_digest`):
+  `SHOW_PER_TIER` (10) per tier are surfaced. Both stages now read the cached graph
+  (`graph_cache.load()` → `_candidates_from_digest` / `_enrich_from_digest`):
   no live `describe_graph` pull and no per-candidate `get_node_info` round-trips —
   the digest's adjacency serves diversity directly. Live pull/`get_node_info` stay
   as a fallback only when the cache is absent (pre-first-`refresh_graph`). Runs only
@@ -112,50 +112,50 @@
     value — so the accelerator can never spuriously strand the channel it rescues
     (accelerator-firing and `profit_capped` are mutually exclusive). Inert unless
     `earned×horizon > 2×anchor`; self-limiting (first success re-anchors).
-    **Relationship to B8 (below): the earn-ceiling accelerator is now B8's BLIND
-    FALLBACK** — B8 reads the real clearing price via QueryRoutes and is the
+    **Relationship to the QueryRoutes probe (below): the earn-ceiling accelerator is
+    now its BLIND FALLBACK** — the probe reads the real clearing price via QueryRoutes
+    and is the
     informed primary; this accelerator is the QueryRoutes-independent climb that
-    still escapes a poisoned anchor when B8 can't read a price (probe off/unavailable,
-    or a chunked refill B8 v1 doesn't probe). Both only raise toward the same
-    ceiling via `max()`, so the higher of (blind climb, informed price) wins.
-  - **B8 — QueryRoutes budget acceleration** (`REBALANCE_QUERYROUTES_ENABLED`,
-    `_accelerate_budget_with_queryroutes` in `rebalance_planner.py`): the escalation
-    ladder discovers the clearing price by FAILING over several runs; a
-    `lnd_client.query_routes` dry-run (no payment, same pathfinder + mission control
-    as `SendPaymentV2`) reads it directly. For each depleted target the planner
-    probes the primary pair (most-overfull source → target, pinned via
-    `outgoing_chan_id`, at the size it would attempt) capped at the affordable
-    ceiling (`affordable_ceiling_ppm` = `min(profit_cap, MAX)` judged / `MAX`
-    unjudged). If a route exists between the current escalated bid and the ceiling,
-    THIS run's `max_fee_ppm` jumps straight to that live cost — an affordable refill
-    lands now instead of after ~5 escalations (the bfx 14→721 grind). Conservative
-    by construction: only ever RAISES the bid (a max), never above the ceiling the
-    profit gate already permits (never overpays), never skips an attempt, never
-    writes a failure row or moves `last_refill`. Runs ONLY in the planner
-    (`get_channel_rebalance_budget` stays call-free — fees/monitor call it per
-    channel every run); any probe error/None leaves the budget untouched, so a flaky
-    probe can't break planning or change spend. Inert when profit-capped/structural
-    (already at ceiling → no headroom → no probe).
-  - **B8 v2 — QueryRoutes infeasibility early-out** (`REBALANCE_QUERYROUTES_EARLYOUT_ENABLED`,
-    `_queryroutes_early_out` in `rebalance_planner.py`): the other half of B8. In the
-    planner's gate-drop loop, a JUDGED depleted target the ladder says to rebalance is
-    probed at the MINIMUM chunk (`REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`, smallest amount
-    = strictly easiest to route) capped at its affordable ceiling. If no route exists,
-    refilling is a capital problem not price discovery, so the channel is dropped from
-    planning (skip the wasted attempt) AND — only on a real run, never a dry-run — a
-    synthetic failed cycle is recorded (`save_rebalance_attempt` with
-    `failure_reason='QR_NO_AFFORDABLE_ROUTE'`, fee 0, its own `run_id`). That row
-    advances `count_failures_since_last_success` exactly like a real failed cycle, so
-    the structural ladder still reaches the threshold and surfaces the capital decision
-    — **the early-out replaces the wasted attempts, NOT the stranding they would
-    eventually trigger** (the trap avoided: silently skipping would leave the channel in
-    limbo, never flagged). Safety rails: JUDGED-only (unjudged keep price discovery via
-    real attempts — `earned_ppm is None` → no probe); the probe uses
-    `query_routes(raise_on_error=True)` so a route ABOVE the ceiling reads as
-    no-affordable-route (case 3, correct) while a probe that's UNAVAILABLE (LND
-    down/transient) RAISES → we do NOT early-out, so a transport blip can never strand a
-    channel; `force` bypasses it (operator override). Min-chunk probing also covers the
-    chunked-refill case B8 v1's full-size probe misses.
+    still escapes a poisoned anchor when the probe can't read a price (off/unavailable).
+    Both only raise toward the same ceiling via `max()`, so the higher of (blind
+    climb, informed price) wins.
+  - **Unified QueryRoutes probe** (`REBALANCE_QUERYROUTES_ENABLED` /
+    `REBALANCE_QUERYROUTES_EARLYOUT_ENABLED`, `_queryroutes_probe` in
+    `rebalance_planner.py`): ONE `lnd_client.query_routes` dry-run (no payment, same
+    pathfinder + mission control as `SendPaymentV2`) **per overfull SOURCE** for each
+    JUDGED depleted target, at the MINIMUM chunk (`REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`)
+    capped at the affordable ceiling (`affordable_ceiling_ppm` = `min(profit_cap, MAX)`
+    judged / `MAX` unjudged). That single set of probes drives BOTH halves, and the
+    sources are ranked cheapest-first on the way out so the executor pays the cheapest:
+    - **pricing** (was "v1"): price the bid off the CHEAPEST feasible source — raise
+      `max_fee_ppm` up to its live cost (bounded by the ceiling), so an affordable
+      refill lands now AND via the cheapest source, instead of the ~5-run grind (bfx
+      14→721) or paying the most-overfull source. Only ever RAISES (a `max()`), never
+      above the ceiling (never overpays).
+    - **early-out** (was "v2"): if EVERY source returns a definite no-route, refilling
+      is a capital problem, not price discovery → drop the channel from planning AND,
+      on a real run only, record a synthetic failed cycle (`QR_NO_AFFORDABLE_ROUTE`,
+      fee 0, own `run_id`) that advances `count_failures_since_last_success` to the
+      structural threshold — **the early-out replaces the wasted attempts, NOT the
+      stranding they'd eventually trigger** (silently skipping would leave it in limbo,
+      never flagged). Gated by `REBALANCE_QUERYROUTES_EARLYOUT_ENABLED`; off → the
+      probe still prices/ranks but never strands.
+    **Why probe every source, not just the most-overfull** (this superseded the old
+    single-source v1/v2): feasibility is EXISTENTIAL (one working source proves it,
+    and a cheaper source may exist) but infeasibility is UNIVERSAL (only ALL sources
+    failing justifies the drop — and the drop is consequential, it advances stranding).
+    A single source's no-route can't price the bid *or* strand the channel. **Why the
+    min chunk for pricing too**: ppm is amount-dependent (a fixed base fee amortises
+    over fewer sats), so the 100k price is the worst case → a safe upper bound for the
+    cap that still lets larger/whole-amount routes settle under it, and one probe
+    covers chunked refills a full-amount probe would miss (so no separate full-amount
+    "v1" probe is needed). Safety rails: JUDGED-only (`earned_ppm is None` → no probe);
+    a probe that's UNAVAILABLE (LND down) is UNKNOWN, never no-route, so a transport
+    blip can never strand; never moves `last_refill` (only a real success does); runs
+    ONLY in the planner (`get_channel_rebalance_budget` stays call-free); `force`
+    bypasses it. Up to (#sources × #depleted targets) dry-run probes per run — cheap,
+    both counts small. Returns `{drop, budget, source_order}`; the planner threads
+    `source_order` into both the primary and fallback plan loops.
   - **Layer 2 — soft outbound floor + raised ceiling** (`compute_fee_target`):
     `SIGMOID_MAX_PPM` is 750 (was 250) so a draining channel can defend with price.
     The `last_refill × REBALANCE_FEE_MARGIN` floor is HARD while forwarding but
@@ -226,14 +226,14 @@
   (migrations added). run_id groups all plans executed in one pipeline run so
   failure counting is per-cycle, not per-attempt (see Layer-1 note above).
 - fee_overrides table: chan_id (PK), pinned_ppm, set_at, note — manual fee pins
-- daily_findings table (B6): key (PK), kind, entity, state, summary, first_seen,
+- daily_findings table: key (PK), kind, entity, state, summary, first_seen,
   last_seen, status — deterministic dedup memory for the daily-check agent so it
   reports a finding once, re-surfaces only on a material `state` change, and notes
   resolution once. `db.reconcile_findings(current)` diffs the agent's current-run
   findings against the open set and returns new/changed/unchanged/resolved buckets
   (persisting the snapshot); a resolved key that reappears reopens as a fresh
   episode. Replaces the old "read the log and dedup by judgement" instruction.
-- reconcile.py (B3): `run_checks(window_days)` — the §2 data-integrity arithmetic the
+- reconcile.py: `run_checks(window_days)` — the §2 data-integrity arithmetic the
   daily-check agent used to do by hand (an LLM gets SQLite arithmetic subtly wrong),
   now deterministic DB-only assertions returning [{check, severity, message}]. Covers
   missing payment_hash on a success row, fee_ppm > REBALANCE_MAX_BUDGET_PPM, duplicate
@@ -242,30 +242,30 @@
   — depend on engine state absent from `fee_updates`, so a table-only check
   false-positives on every legitimate floor-decay broadcast) nor the LND-requiring
   matches (self-payment↔log, live /v1/fees) — those stay agent-side.
-- graph_snapshots table (B1): one row per `refresh_graph` run — total_nodes/channels/
+- graph_snapshots table: one row per `refresh_graph` run — total_nodes/channels/
   capacity + our_channels/capacity/peers. Historical, so our network position
   (growing / going dark) is trendable. Finally given a writer (`db.save_graph_snapshot`).
 
-## Graph cache (B1)
+## Graph cache
 - `graph_cache.py` — `describe_graph()` is a multi-MB pull (26k nodes / 98k channels
   / ~16MB / ~30s on the Pi), so `ln-operator refresh_graph` (daily cron, 03:30) pulls
   it ONCE and writes a compact processed digest to `graph_cache.json` (next to the DB;
   gitignored; path overridable via `LN_OPERATOR_GRAPH_CACHE`). Atomic write (tmp +
-  os.replace). The daily-check agent and the B2 peer-finder call `graph_cache.load()`
+  os.replace). The daily-check agent and the peer-finder call `graph_cache.load()`
   (instant) instead of re-pulling LND.
 - Digest = per-node {alias, channels, capacity, avg_fee_ppm, neighbors[]} for every
   node with ≥1 public channel, plus our 2-hop reachable set and network stats.
-  `neighbors` is the adjacency B2 walks for reachability / "if I opened to Y, what
+  `neighbors` is the adjacency the peer-finder walks for reachability / "if I opened to Y, what
   does Y reach". `build_digest()` is pure (graph dict → digest), unit-tested without LND.
 - LIQUIDITY-BLIND by design: announced topology + fee policy only, NEVER costed
-  pathfinding (that's QueryRoutes — B8 — which sees real mission-control liquidity).
+  pathfinding (that's QueryRoutes, which sees real mission-control liquidity).
 - Full re-pull each refresh (no incremental diff). describe_graph is read-only, run
   once daily off-peak — the same call `lncli describegraph` makes; not a hot path, no
   meaningful LND load. (A true incremental graph would use SubscribeChannelGraph's
   gossip stream, but that's an unjustified long-running daemon for a slowly-changing,
   liquidity-blind structural cache that only needs daily freshness.)
 
-## Targeted peer-finder (B2)
+## Targeted peer-finder
 - `peer_finder.py` / `ln-operator suggest_peers <alias|pubkey>` — turns "add a 2nd
   source" into NAMED, validated candidates for "which node to open toward so refills
   into this sink get cheaper". Two stages:
@@ -285,7 +285,7 @@
     not open.
 - The daily-check agent calls `suggest_peers_for(<sink peer pubkey>)` to name peers in
   its §4 capital suggestions instead of hand-waving "add a source". `source_pubkey` is
-  why B1+B2 beat re-running the slow `plan` graph walk: cache narrows broad+free, then
+  why the cache + peer-finder beat re-running the slow `plan` graph walk: cache narrows broad+free, then
   ~12 live probes validate — `plan` can't simulate a not-yet-open channel's path.
 
 ## Services

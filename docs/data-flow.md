@@ -23,9 +23,9 @@ LND /v1/payments → sync_rebalances → rebalance_log (SQLite)
       (decays while idle, re-arms on fresh refill — state in channel_signals)
 
 LND QueryRoutes (dry-run, no payment — same pathfinder as SendPaymentV2 + MC)
-  ├─ Planner B8 v1: read the live route price → jump the bid to it (bounded by
-  │   the affordable ceiling) so an affordable refill lands this run
-  ├─ Planner B8 v2: no route within the ceiling → skip the attempt + record a
+  ├─ Planner (pricing): read the live route price → set the bid to the cheapest
+  │   feasible source (bounded by the affordable ceiling) so a refill lands this run
+  ├─ Planner (early-out): no route via ANY source → skip the attempt + record a
   │   synthetic QR_NO_AFFORDABLE_ROUTE cycle (advances the structural ladder)
   └─ suggest_peers stage 2: validate a candidate's live route to a sink (source_pubkey)
 

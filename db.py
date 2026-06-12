@@ -369,7 +369,7 @@ CREATE TABLE IF NOT EXISTS channel_signals (
     inbound_fee_set_ts            INTEGER NOT NULL DEFAULT 0
 );
 
--- ─── Daily-check finding dedup (B6) ─────────────────────────────
+-- ─── Daily-check finding dedup ─────────────────────────────
 -- Deterministic memory for the daily-check agent so it reports a finding once,
 -- re-surfaces it only when it MATERIALLY changes, and notes it once when resolved
 -- — instead of re-deriving the same lines from the log every morning. `key` is a
@@ -459,7 +459,7 @@ def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
 
 def save_graph_snapshot(total_nodes, total_channels, total_capacity,
                         our_channels, our_capacity, our_peers):
-    """Record a network-position snapshot — one row per B1 graph-cache refresh,
+    """Record a network-position snapshot — one row per graph-cache refresh,
     so our graph position (are we growing / going dark?) is trendable over time."""
     with get_conn() as conn:
         conn.execute(
@@ -471,7 +471,7 @@ def save_graph_snapshot(total_nodes, total_channels, total_capacity,
 
 
 def get_open_findings():
-    """All currently-open daily-check findings (B6), oldest first."""
+    """All currently-open daily-check findings, oldest first."""
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM daily_findings WHERE status='open' ORDER BY first_seen"
@@ -479,7 +479,7 @@ def get_open_findings():
 
 
 def reconcile_findings(current, now=None):
-    """Deterministic daily-report dedup (B6).
+    """Deterministic daily-report dedup.
 
     `current` is the list of findings the agent would report THIS run, each a dict
     {"key", "kind", "entity", "state", "summary"}. `key` is a stable id the agent

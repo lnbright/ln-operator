@@ -1,22 +1,26 @@
 """
-LN Operator — Targeted peer-finder (B2).
+LN Operator — Targeted peer-finder.
 
 Answers the question the daily report kept failing at: "for a sink we keep needing
 to refill (a stranded / draining channel's peer), WHICH node should we open a
 channel to so refills toward it get cheaper?" — with named, evidence-backed
 candidates instead of "add a 2nd source".
 
-Two stages (see CLAUDE.md B1/B2 design notes):
+Two stages (see CLAUDE.md design notes):
 
-  Stage 1 — graph cache (free, broad, LIQUIDITY-BLIND). From the B1 digest, take the
+  Stage 1 — graph cache (free, broad, LIQUIDITY-BLIND). From the cached graph digest, take the
   target's neighbours (a channel to one gives us a short us→Y→target refill path),
   drop self / existing peers / noise, and score by hub quality. This only generates
   candidates — the cache can't see whether those paths are actually liquid.
 
-  Stage 2 — QueryRoutes (live, real liquidity). For each finalist Y, ask LND for the
-  cheapest route FROM Y TO the target (source_pubkey=Y) — i.e. simulate the path our
-  refill would take AFTER we open us→Y (that first hop is our own near-free new
-  channel). This turns a topology guess into mission-control-backed evidence, and an
+  Stage 2 — QueryRoutes (live, real liquidity). For each finalist Y, ask LND to price
+  the REAL refill shape: a route from Y back to US arriving over our channel to the
+  target (source_pubkey=Y, dest=us, last_hop=target). That models the path our refill
+  takes AFTER we open us→Y (the first hop is our own near-free new channel, excluded
+  here since Y is the source) — with the target as an INTERMEDIATE forwarder that
+  charges its fee, not a free terminal hop. Probing dest=target instead read 0ppm for
+  every direct neighbour (the destination hop is always free), validating liquidity but
+  hiding price. This turns a topology guess into mission-control-backed evidence, and an
   EMPTY result is itself the answer: no viable peer → the capital call is resize/close,
   not open.
 """
@@ -99,16 +103,26 @@ def suggest_peers_for(target_pubkey, digest=None, amount_sats=DEFAULT_PROBE_SATS
             c.pop("_score", None)
         return cands
 
+    our_pubkey = digest["our_pubkey"]
     validated = []
     for c in cands:
         try:
+            # Price the REAL refill shape, not a route that terminates at the sink.
+            # A rebalance ends back at US, arriving over our channel to the target, so
+            # the target is an INTERMEDIATE forwarder (charges its fee) — not the
+            # destination (free). dest=us + last_hop=target prices Y → … → target → us:
+            # the path a refill takes after we open us→Y (that first hop is our own
+            # near-free new channel, excluded since Y is the source). Probing dest=target
+            # read 0ppm for every direct neighbour (terminal hop is free) — liquidity
+            # validation only, no price.
             probe = lnd_client.query_routes(
-                target_pubkey, amount_sats, source_pubkey=c["pubkey"])
+                our_pubkey, amount_sats,
+                source_pubkey=c["pubkey"], last_hop_pubkey=target_pubkey)
         except Exception as e:
             log.debug("peer_finder probe failed for %s: %s", c["alias"], e)
             probe = None
         if not probe:
-            continue  # topologically close but no live route → not actually useful
+            continue  # no live route Y→…→target→us → not actually useful
         c["route_ppm"] = probe["fee_ppm"]
         c["route_hops"] = probe["hops"]
         c.pop("_score", None)

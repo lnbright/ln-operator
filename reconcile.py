@@ -1,5 +1,5 @@
 """
-LN Operator — Data-integrity reconciliation (B3).
+LN Operator — Data-integrity reconciliation.
 
 The §2 silent-failure checks the daily-check agent used to do BY HAND — arithmetic
 over SQLite an LLM can get subtly, invisibly wrong. Moved here as deterministic
