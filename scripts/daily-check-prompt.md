@@ -365,7 +365,9 @@ Based on the day's data, think about whether to suggest:
       demand looks fee-tolerant.
     - **Splice in capacity** — buys runway proportional to the daily drain. Does
       NOT fix one-directionality, only delays empty. Right when demand is real and
-      worth serving and you just need a bigger tank between refills.
+      worth serving and you just need a bigger tank between refills. NOTE: splice
+      in/out is NOT executable by this tool or our LND setup — surface it as a
+      human suggestion only, never as something the pipeline will do.
     - **Swap-refill (loop-in)** — the honest "add inbound" for a pure sink:
       on-chain → Lightning to top up local balance. Caveat it: you can't reliably
       pin the inbound to *this specific* channel, so it's "possible, with a
@@ -375,12 +377,23 @@ Based on the day's data, think about whether to suggest:
       ppm can never cover refill cost and whose fee can't rise without killing the
       flow.
 
+  **Account for on-chain cost.** Every action except "raise outbound fee" touches
+  the chain (open, close, resize, splice, and the swap's lockup/claim txs) and
+  costs on-chain fees — a close+reopen is two txs. A capital move only makes sense
+  if the channel's earnings justify paying that on-chain cost: a channel earning a
+  few hundred sats/day doesn't warrant a close+reopen that costs more than weeks of
+  its revenue. Say so when it's marginal ("earns ~Xk sats/30d; a close+reopen at
+  current mempool fees costs ~Y — only worth it if Z"). The prefer-fee-first
+  ordering exists partly because raising the fee is the one lever with zero
+  on-chain cost.
+
   Put the shape, the recommended action, the rejected alternatives, and the
   numbers in one line, e.g.:
   `bfx-lnd0 pure sink (0 in / 7.7m out, fed by Boltz+CoinGate), earns 620 ppm,
-  refill ≫3800, 17 failed runs → raise fee toward profitability or close; more
-  channels toward bfx won't refill a sink`. Never recommend force-closing a
-  freshly-opened channel (see the inactive-channel guidance).
+  refill ≫3800, 17 failed runs → raise fee toward profitability (no on-chain
+  cost) before closing; more channels toward bfx won't refill a sink`. Never
+  recommend force-closing a freshly-opened channel (see the inactive-channel
+  guidance).
 
 Put these in the summary as `Suggestions:`. Do not edit config.py or open
 channels — these are human decisions.
