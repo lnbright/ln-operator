@@ -486,6 +486,46 @@ Based on the day's data, think about whether to suggest:
   recommend force-closing a freshly-opened channel (see the inactive-channel
   guidance).
 
+  **Step 3 — couple it: redeploy, don't just free capital.** A bare "close" or
+  "resize-down" recovers sats but is only half an answer — the operator is left
+  holding idle on-chain funds with no plan. When the day's data supports it,
+  pair the teardown with *where the capital should go and why*, as ONE move. This
+  is the highest-value thing this section produces, so make it when (and only when)
+  the evidence is there. Pick the redeploy target from the data:
+    - **Close A → open toward B.** When a *different* channel is source-starved or
+      a worth-feeding sink, run `suggest_peers_for` on ITS peer and name the top
+      candidate, then present the pairing as the suggestion — recovery source and
+      redeploy target in one line: `close <dead chan> (dead-weight, 0 in/0 out 30d,
+      ~Xm parked) → redeploy toward <alias> (<pubkey-prefix>: route Yppm/Zh,
+      reach+W%) which feeds <starved chan>'s unmet demand`. The recovered capital
+      is the funding for the open; say so explicitly so it reads as a transfer, not
+      two unrelated ideas.
+    - **Add capital → name the channel and the reason.** The clean "add capital,
+      here's why" case is a *profitable* channel that keeps running dry: high
+      `earned_ppm`, repeated `INSUFFICIENT_BALANCE` drops / depleted every cycle,
+      AND an affordable refill (NOT profit_capped/structural — the gate is still
+      willing to fund it). That channel already earns; it just needs a bigger tank
+      or more inbound, so more sats there directly convert to revenue. Quantify it:
+      `add capital to <chan>: earns <N> ppm, hit empty M× in 24h dropping <D>m sats,
+      refill affordable → bigger tank earns more` (splice/open funded from a close
+      elsewhere, or fresh capital). NOTE splice is not executable by us — human action.
+    - **Recover and hold.** If nothing has a validated cheap route worth funding
+      (`suggest_peers_for` empty everywhere, no profitable starved channel), the
+      honest answer is recover-and-wait — say so rather than redeploying into
+      another sink that drains identically.
+
+  Same worth-it bar as any capital call, applied to BOTH ends: the close side must
+  be genuinely stranded (structural flag persisted past the defense window, not a
+  transient flap) AND the redeploy side must carry evidence (a validated
+  `suggest_peers` route, or a profitable channel's measured drain) AND the recovered
+  capital must exceed the on-chain cost of the move (a close+reopen ≈ 2×250×<sat/vB>
+  from `estimate_fee` — don't propose a move that costs more than it earns back in a
+  reasonable window). Surface once per state-change via the dedup store, like every
+  other capital call — a redeploy idea repeated daily trains the operator to ignore
+  it. You have no spend authority (offchain read/write only — no open/close/splice),
+  so this is always ADVISORY: present the complete move with its reasoning; the
+  operator executes.
+
 Put these in the summary as `Suggestions:`. Do not edit config.py or open
 channels — these are human decisions.
 
