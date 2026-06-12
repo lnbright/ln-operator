@@ -17,6 +17,37 @@ strangely, a timing pattern that doesn't match the cron schedule, a counter
 that should be moving but isn't, anything weird in the logs), investigate
 and call it out.
 
+## Your mandate — high-value only, NOT a dashboard mirror
+
+A live dashboard already shows current balances, the depleted/overfull list,
+per-channel fees, the sat-flow cards, backup freshness, and the stranded-channel
+count. **Do not restate any of that.** If a human sees it at a glance on the
+dashboard, it does not belong in this report. "N channels depleted, M stranded" is
+wasted space — the operator already knows. Spend the run on what a dashboard CAN'T
+do and a human won't:
+- **Log forensics** — read LND's journal + tool logs, narrate what actually
+  happened to a flapping/inactive channel over time, conclude whose fault it is.
+- **Anomaly detection in the *change*** — a route gone vs baseline, a counter that
+  should move but didn't, a timing pattern off the cron, numbers that don't
+  reconcile. Deltas, not totals.
+- **Data-integrity reconciliation** (§2) — the silent-failure checks.
+- **Grounded capital decisions** (§4) — for a channel rebalancing can't fix, a
+  reasoned recommendation *with the numbers*, not a restatement of its state.
+
+**Don't repeat yourself across days.** The prior reports are in
+`logs/daily-check.log` — read the last few days BEFORE writing. A finding or
+suggestion you already made does NOT go in again unless its state *materially
+changed*: new dropped-demand, budget escalation, recovery, or a flip in the gate
+verdict. A channel stranded and unchanged for five days gets at most one
+"still stranded, unchanged since <date>" line — never a fresh paragraph
+re-deriving the same capital suggestion. Daily repetition trains the operator to
+ignore the report.
+
+**Terminology:** a channel the gate has stopped rebalancing (`structural=True` /
+`structural_flag_ts` set) is **STRANDED** in operator language — use that word in
+the report. Keep the code field names (`structural`, `structural_flag_ts`) only
+where you're describing the query you ran.
+
 ## 1. Inspect the past 24h
 
 Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
@@ -231,15 +262,20 @@ Report each discrepancy as a one-line `Issues:` entry. Quote actual values
 
 ## 3. Diagnose
 
-You're looking for things a human operator would notice as off:
-- Channels that are stuck depleted or overfull and aren't being rebalanced
-- **Structural / profit-gated channels** — any channel where
-  `get_channel_rebalance_budget` returns `structural=True` (or `structural_flag_ts`
-  is set, or a `structural_liquidity` alert fired): refilling it is a losing trade
-  (earns far below its refill cost, repeated failed refills). The planner has
-  stopped rebalancing it on purpose. Also note `profit_capped=True` channels whose
-  budget is now well below their market refill price — they'll likely keep failing
-  to refill. These are capital decisions; surface them in Suggestions (below).
+You're looking for things a human operator would NOT already see on the dashboard
+(the dashboard shows *that* a channel is depleted/stranded — your job is *why*, and
+whether anything should change):
+- A depleted/overfull channel whose cause is non-obvious, or that should be
+  rebalanced but isn't — not the bare fact that it's depleted.
+- **Stranded channels** — any channel where `get_channel_rebalance_budget` returns
+  `structural=True` (or `structural_flag_ts` is set, or a `structural_liquidity`
+  alert fired): refilling it is a losing trade and the planner has stopped on
+  purpose. This is the operator's STRANDED state. Don't re-report a channel already
+  stranded in a prior run and unchanged — surface it only on the transition (newly
+  stranded, newly recovered) or when its dropped-demand / gate numbers moved
+  materially. Same for `profit_capped=True` channels trending toward stranded. The
+  standing capital decision goes in Suggestions, made ONCE per state-change, not
+  re-derived daily.
 - Rebalance failures concentrated on one peer (route problem? fee escalation
   not catching up?)
 - Fee floors that look wrong vs the most recent successful refill ppm. Note that
@@ -331,10 +367,12 @@ Based on the day's data, think about whether to suggest:
 - Channels worth closing or resizing — a chronic pure-sink channel may want
   more inbound (rebalance budget / a sibling source), and a peer that neither
   sources nor sinks meaningful flow over 30d is a resize/close candidate.
-- **Capital action for structural channels (always surface these explicitly).**
-  For every channel flagged `structural` (from Diagnose), the tool has decided
-  rebalancing can't fix it. Don't emit a bare verb — the reader needs to know
-  *why* one action wins. Two steps:
+- **Capital action for stranded channels (surface on change, not every day).**
+  For a channel flagged `structural`/STRANDED (from Diagnose), the tool has decided
+  rebalancing can't fix it. Make the capital case ONCE, with full reasoning, when it
+  first strands or when the evidence materially moves — then don't re-derive it daily
+  (see the dedup rule in the mandate). When you do make it, don't emit a bare verb —
+  the reader needs to know *why* one action wins. Two steps:
 
   **Step 1 — classify the channel's flow shape** from the 24h/30d sat-flow (the
   `chan_in→chan_out` view). The right capital action depends entirely on the
