@@ -60,11 +60,26 @@ Turns "add a 2nd source" into named, validated candidates. Two stages:
    (channels + capacity, low fee). Reports `diversity` = the fraction of a
    candidate's neighbours *outside* your 2-hop horizon (does opening to it expand
    reach or just duplicate paths you have?).
-2. **Stage 2 — QueryRoutes (live, real liquidity).** For each finalist `Y`, ask LND
-   for the cheapest **live** route *from Y to the target* (`source_pubkey=Y`) — i.e.
-   the path a refill would take *after* you open `you → Y` (that first hop is your
-   own near-free new channel). This drops candidates that look good on the map but
-   have no real liquidity, and ranks the survivors by validated route cost.
+2. **Stage 2 — QueryRoutes (live, real liquidity).** For each finalist `Y`, price the
+   **real refill shape**: the route `Y → … → target → you`
+   (`query_routes(dest=you, source_pubkey=Y, last_hop_pubkey=target)`) — the path a
+   refill takes *after* you open `you → Y` (that first hop is your own near-free new
+   channel, excluded since `Y` is the source). The target is an **intermediate
+   forwarder that charges its fee**, not a free destination. This drops candidates with
+   no real liquidity and ranks survivors by **true end-to-end refill cost**.
+
+   The probe omits one thing — LND never charges the **source** (`Y`) for its own first
+   hop — so `Y`'s outbound fee toward the next hop is added back from the channel edge
+   (`get_channel_edge`), shown as `(peer-hop N)`. With that, **every hop on the path is
+   counted** for any path length.
+
+   > **Why this matters.** The earlier probe pointed at the sink as the *destination*
+   > (`query_routes(dest=target, source=Y)`). The final hop into a destination is free,
+   > so every direct neighbour read a meaningless `route 0ppm/1h` and the ranking fell
+   > to the reach tiebreak — which put the **most expensive** candidates on top. On a
+   > real bfx sink, WalletOfSatoshi ranked #1 at "0ppm" while its true refill cost was
+   > **~5002 ppm** (its own 5000 ppm fee toward bfx was hidden). The honest probe flips
+   > the order: cheap hubs like Binance (2 ppm) / bfx-lnd1 (5 ppm) surface first.
 
 An **empty result is itself the answer**: no peer has a cheap live route to this
 sink → the capital move is resize/close, **not** open. `--no-validate` returns the
@@ -72,15 +87,18 @@ stage-1 shortlist without the live probes. Needs a fresh graph cache; if it's
 missing, run `refresh_graph` first.
 
 ```
-⚡ Peers to open toward ACINQ (03864ef025fd…) — cheaper refills into this sink
-  WalletOfSatoshi.com   2481ch  1901M  fee~1401  reach+48%  route 0ppm/1h
-  River Financial 1     1569ch  1423M  fee~ 853  reach+32%  route 0ppm/1h
-  bfx-lnd1               997ch  2936M  fee~ 212  reach+23%  route 0ppm/1h
+⚡ Peers to open toward bfx-lnd0 (033d86562194…) — cheaper refills into this sink
+  Binance               341ch 11293M  fee~   0  reach+16%  route    2ppm/2h
+  bfx-lnd1              997ch  2936M  fee~ 212  reach+23%  route    5ppm/2h (peer-hop 3)
+  okx                  702ch  7280M  fee~ 713  reach+16%  route  502ppm/2h (peer-hop 500)
+  WalletOfSatoshi.com 2481ch  1901M  fee~1401  reach+48%  route 5002ppm/2h (peer-hop 5000)
 ```
 
-`route 0ppm/1h` = a direct, live 1-hop path to the sink (the ideal — opening to it
-gives the shortest refill path). The daily-check agent calls `suggest_peers_for(<sink
-peer pubkey>)` to name peers in its capital suggestions instead of hand-waving.
+`route Nppm/Hh (peer-hop M)` = true refill cost: `M` ppm is the candidate's own
+forwarding fee toward the sink (the first hop you'd pay after opening to it), the rest
+is the path from there back to you. Lowest total wins. The daily-check agent calls
+`suggest_peers_for(<sink peer pubkey>)` to name peers in its capital suggestions
+instead of hand-waving.
 
 **Why cache + QueryRoutes beats re-running `plan`'s graph walk:** the cache narrows
 broad and free; `source_pubkey` lets QueryRoutes simulate a **not-yet-open**

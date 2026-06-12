@@ -27,7 +27,8 @@ LND QueryRoutes (dry-run, no payment — same pathfinder as SendPaymentV2 + MC)
   │   feasible source (bounded by the affordable ceiling) so a refill lands this run
   ├─ Planner (early-out): no route via ANY source → skip the attempt + record a
   │   synthetic QR_NO_AFFORDABLE_ROUTE cycle (advances the structural ladder)
-  └─ suggest_peers stage 2: validate a candidate's live route to a sink (source_pubkey)
+  └─ suggest_peers stage 2: price the real refill shape Y→…→sink→you
+      (dest=you, source_pubkey=Y, last_hop=sink) + add Y's own first-hop fee → true cost
 
 LND describe_graph → refresh_graph (nightly) → graph_cache.json + graph_snapshots
   ├─ plan: candidate generation + 2-hop diversity (no live pull / get_node_info)

@@ -80,9 +80,10 @@ Offers to generate a deposit address with QR code at the end.
 
 For a **targeted** decision — "which peer should I open toward so refills into
 *this* sink get cheaper?" — use `suggest_peers <alias|pubkey>`: it pulls the sink's
-neighbours from the graph cache and validates each with a live QueryRoutes probe
-(the route a refill would take *after* you open to it), returning a ranked shortlist
-or, if nothing routes cheaply, the verdict that the answer is resize/close. See
+neighbours from the graph cache and prices each with a live QueryRoutes probe of the
+real refill shape (`Y → … → sink → you`, the path a refill takes *after* you open to
+`Y`, every hop counted), returning a shortlist ranked by **true end-to-end refill
+cost** or, if nothing routes cheaply, the verdict that the answer is resize/close. See
 **[docs/graph-cache.md](docs/graph-cache.md)**.
 
 No external API dependencies — everything from your own LND node.

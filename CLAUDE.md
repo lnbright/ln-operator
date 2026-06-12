@@ -275,14 +275,25 @@
     low fee). `_stage1_candidates` is pure, unit-tested. Reports `diversity` = fraction
     of the candidate's neighbours OUTSIDE our 2-hop horizon (does opening to it expand
     reach or duplicate paths).
-  - **Stage 2 (QueryRoutes, live, real liquidity):** for each finalist Y,
-    `query_routes(target, amt, source_pubkey=Y)` — the cheapest LIVE route FROM Y TO
-    the target, i.e. the path a refill takes AFTER we open us→Y (that first hop is our
-    own near-free new channel). Drops candidates with no live route (announced-but-dead),
-    ranks by validated route cost. Direct neighbours show `0ppm/1h` (1-hop to the sink);
-    the probe's real job there is liquidity validation at the probe size + dropping
-    phantoms. An EMPTY result is the verdict: no cheap live route exists → resize/close,
-    not open.
+  - **Stage 2 (QueryRoutes, live, real liquidity):** for each finalist Y, price the REAL
+    refill shape — `query_routes(dest=us, source_pubkey=Y, last_hop_pubkey=target)` —
+    i.e. the route `Y → … → target → us` a refill takes AFTER we open us→Y (the first
+    hop us→Y is our own near-free new channel, excluded since Y is the source). The
+    target is an INTERMEDIATE forwarder that charges its fee, NOT the destination.
+    **Earlier `query_routes(dest=target, source=Y)` was wrong**: it terminated the route
+    AT the sink, so the final hop into the sink was free (destination doesn't charge) and
+    every direct neighbour read a meaningless `0ppm/1h` — the ranking then fell entirely
+    to the reach tiebreak and put the most EXPENSIVE candidates on top (e.g. WoS, whose
+    own 5000ppm fee toward bfx was completely hidden). **First-hop fix**: `SendPaymentV2`/
+    QueryRoutes never charge the SOURCE for its own outbound, so `probe.fee_ppm` covers
+    every hop AFTER Y but omits Y's own first hop — which Y *does* pay once it's an
+    intermediate post-open. `_first_hop_ppm` adds it back via one `get_channel_edge(hops[0])`
+    lookup (a node's OWN policy — node1_policy if it is node1, else node2_policy — is its
+    outbound fee, so direction is unambiguous), giving the TRUE end-to-end refill ppm for
+    any path length; surfaced as `(peer-hop N)`. Degrades to probe-only cost on lookup
+    failure / disabled edge. Drops candidates with no live route (announced-but-dead),
+    ranks by full validated cost. An EMPTY result is the verdict: no cheap live route
+    exists → resize/close, not open. `_policy_ppm` amortises base fee over the probe size.
 - The daily-check agent calls `suggest_peers_for(<sink peer pubkey>)` to name peers in
   its §4 capital suggestions instead of hand-waving "add a source". `source_pubkey` is
   why the cache + peer-finder beat re-running the slow `plan` graph walk: cache narrows broad+free, then

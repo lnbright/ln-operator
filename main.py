@@ -329,8 +329,12 @@ def cmd_suggest_peers(args):
         print("  → capital answer is resize/close, not open (or refresh the graph).")
         return
     for r in results:
-        route = (f"route {r['route_ppm']}ppm/{r['route_hops']}h"
-                 if "route_ppm" in r else "(unvalidated)")
+        if "route_ppm" in r:
+            route = f"route {r['route_ppm']}ppm/{r['route_hops']}h"
+            if r.get("first_hop_ppm"):
+                route += f" (peer-hop {r['first_hop_ppm']})"
+        else:
+            route = "(unvalidated)"
         print(f"  {r['alias'][:22]:22} {r['channels']:>5}ch "
               f"{r['capacity'] // 1_000_000:>5}M  fee~{r['avg_fee_ppm']:>4}  "
               f"reach+{r['diversity']:.0%}  {route}")

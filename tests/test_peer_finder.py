@@ -56,13 +56,21 @@ class Stage1Tests(unittest.TestCase):
         self.assertEqual(peer_finder._stage1_candidates(DIGEST, "ZZZ", 10), [])
 
 
+def _probe(fee_ppm, hops=2, chan_id=None):
+    """A query_routes return with the raw `routes` the first-hop lookup reads. No
+    chan_id → first-hop fee resolves to 0 (get_channel_edge never called)."""
+    hop0 = {"pub_key": "X"}
+    if chan_id:
+        hop0["chan_id"] = chan_id
+    return {"fee_ppm": fee_ppm, "hops": hops, "routes": [{"hops": [hop0]}]}
+
+
 class SuggestPeersTests(unittest.TestCase):
     @patch("peer_finder.lnd_client.query_routes")
     def test_ranks_by_validated_route_cost(self, mqr):
         # Y2 is the better hub, but Y1 has the cheaper live route → Y1 ranks first.
-        def fake(target, amt, source_pubkey=None):
-            return {"Y1": {"fee_ppm": 40, "hops": 1},
-                    "Y2": {"fee_ppm": 250, "hops": 2}}[source_pubkey]
+        def fake(dest, amt, source_pubkey=None, last_hop_pubkey=None):
+            return {"Y1": _probe(40), "Y2": _probe(250)}[source_pubkey]
         mqr.side_effect = fake
         out = peer_finder.suggest_peers_for("T", digest=DIGEST)
         self.assertEqual([c["pubkey"] for c in out], ["Y1", "Y2"])
@@ -71,8 +79,8 @@ class SuggestPeersTests(unittest.TestCase):
     @patch("peer_finder.lnd_client.query_routes")
     def test_no_route_candidates_dropped(self, mqr):
         # Y2 has no live route → dropped; only Y1 survives.
-        mqr.side_effect = lambda t, a, source_pubkey=None: (
-            {"fee_ppm": 40, "hops": 1} if source_pubkey == "Y1" else None)
+        mqr.side_effect = lambda d, a, source_pubkey=None, last_hop_pubkey=None: (
+            _probe(40) if source_pubkey == "Y1" else None)
         out = peer_finder.suggest_peers_for("T", digest=DIGEST)
         self.assertEqual([c["pubkey"] for c in out], ["Y1"])
 
@@ -83,9 +91,9 @@ class SuggestPeersTests(unittest.TestCase):
 
     @patch("peer_finder.lnd_client.query_routes")
     def test_probe_exception_is_skipped_not_fatal(self, mqr):
-        mqr.side_effect = lambda t, a, source_pubkey=None: (
+        mqr.side_effect = lambda d, a, source_pubkey=None, last_hop_pubkey=None: (
             (_ for _ in ()).throw(RuntimeError("x")) if source_pubkey == "Y2"
-            else {"fee_ppm": 40, "hops": 1})
+            else _probe(40))
         out = peer_finder.suggest_peers_for("T", digest=DIGEST)
         self.assertEqual([c["pubkey"] for c in out], ["Y1"])
 
@@ -95,6 +103,55 @@ class SuggestPeersTests(unittest.TestCase):
         mqr.assert_not_called()
         self.assertEqual({c["pubkey"] for c in out}, {"Y1", "Y2"})
         self.assertNotIn("_score", out[0])  # internal score stripped from output
+
+
+class FirstHopFeeTests(unittest.TestCase):
+    """The probe omits the candidate's own first-hop (source) fee; it's added back
+    from the channel edge so route_ppm is the true end-to-end refill cost."""
+
+    @patch("peer_finder.lnd_client.get_channel_edge")
+    @patch("peer_finder.lnd_client.query_routes")
+    def test_first_hop_fee_added_and_reranks(self, mqr, mge):
+        # Y2 is cheaper DOWNSTREAM (probe 10 vs 100) but charges a huge first-hop fee;
+        # Y1 pricier downstream but near-free first hop → true cost flips the ranking.
+        mqr.side_effect = lambda d, a, source_pubkey=None, last_hop_pubkey=None: {
+            "Y1": _probe(100, chan_id="e1"),
+            "Y2": _probe(10, chan_id="e2")}[source_pubkey]
+        # candidate's OWN policy = node1_policy if it is node1, else node2_policy
+        edges = {
+            "e1": {"node1_pub": "Y1", "node2_pub": "T",
+                   "node1_policy": {"fee_base_msat": "0", "fee_rate_milli_msat": "1"},
+                   "node2_policy": {"fee_base_msat": "0", "fee_rate_milli_msat": "9999"}},
+            "e2": {"node1_pub": "T", "node2_pub": "Y2",
+                   "node1_policy": {"fee_base_msat": "0", "fee_rate_milli_msat": "9999"},
+                   "node2_policy": {"fee_base_msat": "0", "fee_rate_milli_msat": "2000"}},
+        }
+        mge.side_effect = lambda cid: edges[cid]
+        out = peer_finder.suggest_peers_for("T", digest=DIGEST)
+        self.assertEqual([c["pubkey"] for c in out], ["Y1", "Y2"])  # 101 < 2010
+        self.assertEqual(out[0]["route_ppm"], 101)      # 100 probe + 1 first-hop
+        self.assertEqual(out[0]["first_hop_ppm"], 1)
+        self.assertEqual(out[1]["first_hop_ppm"], 2000)
+
+    @patch("peer_finder.lnd_client.get_channel_edge")
+    @patch("peer_finder.lnd_client.query_routes")
+    def test_disabled_first_hop_adds_nothing(self, mqr, mge):
+        mqr.side_effect = lambda d, a, source_pubkey=None, last_hop_pubkey=None: (
+            _probe(40, chan_id="e1") if source_pubkey == "Y1" else _probe(40))
+        mge.return_value = {"node1_pub": "Y1", "node2_pub": "T",
+                            "node1_policy": {"fee_base_msat": "0",
+                                             "fee_rate_milli_msat": "5000",
+                                             "disabled": True},
+                            "node2_policy": {}}
+        out = {c["pubkey"]: c for c in peer_finder.suggest_peers_for("T", digest=DIGEST)}
+        self.assertEqual(out["Y1"]["first_hop_ppm"], 0)   # disabled → not added
+        self.assertEqual(out["Y1"]["route_ppm"], 40)
+
+    def test_policy_ppm_amortises_base_fee(self):
+        # base 1 sat (1000 msat) + 1 ppm over 500k sats = 2 + 1 = 3 ppm
+        ppm = peer_finder._policy_ppm(
+            {"fee_base_msat": "1000", "fee_rate_milli_msat": "1"}, 500_000)
+        self.assertEqual(round(ppm), 3)
 
 
 class ResolveTargetTests(unittest.TestCase):

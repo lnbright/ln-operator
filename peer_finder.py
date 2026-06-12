@@ -20,9 +20,11 @@ Two stages (see CLAUDE.md design notes):
   here since Y is the source) — with the target as an INTERMEDIATE forwarder that
   charges its fee, not a free terminal hop. Probing dest=target instead read 0ppm for
   every direct neighbour (the destination hop is always free), validating liquidity but
-  hiding price. This turns a topology guess into mission-control-backed evidence, and an
-  EMPTY result is itself the answer: no viable peer → the capital call is resize/close,
-  not open.
+  hiding price. The probe's fee_ppm covers every hop AFTER Y (LND never charges the
+  source for its own outbound), so we add Y's own first-hop fee back via one
+  get_channel_edge lookup — giving the TRUE end-to-end refill cost for any path length.
+  This turns a topology guess into mission-control-backed evidence, and an EMPTY result
+  is itself the answer: no viable peer → the capital call is resize/close, not open.
 """
 
 import math
@@ -45,6 +47,49 @@ def _diversity(neighbors, reachable_2hop):
         return 0.0
     new = sum(1 for n in neighbors if n not in reachable_2hop)
     return new / len(neighbors)
+
+
+def _policy_ppm(policy, amount_sats):
+    """Convert a channel-edge routing policy (base_msat + rate_ppm) to an effective ppm
+    at `amount_sats` — base fee amortised over the amount, so it's comparable to the
+    probe's amount-derived fee_ppm."""
+    base_msat = int(policy.get("fee_base_msat", 0) or 0)
+    rate_ppm = int(policy.get("fee_rate_milli_msat", 0) or 0)
+    fee_msat = base_msat + amount_sats * rate_ppm / 1000.0
+    return fee_msat * 1000.0 / amount_sats if amount_sats else 0.0
+
+
+def _first_hop_ppm(candidate_pubkey, route, amount_sats):
+    """The fee `candidate_pubkey` charges on the route's FIRST hop — the ONE cost the
+    probe omits. With source_pubkey=Y, LND doesn't charge Y for its own outbound, so
+    probe.fee_ppm covers every hop AFTER Y (Z→…→target→us) but not Y's own first hop.
+    After we open us→Y, Y becomes an intermediate forwarder and DOES pay this, so add it
+    back. One get_channel_edge(hops[0]) lookup, works for any path length. A node's OWN
+    advertised policy (node1_policy if it is node1, else node2_policy) is its outbound
+    forwarding fee, so direction is unambiguous. Returns 0.0 on any failure / disabled
+    edge (degrade to probe-only cost rather than break ranking)."""
+    hops = (route or {}).get("hops") or []
+    if not hops:
+        return 0.0
+    chan_id = hops[0].get("chan_id")
+    if not chan_id:
+        return 0.0
+    try:
+        edge = lnd_client.get_channel_edge(chan_id)
+    except Exception as e:
+        log.debug("peer_finder: edge lookup %s failed: %s", chan_id, e)
+        return 0.0
+    if not edge:
+        return 0.0
+    if edge.get("node1_pub") == candidate_pubkey:
+        pol = edge.get("node1_policy")
+    elif edge.get("node2_pub") == candidate_pubkey:
+        pol = edge.get("node2_policy")
+    else:
+        return 0.0
+    if not pol or pol.get("disabled"):
+        return 0.0
+    return _policy_ppm(pol, amount_sats)
 
 
 def _stage1_candidates(digest, target_pubkey, limit):
@@ -114,7 +159,8 @@ def suggest_peers_for(target_pubkey, digest=None, amount_sats=DEFAULT_PROBE_SATS
             # the path a refill takes after we open us→Y (that first hop is our own
             # near-free new channel, excluded since Y is the source). Probing dest=target
             # read 0ppm for every direct neighbour (terminal hop is free) — liquidity
-            # validation only, no price.
+            # validation only, no price. (Y's own first-hop fee, which the probe also
+            # omits as the source, is added back below.)
             probe = lnd_client.query_routes(
                 our_pubkey, amount_sats,
                 source_pubkey=c["pubkey"], last_hop_pubkey=target_pubkey)
@@ -123,7 +169,10 @@ def suggest_peers_for(target_pubkey, digest=None, amount_sats=DEFAULT_PROBE_SATS
             probe = None
         if not probe:
             continue  # no live route Y→…→target→us → not actually useful
-        c["route_ppm"] = probe["fee_ppm"]
+        # probe.fee_ppm = every hop after Y; add Y's own first-hop fee for the full cost
+        first_ppm = _first_hop_ppm(c["pubkey"], probe["routes"][0], amount_sats)
+        c["first_hop_ppm"] = round(first_ppm)
+        c["route_ppm"] = round(probe["fee_ppm"] + first_ppm)
         c["route_hops"] = probe["hops"]
         c.pop("_score", None)
         validated.append(c)
