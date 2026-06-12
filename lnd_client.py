@@ -240,6 +240,94 @@ def describe_graph(include_unannounced=False):
     return _get("/v1/graph", params, timeout=300)
 
 
+def query_routes(pub_key, amt_sat, fee_limit_sat=None, source_pubkey=None,
+                 outgoing_chan_id=None, last_hop_pubkey=None,
+                 use_mission_control=True, timeout=30):
+    """Dry-run LND's pathfinder (QueryRoutes) — find a route WITHOUT paying.
+
+    This is the SAME pathfinder SendPaymentV2 uses, mission-control liquidity
+    estimates included, so it answers "could this route, and at what cost" with
+    no payment sent. Two uses (see CLAUDE.md design notes):
+      - rebalance feasibility: is there a route to refill a target within budget,
+        or is the channel priced-out / unreachable (a capital decision)?
+      - candidate-peer validation: with source_pubkey=Y, price a route as if a
+        prospective peer Y were the source — "if we opened to Y, how cheaply
+        could Y reach this sink?".
+
+    - pub_key:             destination node (hex)
+    - amt_sat:             amount to route, in sats
+    - fee_limit_sat:       cap the search at this fee (sats); None = LND default
+    - source_pubkey:       start pathfinding from this node instead of us (hex)
+    - outgoing_chan_id:    pin the first hop to this channel (numeric scid)
+    - last_hop_pubkey:     pin the final hop to arrive via this peer (hex)
+    - use_mission_control: fold in learned liquidity (default True)
+
+    Returns None when no route exists within the constraints (LND reports
+    "unable to find a path"), else a dict:
+        {"fee_sat", "fee_ppm" (fee/amt×1e6, rounded), "hops", "amt_sat",
+         "success_prob" (0..1 or None), "routes" (raw list)}
+    Note fee_ppm is amount-dependent — a base fee amortised over a small chunk
+    reads higher ppm than the same route at a large amount; callers doing a
+    min-chunk feasibility probe should read it as routability, not price.
+    """
+    import base64
+    params = {"use_mission_control": str(use_mission_control).lower()}
+    if fee_limit_sat is not None:
+        # FeeLimit.fixed (sats) — nested message field via dot notation in REST.
+        params["fee_limit.fixed"] = str(int(fee_limit_sat))
+    if source_pubkey:
+        params["source_pub_key"] = source_pubkey
+    if outgoing_chan_id is not None:
+        params["outgoing_chan_id"] = str(outgoing_chan_id)
+    if last_hop_pubkey:
+        # bytes field — base64 in the REST query string (requests URL-encodes it)
+        params["last_hop_pubkey"] = base64.b64encode(bytes.fromhex(last_hop_pubkey)).decode()
+
+    url = f"{LND_REST_URL}/v1/graph/routes/{pub_key}/{int(amt_sat)}"
+    log.debug("query_routes: dest=%s amt=%d fee_limit=%s src=%s",
+              pub_key[:12], int(amt_sat), fee_limit_sat, (source_pubkey or "self")[:12])
+    try:
+        r = requests.get(url, headers=_headers(), verify=LND_CERT,
+                         params=params, timeout=timeout)
+    except requests.RequestException as e:
+        log.debug("query_routes request failed: %s", e)
+        return None
+
+    if r.status_code != 200:
+        # No-route surfaces as a non-200 with a gRPC error body. Treat "no path"
+        # as a clean None (the routable answer is "you can't"); log anything else
+        # (auth, malformed request) so a real fault isn't silently swallowed.
+        try:
+            body = r.json()
+            body = body.get("message") or body.get("error") or r.text
+        except Exception:
+            body = r.text
+        low = (body or "").lower()
+        if "unable to find a path" in low or "no route" in low or "no_route" in low:
+            log.debug("query_routes: no route to %s for %d sat", pub_key[:12], int(amt_sat))
+        else:
+            log.warning("query_routes failed (%d): %s", r.status_code, (body or "")[:200])
+        return None
+
+    data = r.json()
+    routes = data.get("routes") or []
+    if not routes:
+        return None
+
+    best = routes[0]
+    amt = int(amt_sat)
+    fee_sat = int(best.get("total_fees_msat") or 0) // 1000
+    fee_ppm = round(fee_sat / amt * 1_000_000) if amt else 0
+    return {
+        "fee_sat": fee_sat,
+        "fee_ppm": fee_ppm,
+        "hops": len(best.get("hops") or []),
+        "amt_sat": amt,
+        "success_prob": data.get("success_prob"),
+        "routes": routes,
+    }
+
+
 # ─── Payments & Invoices ─────────────────────────────────────────
 
 def send_payment_v2(payment_request, outgoing_chan_id, last_hop_pubkey,
