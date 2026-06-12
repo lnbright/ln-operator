@@ -318,12 +318,18 @@ def cmd_suggest_peers(args):
         return
     tnode = digest["nodes"].get(target, {})
     age_h = (graph_cache.age_seconds() or 0) // 3600
+    amount = args.amount if args.amount and args.amount > 0 else peer_finder.DEFAULT_PROBE_SATS
+    validate = not args.no_validate
     print(f"\n⚡ Peers to open toward {tnode.get('alias', target[:12])} "
           f"({target[:12]}…) — cheaper refills into this sink")
-    print(f"   graph cache {age_h}h old, target has {tnode.get('channels', 0)} channels")
+    hdr = f"   graph cache {age_h}h old, target has {tnode.get('channels', 0)} channels"
+    if validate:
+        amt_str = f"{amount / 1_000_000:.1f}M" if amount >= 1_000_000 else f"{amount // 1000}k"
+        hdr += f", probing at {amt_str} sats"
+    print(hdr)
     print("=" * 66)
     results = peer_finder.suggest_peers_for(target, digest=digest,
-                                            validate=not args.no_validate)
+                                            amount_sats=amount, validate=validate)
     if not results:
         print("  No viable peer with a cheap live route to this target.")
         print("  → capital answer is resize/close, not open (or refresh the graph).")
@@ -1254,6 +1260,10 @@ def main():
     p_suggest_peers.add_argument("target", help="target node — alias substring or 66-hex pubkey")
     p_suggest_peers.add_argument("--no-validate", action="store_true",
         help="stage-1 graph shortlist only — skip the live QueryRoutes validation")
+    p_suggest_peers.add_argument("--amount", type=int, default=None, metavar="SATS",
+        help="probe size in sats (default 500k, a representative refill chunk). Set to "
+             "a sink's real refill/deficit size for per-sink cost accuracy: smaller is "
+             "easier to route (feasibility), larger amortises base fees (cost).")
 
     p_monitor = subparsers.add_parser("monitor_htlcs",
         help="[automated] Long-running: record dropped forwards from LND's HTLC event stream (systemd)")

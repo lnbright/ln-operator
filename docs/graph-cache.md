@@ -83,7 +83,10 @@ Turns "add a 2nd source" into named, validated candidates. Two stages:
 
 An **empty result is itself the answer**: no peer has a cheap live route to this
 sink → the capital move is resize/close, **not** open. `--no-validate` returns the
-stage-1 shortlist without the live probes. Needs a fresh graph cache; if it's
+stage-1 shortlist without the live probes. `--amount <sats>` sets the probe size
+(default 500k, a representative refill chunk) — smaller is easier to route
+(feasibility), larger amortises base fees (cost accuracy); set it to a sink's real
+refill/deficit size for per-sink accuracy. Needs a fresh graph cache; if it's
 missing, run `refresh_graph` first.
 
 ```

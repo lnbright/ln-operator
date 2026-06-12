@@ -227,6 +227,7 @@ ln-operator plan --min-channel 3000000           # override the minimum channel 
 ln-operator plan --treasury 0.01                 # override the wallet-reserve (treasury) ratio
 ln-operator suggest_peers <alias|pubkey>         # which peer to open toward so refills into a sink get cheaper
 ln-operator suggest_peers LNBiG --no-validate    # stage-1 graph shortlist only (skip the live route check)
+ln-operator suggest_peers bfx --amount 1000000   # probe at a custom size (default 500k); match a sink's real refill chunk
 # plan + suggest_peers read the cached network graph (see refresh_graph below);
 # suggest_peers validates each candidate with a live QueryRoutes probe — an empty
 # result means the capital answer is resize/close, not open. See docs/graph-cache.md.
