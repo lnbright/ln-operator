@@ -208,6 +208,22 @@ Also run:
 These are the silent-failure modes — pipelines that look fine but are
 quietly producing wrong numbers. Always check, every day.
 
+**Run the deterministic checks first — don't redo their arithmetic by hand (B3).**
+The DB-only reconciliations are now Python (an LLM doing arithmetic over SQLite gets
+it subtly, invisibly wrong). Call:
+
+    from reconcile import run_checks
+    issues = run_checks(window_days=1)   # [{check, severity 'fail'|'warn', message}, …]
+
+Report every issue it returns verbatim under `Issues:` (a `fail` is always worth a
+line). It covers: rebalance success rows missing a payment_hash, fee_ppm over
+REBALANCE_MAX_BUDGET_PPM, duplicate payment_hash (double-logged), chunk-ppm spikes
+within an attempt, and pinned-channel broadcasts that aren't the pinned value. Do NOT
+re-derive these yourself. What it does NOT cover (still YOUR job, they need a live LND
+read or engine state the table doesn't hold): the self-payment↔log matching and
+amount/fee agreement below, new_fee_ppm vs live `/v1/fees`, and the fee-update
+hysteresis rule.
+
 **Payments ↔ rebalance_log:**
 - Pull last 24h of successful self-payments from LND (`/v1/payments`,
   filter where final-hop pubkey == our pubkey). Compare against

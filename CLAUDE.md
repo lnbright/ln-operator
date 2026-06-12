@@ -230,6 +230,15 @@
   findings against the open set and returns new/changed/unchanged/resolved buckets
   (persisting the snapshot); a resolved key that reappears reopens as a fresh
   episode. Replaces the old "read the log and dedup by judgement" instruction.
+- reconcile.py (B3): `run_checks(window_days)` — the §2 data-integrity arithmetic the
+  daily-check agent used to do by hand (an LLM gets SQLite arithmetic subtly wrong),
+  now deterministic DB-only assertions returning [{check, severity, message}]. Covers
+  missing payment_hash on a success row, fee_ppm > REBALANCE_MAX_BUDGET_PPM, duplicate
+  payment_hash, chunk-ppm spikes, pinned-channel non-pin broadcasts. Deliberately does
+  NOT check the fee hysteresis rule (its cooldown escapes — snap Δ / edge-zone crossing
+  — depend on engine state absent from `fee_updates`, so a table-only check
+  false-positives on every legitimate floor-decay broadcast) nor the LND-requiring
+  matches (self-payment↔log, live /v1/fees) — those stay agent-side.
 - graph_snapshots table (B1): one row per `refresh_graph` run — total_nodes/channels/
   capacity + our_channels/capacity/peers. Historical, so our network position
   (growing / going dark) is trendable. Finally given a writer (`db.save_graph_snapshot`).
