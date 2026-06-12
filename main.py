@@ -297,6 +297,45 @@ def cmd_refresh_graph(args):
     print(f"  cached to:      {graph_cache.CACHE_PATH}")
 
 
+def cmd_suggest_peers(args):
+    """Suggest peers to open a channel to so refills toward a target get cheaper (B2).
+
+    Stage 1 reads the B1 graph cache (the target's neighbours, scored by hub
+    quality); stage 2 validates each finalist with a live QueryRoutes probe (cheapest
+    route FROM the candidate TO the target, source_pubkey=candidate — the path a refill
+    would take after we open to it). An empty result means resize/close, not open.
+    """
+    import graph_cache
+    import peer_finder
+    digest = graph_cache.load()
+    if not digest:
+        print("  No graph cache — run `ln-operator refresh_graph` first.")
+        return
+    target = peer_finder.resolve_target(args.target, digest)
+    if not target:
+        print(f"  No node matching '{args.target}' in the graph cache.")
+        return
+    tnode = digest["nodes"].get(target, {})
+    age_h = (graph_cache.age_seconds() or 0) // 3600
+    print(f"\n⚡ Peers to open toward {tnode.get('alias', target[:12])} "
+          f"({target[:12]}…) — cheaper refills into this sink")
+    print(f"   graph cache {age_h}h old, target has {tnode.get('channels', 0)} channels")
+    print("=" * 66)
+    results = peer_finder.suggest_peers_for(target, digest=digest,
+                                            validate=not args.no_validate)
+    if not results:
+        print("  No viable peer with a cheap live route to this target.")
+        print("  → capital answer is resize/close, not open (or refresh the graph).")
+        return
+    for r in results:
+        route = (f"route {r['route_ppm']}ppm/{r['route_hops']}h"
+                 if "route_ppm" in r else "(unvalidated)")
+        print(f"  {r['alias'][:22]:22} {r['channels']:>5}ch "
+              f"{r['capacity'] // 1_000_000:>5}M  fee~{r['avg_fee_ppm']:>4}  "
+              f"reach+{r['diversity']:.0%}  {route}")
+        print(f"      {r['pubkey']}")
+
+
 def cmd_recompute_signals(args):
     """Refresh slow per-channel signals (market multiplier).
 
@@ -1205,6 +1244,12 @@ def main():
     p_refresh_graph = subparsers.add_parser("refresh_graph",
         help="[automated] Pull the network graph into the B1 cache (multi-MB; daily cron ahead of daily-check).")
 
+    p_suggest_peers = subparsers.add_parser("suggest_peers",
+        help="[feature]   Suggest peers to open toward a target (alias or pubkey) for cheaper refills.")
+    p_suggest_peers.add_argument("target", help="target node — alias substring or 66-hex pubkey")
+    p_suggest_peers.add_argument("--no-validate", action="store_true",
+        help="stage-1 graph shortlist only — skip the live QueryRoutes validation")
+
     p_monitor = subparsers.add_parser("monitor_htlcs",
         help="[automated] Long-running: record dropped forwards from LND's HTLC event stream (systemd)")
 
@@ -1251,6 +1296,8 @@ def main():
         cmd_recompute_signals(args)
     elif args.command == "refresh_graph":
         cmd_refresh_graph(args)
+    elif args.command == "suggest_peers":
+        cmd_suggest_peers(args)
     elif args.command == "monitor_htlcs":
         cmd_monitor_htlcs(args)
     else:

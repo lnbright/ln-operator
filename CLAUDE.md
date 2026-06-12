@@ -253,6 +253,29 @@
   gossip stream, but that's an unjustified long-running daemon for a slowly-changing,
   liquidity-blind structural cache that only needs daily freshness.)
 
+## Targeted peer-finder (B2)
+- `peer_finder.py` / `ln-operator suggest_peers <alias|pubkey>` — turns "add a 2nd
+  source" into NAMED, validated candidates for "which node to open toward so refills
+  into this sink get cheaper". Two stages:
+  - **Stage 1 (graph cache, free, liquidity-blind):** the target's neighbours (a
+    channel to one gives a short us→Y→target refill path), minus self / existing peers
+    / sub-`MIN_CANDIDATE_CHANNELS` noise, scored by hub quality (channels + capacity,
+    low fee). `_stage1_candidates` is pure, unit-tested. Reports `diversity` = fraction
+    of the candidate's neighbours OUTSIDE our 2-hop horizon (does opening to it expand
+    reach or duplicate paths).
+  - **Stage 2 (QueryRoutes, live, real liquidity):** for each finalist Y,
+    `query_routes(target, amt, source_pubkey=Y)` — the cheapest LIVE route FROM Y TO
+    the target, i.e. the path a refill takes AFTER we open us→Y (that first hop is our
+    own near-free new channel). Drops candidates with no live route (announced-but-dead),
+    ranks by validated route cost. Direct neighbours show `0ppm/1h` (1-hop to the sink);
+    the probe's real job there is liquidity validation at the probe size + dropping
+    phantoms. An EMPTY result is the verdict: no cheap live route exists → resize/close,
+    not open.
+- The daily-check agent calls `suggest_peers_for(<sink peer pubkey>)` to name peers in
+  its §4 capital suggestions instead of hand-waving "add a source". `source_pubkey` is
+  why B1+B2 beat re-running the slow `plan` graph walk: cache narrows broad+free, then
+  ~12 live probes validate — `plan` can't simulate a not-yet-open channel's path.
+
 ## Services
 - Dashboard: systemd lnd-dashboard.service, port 4000. Unit file at services/lnd-dashboard.service.
 - Channel backup: systemd lnd-channel-backup.path (inotify on channel.backup) +

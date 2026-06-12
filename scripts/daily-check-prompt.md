@@ -413,6 +413,21 @@ Based on the day's data, think about whether to suggest:
     - **Dead-weight** — ~0 in AND ~0 out over 30d; the peer neither sources nor
       sinks meaningful flow. Capital is just parked.
 
+  **Naming the peer (B2).** Whenever the action is "open a channel" (source-starved,
+  or a sink you judge worth feeding), DON'T hand-wave "add a 2nd source" — name
+  candidates. Call the targeted peer-finder with the sink's PEER pubkey:
+
+      from peer_finder import suggest_peers_for
+      cands = suggest_peers_for("<target peer pubkey>")   # graph cache + live QueryRoutes
+
+  It returns peers ranked by a validated live route to the target (cheapest first),
+  each with channels / capacity / avg fee / reach%. Surface the top 1-2 with their
+  evidence (`open toward <alias> (<pubkey-prefix>): NNNch, route Xppm/Yh, reach+Z%`).
+  An EMPTY result is itself the verdict: no peer has a cheap live route to this sink
+  → the capital answer is resize/close, NOT open. (Needs a fresh graph cache; if
+  `graph_cache.load()` is None/stale, note it and recommend `refresh_graph` rather
+  than guessing a peer.)
+
   **Step 2 — recommend ONE action and explain why it wins and why the obvious
   alternatives lose.** Terse, but the reasoning has to be there. The menu:
     - **Raise outbound fee** — the lever you have *before* spending capital. If
