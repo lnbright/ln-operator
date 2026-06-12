@@ -39,6 +39,7 @@ ENRICH_PER_TIER = 30  # candidates per tier sent through live graph enrichment
 SHOW_PER_TIER = 10    # final candidates surfaced per tier after diversity rerank
 import lnd_client
 import db
+import graph_cache
 from logging_config import get_logger
 
 log = get_logger('advisor')
@@ -81,6 +82,89 @@ def _gather_node_state():
     }
 
 
+def _candidates_from_digest(digest, state):
+    """Build the candidate list from the B1 graph-cache digest (no live pull).
+
+    Mirrors the live path's tiering/ranking but reads precomputed node metrics.
+    Recomputes the 2-hop reachable set from OUR CURRENT peers (via the digest
+    adjacency) rather than trusting the cache's snapshot, so it stays correct even
+    if our channels changed since the last refresh.
+    """
+    existing = state["existing_peers"]
+    our_pubkey = state["pubkey"]
+    nodes = digest["nodes"]
+
+    reachable = set(existing)
+    for pk in existing:
+        nd = nodes.get(pk)
+        if nd:
+            reachable.update(nd["neighbors"])
+    reachable.discard(our_pubkey)
+    state["reachable_2hop"] = reachable
+
+    active = [
+        {"pubkey": pk, "alias": nd["alias"], "capacity": nd["capacity"],
+         "channel_count": nd["channels"], "source": "graph-cache",
+         "avg_fee_ppm": nd["avg_fee_ppm"]}
+        for pk, nd in nodes.items()
+        if pk not in existing and pk != our_pubkey and nd["channels"] > 0
+    ]
+    active.sort(key=lambda n: n["channel_count"], reverse=True)
+
+    candidates = []
+    for i, node in enumerate(active):
+        ch = node["channel_count"]
+        if ch >= HUB_MIN_CHANNELS:
+            tier = "hub"
+        elif ch >= MID_MIN_CHANNELS:
+            tier = "mid-tier"
+        elif ch >= SMALL_MIN_CHANNELS:
+            tier = "small"
+        else:
+            continue  # drop sub-SMALL nodes as noise
+        node["network_rank"] = i + 1
+        node["tier_hint"] = tier
+        node["avg_channel_size"] = node["capacity"] // ch if ch else 0
+        candidates.append(node)
+
+    log.info("graph cache: %d candidates (%d hub, %d mid, %d small) of %d nodes, "
+             "2-hop reach %d", len(candidates),
+             sum(1 for c in candidates if c["tier_hint"] == "hub"),
+             sum(1 for c in candidates if c["tier_hint"] == "mid-tier"),
+             sum(1 for c in candidates if c["tier_hint"] == "small"),
+             len(nodes), len(reachable))
+    return candidates
+
+
+def _enrich_from_digest(candidates, state, digest):
+    """Diversity + avg fee from the cached digest's adjacency — no live get_node_info
+    round-trips. has_clearnet/addresses aren't in the topology cache (and aren't
+    displayed), so they're omitted."""
+    reachable = state["reachable_2hop"]
+    our_pubkey = state["pubkey"]
+    nodes = digest["nodes"]
+    for c in candidates:
+        nd = nodes.get(c["pubkey"])
+        their_peers = set(nd["neighbors"]) if nd else set()
+        if their_peers:
+            new_peers = their_peers - reachable - {our_pubkey}
+            diversity = len(new_peers) / len(their_peers)
+            new_peer_count = len(new_peers)
+        else:
+            diversity = 0.5
+            new_peer_count = 0
+        c["graph_data"] = {
+            "their_peer_count": len(their_peers),
+            "new_peers_beyond_2hop": new_peer_count,
+            "diversity_score": round(diversity, 3),
+            "avg_fee_ppm": nd["avg_fee_ppm"] if nd else 0,
+            "has_clearnet": None,
+            "addresses": [],
+        }
+        c["diversity_score_computed"] = diversity
+    return candidates
+
+
 def _fetch_candidates_from_graph(state):
     """Build candidate list from LND's local graph — the primary data source.
 
@@ -101,12 +185,25 @@ def _fetch_candidates_from_graph(state):
     Returns a list of candidate dicts sorted by channel count descending.
     The graph is already stored locally by LND — no external API needed.
     """
-    log.info("fetching candidates from local LND graph...")
     candidates = []
     # Set a safe default so downstream consumers (e.g. _rerank_tiers_by_diversity)
-    # don't KeyError if describe_graph() times out before we build the real set.
+    # don't KeyError if the graph isn't available.
     state.setdefault("reachable_2hop", set())
 
+    # Prefer the B1 cache (built daily by `refresh_graph`) over a fresh multi-MB
+    # describe_graph() pull. The digest carries node metrics + adjacency, so both
+    # candidate generation here AND the diversity enrichment can read it — no live
+    # graph pull, no per-candidate get_node_info round-trips. Live pull stays as a
+    # fallback when the cache is missing (e.g. before the first refresh).
+    digest = graph_cache.load()
+    state["graph_digest"] = digest
+    if digest:
+        age_h = (graph_cache.age_seconds() or 0) // 3600
+        log.info("using B1 graph cache (%dh old) — no live describe_graph pull", age_h)
+        return _candidates_from_digest(digest, state)
+
+    log.info("no graph cache — falling back to a live describe_graph() pull "
+             "(run `ln-operator refresh_graph` to avoid this)")
     try:
         graph = lnd_client.describe_graph()
         nodes_raw = graph.get("nodes", [])
@@ -276,8 +373,13 @@ def _enrich_candidates_with_graph_data(candidates, state):
 
     Sets c["graph_data"] and c["diversity_score_computed"] in place.
     One get_node_info call per candidate — slow, so callers should prefilter
-    (see _rerank_tiers_by_diversity).
+    (see _rerank_tiers_by_diversity). When the B1 graph cache is available it is
+    served from the digest's adjacency instead — no live round-trips at all.
     """
+    digest = state.get("graph_digest")
+    if digest:
+        return _enrich_from_digest(candidates, state, digest)
+
     reachable = state["reachable_2hop"]
     our_pubkey = state["pubkey"]
 
@@ -363,10 +465,10 @@ def _rerank_tiers_by_diversity(candidates, state):
     result = []
     for tier_name, bucket in (("hub", hubs), ("mid-tier", mid_tier), ("small", small)):
         prefilter = bucket[:ENRICH_PER_TIER]
-        log.info("enriching %d %s candidates with live graph data...",
-                 len(prefilter), tier_name)
+        src = "graph cache" if state.get("graph_digest") else "live get_node_info per peer"
+        log.info("enriching %d %s candidates (%s)...", len(prefilter), tier_name, src)
         print(f"    {tier_name:<8} tier: enriching {len(prefilter)} candidates "
-              f"(get_node_info per peer)...", flush=True)
+              f"({src})...", flush=True)
         _enrich_candidates_with_graph_data(prefilter, state)
         prefilter.sort(
             key=lambda c: (c.get("diversity_score_computed") or 0),

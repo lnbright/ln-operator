@@ -25,9 +25,12 @@
   Using only direct peers (`state["existing_peers"]`) instead skewed the
   metric heavily toward hubs when our channel count was low — almost
   every candidate's peers were "new" by that definition. Top
-  `SHOW_PER_TIER` (10) per tier are surfaced. Live LND calls make this
-  slow (~90 round-trips) — runs only in `ln-operator plan`, never in the 2h
-  pipeline. Constants live in `advisor.py`.
+  `SHOW_PER_TIER` (10) per tier are surfaced. Both stages now read the B1 graph
+  cache (`graph_cache.load()` → `_candidates_from_digest` / `_enrich_from_digest`):
+  no live `describe_graph` pull and no per-candidate `get_node_info` round-trips —
+  the digest's adjacency serves diversity directly. Live pull/`get_node_info` stay
+  as a fallback only when the cache is absent (pre-first-`refresh_graph`). Runs only
+  in `ln-operator plan`, never in the 2h pipeline. Constants live in `advisor.py`.
 - Plan command is pure local graph — no Claude API agent layer (removed)
 - Rebalance auto-chunks on failure (halves down to 100k min). Each successful
   chunk is its own success row in rebalance_log at its actual ppm.

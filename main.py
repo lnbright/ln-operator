@@ -165,9 +165,10 @@ def cmd_plan(args):
         print(f"     Existing portfolio: {portfolio['hub_count']} hub connection(s), "
               f"{portfolio['mid_tier_count']} mid-tier connection(s)")
 
-        # Stage 2: enrich top N per tier with live LND calls, rerank by diversity
-        print(f"  3) Enriching top {advisor.ENRICH_PER_TIER}/tier with live LND calls "
-              f"and reranking by diversity vs. 2-hop horizon...", flush=True)
+        # Stage 2: enrich top N per tier, rerank by diversity. Served from the B1
+        # graph cache when present (no round-trips), else live get_node_info.
+        print(f"  3) Enriching top {advisor.ENRICH_PER_TIER}/tier and reranking by "
+              f"diversity vs. 2-hop horizon...", flush=True)
         hubs, mid_tier, small = advisor._rerank_tiers_by_diversity(scored, state)
 
         print(f"  4) Presenting top {advisor.SHOW_PER_TIER}/tier...", flush=True)
