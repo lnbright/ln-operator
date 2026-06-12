@@ -163,10 +163,12 @@
   - Dashboard (`DASHBOARD_LND_MACAROON`) and daily-check (`DAILY_CHECK_LND_MACAROON`):
     read-only — `info:read offchain:read onchain:read peers:read invoices:read`.
   - admin.macaroon is only needed to bake the above; not used at runtime.
-- LND runs as lnd user, tool runs as pi user
+- LND runs as the `lnd` user; the tool runs as the operator user (a non-root,
+  non-`lnd` login — `youruser` in the shipped systemd units, swapped at install)
 
 ## Database
-- SQLite at /home/pi/ln-operator/ln_operator.db
+- SQLite at `<repo>/ln_operator.db` (derived from file location in config.py /
+  dashboard; override with `LN_OPERATOR_DB`)
 - forwarding_log and rebalance_log store numeric scid as chan_id
 - forward_fail_log: forwards we DROPPED (insufficient liquidity, fee too low, etc.),
   captured live by the htlc_monitor daemon. LND persists these nowhere — the event
@@ -192,5 +194,5 @@
 - Pipeline: cron every 2 hours
 
 ## Crontab
-0 */2 * * * cd /home/pi/ln-operator && ./ln-operator pipeline 2>&1
-15 3 * * * cd /home/pi/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1
+0 */2 * * * cd /home/youruser/ln-operator && ./ln-operator pipeline 2>&1
+15 3 * * * cd /home/youruser/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1

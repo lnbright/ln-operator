@@ -1,18 +1,22 @@
+# ── INSTALL: replace "youruser" with your Linux username, and adjust the
+# /home/youruser/ln-operator paths if your clone lives elsewhere. Copy this file
+# to /etc/systemd/system/ and run: sudo systemctl daemon-reload
+# See the README "Install the systemd services" section.
 [Unit]
 Description=LN Operator — HTLC failure monitor (records dropped forwards)
 Requires=network-online.target
 After=network-online.target lnd.service
 
 [Service]
-User=pi
-Group=pi
+User=youruser
+Group=youruser
 Type=simple
-WorkingDirectory=/home/pi/ln-operator
-ExecStart=/home/pi/ln-operator/venv/bin/python3 /home/pi/ln-operator/main.py monitor_htlcs
+WorkingDirectory=/home/youruser/ln-operator
+ExecStart=/home/youruser/ln-operator/venv/bin/python3 /home/youruser/ln-operator/main.py monitor_htlcs
 Restart=always
 RestartSec=10
-Environment=HOME=/home/pi
-EnvironmentFile=/home/pi/ln-operator/.env
+Environment=HOME=/home/youruser
+EnvironmentFile=/home/youruser/ln-operator/.env
 
 [Install]
 WantedBy=multi-user.target

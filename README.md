@@ -276,21 +276,42 @@ venv/bin/python3 dashboard/app.py    # or install services/lnd-dashboard.service
 
 Access at `http://YOUR_IP:4000`. No auth — use Tailscale or LAN only.
 
-### Services (systemd)
+### Install the systemd services
 
-Unit files for the dashboard, off-site channel-backup, and HTLC monitor live
-in [`services/`](services/). **They are not portable as-is** — each one
-hardcodes `User=pi` and `/home/pi/ln-operator/...` paths plus an
-`EnvironmentFile`. Edit the `User=`, `WorkingDirectory=`, `ExecStart=`, and
-`EnvironmentFile=` lines in every unit to match your host **before** enabling
-them:
+Unit files for the dashboard, off-site channel-backup, and HTLC monitor live in
+[`services/`](services/). They ship with a placeholder user (`youruser`) and
+`/home/youruser/ln-operator/...` paths — copy them into `/etc/systemd/system/`,
+swap in your username, reload, and enable:
 
 ```bash
-$EDITOR services/lnd-dashboard.service        # repeat for each unit you use
-sudo cp services/* /etc/systemd/system/
+# 1. Copy the units into systemd's directory
+sudo cp services/*.service services/*.path services/*.timer /etc/systemd/system/
+
+# 2. Replace the placeholder username with your own (fills User=, Group=, paths)
+sudo sed -i "s/youruser/$USER/g" /etc/systemd/system/lnd-*.service
+
+# 3. Reload + enable (starts them now and on boot)
 sudo systemctl daemon-reload
-sudo systemctl enable --now lnd-dashboard.service
+sudo systemctl enable --now lnd-dashboard lnd-htlc-monitor \
+  lnd-channel-backup.path lnd-channel-backup.timer
 ```
+
+The `sed` assumes your clone is at `/home/$USER/ln-operator`. If it lives
+elsewhere, also fix the `/home/$USER/ln-operator` paths in the `.service` files
+(`WorkingDirectory=`, `ExecStart=`, `EnvironmentFile=`) to your actual repo path.
+`lnd-channel-backup@.service` is a template instantiated by the `.path`/`.timer`
+— don't enable it directly. The `.path` watches `/home/lnd/...channel.backup`
+(LND's own user — leave that path as-is unless your LND data dir differs).
+
+**If a unit fails to start**, the error names the exact bad line:
+
+```bash
+systemctl status lnd-dashboard        # shows the failing User=/path verbatim
+journalctl -u lnd-dashboard -n 50     # full startup log
+```
+
+Common causes: username not swapped (`sed` skipped), repo not at
+`/home/$USER/ln-operator`, or `.env` missing at the `EnvironmentFile=` path.
 
 The daily-check AI agent is *not* a systemd service — it runs from cron and is
 off by default. See the [Crontab](#crontab) section above for its full cron line,

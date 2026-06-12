@@ -70,7 +70,12 @@ LND_MACAROON = os.getenv("DASHBOARD_LND_MACAROON",
 # Defaults to 127.0.0.1 (localhost only) if unset.
 BIND_IP      = os.getenv("DASHBOARD_BIND_IP", "127.0.0.1")
 PORT         = int(os.getenv("DASHBOARD_PORT", "4000"))
-DB_PATH      = os.getenv("LN_OPERATOR_DB", "/home/pi/ln-operator/ln_operator.db")
+# Derive the DB path from this file's location (app.py lives in <repo>/dashboard/,
+# so the repo root is two levels up) — no hardcoded home dir, works for any user.
+# Override with LN_OPERATOR_DB if the DB lives elsewhere.
+DB_PATH      = os.getenv("LN_OPERATOR_DB",
+                         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                      "ln_operator.db"))
 
 
 # ─── LND helpers ─────────────────────────────────────────────────
