@@ -420,10 +420,13 @@ Based on the day's data, think about whether to suggest:
   costs on-chain fees — a close+reopen is two txs. A capital move only makes sense
   if the channel's earnings justify paying that on-chain cost: a channel earning a
   few hundred sats/day doesn't warrant a close+reopen that costs more than weeks of
-  its revenue. Say so when it's marginal ("earns ~Xk sats/30d; a close+reopen at
-  current mempool fees costs ~Y — only worth it if Z"). The prefer-fee-first
-  ordering exists partly because raising the fee is the one lever with zero
-  on-chain cost.
+  its revenue. Get the live fee from OUR Bitcoin node, not an external API —
+  `lnd_client.estimate_fee(conf_target=6)` returns sat/vB (it wraps Core's
+  `estimatesmartfee`; the `plan` command uses it). A channel open or close is
+  ~250 vB, so a close+reopen ≈ 2 × 250 × <sat/vB>. Say so when it's marginal
+  ("earns ~Xk sats/30d; a close+reopen at ~<sat/vB> costs ~Y sats — only worth it
+  if Z"). The prefer-fee-first ordering exists partly because raising the fee is
+  the one lever with zero on-chain cost.
 
   Put the shape, the recommended action, the rejected alternatives, and the
   numbers in one line, e.g.:
@@ -447,10 +450,7 @@ Format (Markdown — Telegram renders `*bold*`):
 ```
 ⚡ *Daily Check — 2026-MM-DD*
 
-📈 *Flows (24h):* X sats forwarded, Y sats earned (Z ppm avg, N forwards)
-🔄 *Rebal (24h):* S/F succeeded, P sats paid
-📊 *Fees (24h):* K broadcasts (sigmoid a, floor b, market c, pin d)
-💚 *Health:* A/T active, backup Hh ago, tests pass/fail
+💚 *Pulse:* 24h — N fwds, X sats fwd, Y earned (Z ppm); rebal S/F, P paid; K fee broadcasts · now — A/T active, backup Hh ago, tests P/T
 ⚠️ *Issues:* K
   • <one line per anomaly>
 🔧 *Fixed:* <commit hash + one-line, or "nothing">
@@ -459,9 +459,11 @@ Format (Markdown — Telegram renders `*bold*`):
   • <up to 3 bullets, terse>
 ```
 
-The `(24h)` framing on Flows/Rebal/Fees is load-bearing: those three lines are
-the only ones with a sliding-window scope, and the rest (Health, Issues, Fixed,
-Suggestions) are current-state or session-scoped. Don't drop the labels.
+The Pulse line is a single-line heartbeat, NOT a place to expand — everything on
+it is already on the dashboard, so it stays one compact line and never grows into
+per-channel detail. Keep the `24h —` / `now —` split: the forwarding / rebalance /
+fee counts are sliding-window (24h); active-count, backup age and tests are
+current-state. The report's value lives in Issues / Suggestions below, not Pulse.
 
 If `Issues` is clean, render it as `✅ *Issues:* none` (drop the bullets).
 If `Fixed` is empty, render `🔧 *Fixed:* nothing`.
