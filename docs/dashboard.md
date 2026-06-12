@@ -20,32 +20,10 @@ address is set via `DASHBOARD_BIND_IP` in `.env` and defaults to `127.0.0.1`
 
 ## The cards
 
-**At-a-glance node health** — sync, channels, Bitcoin backend, watchtowers:
-
-![Node overview](screenshots/01-overview.png)
-
-**Total funds controlled + per-channel health** — balance bars, your/their
-fees, 30d revenue, rebalance cost, and net P/L per channel:
-
-![Balance and channel details](screenshots/02-balance-channels.png)
-
-**Sat Flow — where routed sats come from and go to** (in→out pairs by volume,
-plus inbound/outbound rankings; 30d / 7d / all-time selector):
-
-![Sat Flow card](screenshots/03-sat-flow.png)
-
-**Routing events + daily fee revenue:**
-
-![Routing events and daily revenue](screenshots/04-routing-revenue.png)
-
-**Rebalance history (auto + manual) + recent fee updates:**
-
-![Rebalance history and fee updates](screenshots/05-rebalance-fees.png)
-
-**Forwarding-failure lost-revenue watch** — dropped forwards split by cause,
-with estimated lost fees on empty channels (a rebalance signal):
-
-![Forwarding failures](screenshots/06-forwarding-failures.png)
+See the cards live in the demo dashboard: <https://www.lnbright.com/demo/>.
+Most cards are self-explanatory; for the ones that aren't (mostly the
+**Advanced** tab), read the dashboard tech-docs page:
+<https://www.lnbright.com/tech-docs/dashboard/>.
 
 ## Channel table
 

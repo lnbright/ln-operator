@@ -14,7 +14,7 @@ dashboard tour.
 - [Plan Command](plan-command.md) — tier-segmented peer ranking (centrality → diversity)
 
 ## Interface
-- [Dashboard](dashboard.md) — card-by-card tour with screenshots, Sat Flow drill-downs, and the watchtower health-badge logic
+- [Dashboard](dashboard.md) — card-by-card tour ([live demo](https://www.lnbright.com/demo/)), Sat Flow drill-downs, and the watchtower health-badge logic
 
 ## Operations
 - [Daily Check](daily-check.md) — the optional, off-by-default AI health-check agent
