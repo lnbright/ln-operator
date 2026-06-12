@@ -1676,10 +1676,10 @@ TEMPLATE = """
             <td>{{ "{:,}".format(r.amount_sats) }}</td>
             <td class="{% if r.success %}amount-negative{% else %}amount-muted{% endif %}">
               {% if r.success %}-{{ "{:,}".format(r.fee_paid_sats) }} <span style="color:var(--muted)">({{ r.fee_ppm | int }}ppm)</span>
-              {% elif r.budget_ppm %}<span style="color:var(--muted)" title="max-fee budget we tried with — nothing was paid (failed)">≤{{ r.budget_ppm | int }}ppm</span>
+              {% elif r.budget_ppm %}<span style="color:var(--muted)" title="{% if r.failure_reason == 'QR_NO_AFFORDABLE_ROUTE' %}affordable ceiling probed — no route within it, so the attempt was skipped (not tried){% else %}max-fee budget we tried with — nothing was paid (failed){% endif %}">≤{{ r.budget_ppm | int }}ppm</span>
               {% else %}—{% endif %}
             </td>
-            <td>{% if r.success %}<span class="badge badge-green">✓</span>{% else %}<span class="badge badge-red" title="{{ r.failure_reason }}">✗</span>{% endif %}</td>
+            <td>{% if r.success %}<span class="badge badge-green">✓</span>{% elif r.failure_reason == 'QR_NO_AFFORDABLE_ROUTE' %}<span class="badge badge-muted" title="B8 early-out — a QueryRoutes dry-run found no route within the affordable ceiling, so no payment was attempted. Recorded to advance the structural/stranded ladder.">skipped</span>{% else %}<span class="badge badge-red" title="{{ r.failure_reason }}">✗</span>{% endif %}</td>
             <td>{% if r.triggered_by == 'manual' %}<span class="badge badge-blue">manual</span>{% else %}<span class="badge badge-muted">auto</span>{% endif %}</td>
           </tr>
           {% endfor %}
