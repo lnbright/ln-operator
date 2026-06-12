@@ -24,15 +24,38 @@ Each run inspects the SQLite DB and live LND state and produces an exec summary:
   `make test`, and commit/push; it reverts instead of pushing if tests fail.
 
 Delivery is owned by the cron wrapper, which appends the run's cost/duration and
-sends the Telegram message. A typical run is ~5–7 min and ~$1.50–2.00, capped at
-`--max-budget-usd 5`.
+sends the Telegram message. A typical run is ~5–7 min and ~$1.50–2.00, capped by
+`--max-budget-usd` (default $5; see Customization).
 
 ## Requirements
 
-- The `claude` CLI at `/usr/bin/claude` (the wrapper hardcodes this path).
-- The wrapper pins a model (`--model …`) — change it in `scripts/daily-check.sh`
-  if needed.
+- The `claude` CLI on `PATH` (override the binary with `CLAUDE_BIN`).
 - Telegram configured (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`) for delivery.
+
+## Customization
+
+Everything is set by environment variable — no need to edit the script. The
+wrapper reads each with a default, so set only what you want to change (in the
+cron line or environment):
+
+| Env var | Default | What it controls |
+|---|---|---|
+| `LN_OPERATOR_ENABLE_AI_DAILY_CHECK` | `0` (off) | Opt-in gate. Must be `1` or the script logs `disabled` and exits 0. |
+| `DAILY_CHECK_MODEL` | `claude-opus-4-7` | Which model runs the agent. Set to any current model id (e.g. a newer Opus) to trade cost/speed for capability. |
+| `DAILY_CHECK_MAX_BUDGET_USD` | `5` | Hard cap on API spend **per run**, in USD. Insurance against a runaway loop; a normal run is <$2. Lower it to be thrifty, raise it if you expand the prompt. |
+| `DAILY_CHECK_LND_MACAROON` | (unset → falls back to `.env` `LND_MACAROON`) | Path to the macaroon the agent uses. **Point this at a read-only macaroon** so it can't move funds (see below). |
+| `CLAUDE_BIN` | `claude` (resolved on `PATH`) | Path/name of the Claude CLI binary. |
+| `LN_OPERATOR_REPO` | derived from the script's location | Repo root (cwd for the run). |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | (from `.env`) | Telegram delivery target. Unset → no message sent (file + stdout still written). |
+
+The agent's **behaviour** (what it inspects, reconciles, fixes, and how the
+summary is formatted) is the prompt itself — edit
+`scripts/daily-check-prompt.md` to change scope. The model/budget actually used
+are echoed into `logs/daily-check.log` at the top of each run.
+
+> The wrapper still passes `--dangerously-skip-permissions`, so the agent can
+> edit code and `git push` unattended. The macaroon governs **fund** access, not
+> code access — keep it read-only and review the prompt before enabling.
 
 ## Enabling it
 
@@ -55,6 +78,16 @@ lncli bakemacaroon \
 # Daily at 09:00 — opt-in flag + read-only macaroon
 0 9 * * * LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1 \
   DAILY_CHECK_LND_MACAROON=/home/youruser/.lnd-macaroons/ln-operator-readonly.macaroon \
+  /path/to/ln-operator/scripts/daily-check.sh
+```
+
+Same line with a cheaper $3 cap and a specific model (any knob from the table
+above can be prepended the same way):
+
+```cron
+0 9 * * * LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1 \
+  DAILY_CHECK_LND_MACAROON=/home/youruser/.lnd-macaroons/ln-operator-readonly.macaroon \
+  DAILY_CHECK_MAX_BUDGET_USD=3 DAILY_CHECK_MODEL=claude-opus-4-7 \
   /path/to/ln-operator/scripts/daily-check.sh
 ```
 

@@ -355,8 +355,10 @@ LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1
 If you enable it, give it a **read-only** macaroon so it cannot move funds
 even though the prompt instructs it to stay read-only — bake one with only
 `info:read offchain:read onchain:read peers:read invoices:read` and point the
-script at it via `DAILY_CHECK_LND_MACAROON`. Also note it needs the `claude`
-CLI at `/usr/bin/claude` and pins a specific model. Review
+script at it via `DAILY_CHECK_LND_MACAROON`. It needs the `claude` CLI on `PATH`
+(override with `CLAUDE_BIN`); the model and per-run spend cap are env-overridable
+(`DAILY_CHECK_MODEL`, `DAILY_CHECK_MAX_BUDGET_USD`) — see
+[docs/daily-check.md](docs/daily-check.md#customization) for all knobs. Review
 `scripts/daily-check-prompt.md` (which authorizes the auto-commit/push) before
 turning it on.
 

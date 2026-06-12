@@ -312,8 +312,10 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 
 -- ─── Channel maturity tracking ──────────────────────────────────
--- Tracks how much time each channel has spent in a balanced state,
--- so the rebalance budget can distinguish "unproven" from "proven unprofitable".
+-- Tracks how much time each channel has spent in a balanced state. This is now
+-- a dashboard-only stat ("balanced N days"); it no longer feeds the rebalance
+-- budget, which judges profitability live from earned_ppm (judged/unjudged) +
+-- last_refill_ppm + failure escalation. No PROVEN/maturity tiering remains.
 CREATE TABLE IF NOT EXISTS channel_maturity (
     chan_id          TEXT PRIMARY KEY,
     first_seen       INTEGER NOT NULL DEFAULT (strftime('%s','now')),

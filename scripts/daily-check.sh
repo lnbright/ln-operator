@@ -13,6 +13,9 @@ REPO="${LN_OPERATOR_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 LOG=$REPO/logs/daily-check.log
 PROMPT=$REPO/scripts/daily-check-prompt.md
 CLAUDE="${CLAUDE_BIN:-claude}"  # resolved on PATH; override with CLAUDE_BIN
+# Model + per-run spend cap are env-overridable (see docs/daily-check.md).
+MODEL="${DAILY_CHECK_MODEL:-claude-opus-4-7}"
+MAX_BUDGET_USD="${DAILY_CHECK_MAX_BUDGET_USD:-5}"
 SUMMARY=/tmp/daily-check-summary.txt
 JSON=/tmp/daily-check-result.json
 
@@ -51,15 +54,18 @@ rm -f "$SUMMARY" "$JSON"
 
 echo >> "$LOG"
 echo "===== daily-check started $(ts) =====" >> "$LOG"
+echo "model=$MODEL max-budget-usd=$MAX_BUDGET_USD" >> "$LOG"
 
-# --max-budget-usd 5 caps API spend per run (insurance against a runaway
-# loop from a bad prompt change). Typical run is <$2.
+# --max-budget-usd caps API spend per run (insurance against a runaway loop
+# from a bad prompt change). Typical run is <$2; default cap $5, override with
+# DAILY_CHECK_MAX_BUDGET_USD. Model defaults to claude-opus-4-7, override with
+# DAILY_CHECK_MODEL.
 # --output-format json gives us total_cost_usd / duration_ms / usage so we
 # can log and report actual spend. JSON goes to $JSON; stderr to the log.
 "$CLAUDE" -p "$(cat "$PROMPT")" \
   --dangerously-skip-permissions \
-  --model claude-opus-4-7 \
-  --max-budget-usd 5 \
+  --model "$MODEL" \
+  --max-budget-usd "$MAX_BUDGET_USD" \
   --output-format json \
   >"$JSON" 2>>"$LOG"
 rc=$?
