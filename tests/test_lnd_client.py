@@ -103,6 +103,29 @@ class QueryRoutesTests(unittest.TestCase):
 
     @patch("lnd_client._headers", return_value={})
     @patch("lnd_client.requests.get")
+    def test_raise_on_error_reraises_transport_failure(self, mget, _h):
+        mget.side_effect = lnd_client.requests.RequestException("conn refused")
+        with self.assertRaises(lnd_client.requests.RequestException):
+            lnd_client.query_routes(PUB, 1000, raise_on_error=True)
+
+    @patch("lnd_client._headers", return_value={})
+    @patch("lnd_client.requests.get")
+    def test_raise_on_error_raises_on_unexpected_status(self, mget, _h):
+        mget.return_value = _resp(status_code=500, payload={"message": "boom"})
+        with self.assertRaises(RuntimeError):
+            lnd_client.query_routes(PUB, 1000, raise_on_error=True)
+
+    @patch("lnd_client._headers", return_value={})
+    @patch("lnd_client.requests.get")
+    def test_raise_on_error_still_returns_none_for_genuine_no_route(self, mget, _h):
+        # A confirmed no-route must stay a clean None even with raise_on_error —
+        # that's the answer "you can't route", not a fault.
+        mget.return_value = _resp(status_code=404,
+                                  payload={"message": "unable to find a path to destination"})
+        self.assertIsNone(lnd_client.query_routes(PUB, 1000, raise_on_error=True))
+
+    @patch("lnd_client._headers", return_value={})
+    @patch("lnd_client.requests.get")
     def test_omits_unset_constraints(self, mget, _h):
         mget.return_value = _resp(payload={"routes": []})
         lnd_client.query_routes(PUB, 1000)

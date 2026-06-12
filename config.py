@@ -160,6 +160,19 @@ REBALANCE_STRUCTURAL_FAIL_THRESHOLD= 5          # consecutive fails while profit
 # counter or last_refill anchor. Set False to disable (one-line kill switch).
 REBALANCE_QUERYROUTES_ENABLED      = True
 
+# B8 v2 — QueryRoutes infeasibility early-out. When True, the planner probes a
+# JUDGED depleted target at the minimum chunk (smallest amount = strictly easiest
+# to route) capped at its affordable ceiling; if NO route exists, refilling is a
+# capital problem, not price discovery, so it skips the wasted attempt AND records
+# a synthetic failed cycle (failure_reason QR_NO_AFFORDABLE_ROUTE) so the failure
+# count still climbs to the structural threshold and surfaces the capital decision.
+# Safety: judged-only (unjudged keep discovering via real attempts); a probe that
+# is UNAVAILABLE (LND down) raises and never strands — only a definite no-route
+# does; never records on a dry-run preview. Set False to disable independently of
+# the v1 acceleration above.
+REBALANCE_QUERYROUTES_EARLYOUT_ENABLED = True
+REBALANCE_QUERYROUTES_MIN_CHUNK_SATS   = 100_000  # feasibility-probe size (chunk floor)
+
 # What counts as "balanced" for status reporting (no longer gates budget tiers)
 REBALANCE_BALANCED_RATIO = 0.30      # local must be above 30%...
 REBALANCE_BALANCED_RATIO_HIGH = 0.70 # ...and below 70% for time to count
@@ -237,7 +250,8 @@ _KNOB_NAMES = (
     "EARNED_PPM_WINDOW_DAYS", "EARNED_PPM_MIN_VOLUME_SATS",
     "EARNED_PPM_MAX_LOOKBACK_DAYS",
     "REBALANCE_PROFIT_HORIZON", "REBALANCE_STRUCTURAL_FAIL_THRESHOLD",
-    "REBALANCE_QUERYROUTES_ENABLED",
+    "REBALANCE_QUERYROUTES_ENABLED", "REBALANCE_QUERYROUTES_EARLYOUT_ENABLED",
+    "REBALANCE_QUERYROUTES_MIN_CHUNK_SATS",
     # inbound fees / ladder
     "INBOUND_FEE_ENABLED", "INBOUND_DISCOUNT_MAX_PPM",
     "INBOUND_DISCOUNT_CLEAR_RATIO", "INBOUND_DISCOUNT_SAFETY_MARGIN_PPM",

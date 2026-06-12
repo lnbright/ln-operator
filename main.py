@@ -537,7 +537,7 @@ def cmd_rebalance_channels(args):
             print(f"Error: --force target must be between 0.0 and 1.0 (got {force})")
             sys.exit(1)
         log.info("rebalance_channels: force mode — ignoring thresholds, targeting %.0f%% on all channels", force * 100)
-    plans, reason = engine.plan_rebalances(force=force)
+    plans, reason = engine.plan_rebalances(force=force, record_early_outs=not args.dry_run)
 
     if not plans:
         log.info("rebalance_channels: %s", reason)
@@ -772,7 +772,7 @@ def cmd_run(args):
     # (and thus last_refill_ppm) before fees are computed, so Step 2 prices every
     # refilled channel off the cost it ACTUALLY paid this run, not last run's anchor.
     print("\n── Step 1: Rebalance Channels ──")
-    plans, reason = engine.plan_rebalances()
+    plans, reason = engine.plan_rebalances(record_early_outs=not args.dry_run)
     rebalance_results = []
     if not plans:
         print(f"  {reason}")

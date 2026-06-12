@@ -242,7 +242,7 @@ def describe_graph(include_unannounced=False):
 
 def query_routes(pub_key, amt_sat, fee_limit_sat=None, source_pubkey=None,
                  outgoing_chan_id=None, last_hop_pubkey=None,
-                 use_mission_control=True, timeout=30):
+                 use_mission_control=True, timeout=30, raise_on_error=False):
     """Dry-run LND's pathfinder (QueryRoutes) — find a route WITHOUT paying.
 
     This is the SAME pathfinder SendPaymentV2 uses, mission-control liquidity
@@ -269,6 +269,13 @@ def query_routes(pub_key, amt_sat, fee_limit_sat=None, source_pubkey=None,
     Note fee_ppm is amount-dependent — a base fee amortised over a small chunk
     reads higher ppm than the same route at a large amount; callers doing a
     min-chunk feasibility probe should read it as routability, not price.
+
+    raise_on_error: by default every failure mode collapses to None (the
+    acceleration path treats "no route" and "couldn't ask" the same — don't jump).
+    The infeasibility early-out must NOT conflate them (a transport blip would
+    strand a channel), so with raise_on_error=True a genuine no-route still returns
+    None but a transport/unexpected error RAISES — the caller can then distinguish
+    "confirmed no affordable route" from "probe unavailable".
     """
     import base64
     params = {"use_mission_control": str(use_mission_control).lower()}
@@ -291,6 +298,8 @@ def query_routes(pub_key, amt_sat, fee_limit_sat=None, source_pubkey=None,
                          params=params, timeout=timeout)
     except requests.RequestException as e:
         log.debug("query_routes request failed: %s", e)
+        if raise_on_error:
+            raise
         return None
 
     if r.status_code != 200:
@@ -307,6 +316,8 @@ def query_routes(pub_key, amt_sat, fee_limit_sat=None, source_pubkey=None,
             log.debug("query_routes: no route to %s for %d sat", pub_key[:12], int(amt_sat))
         else:
             log.warning("query_routes failed (%d): %s", r.status_code, (body or "")[:200])
+            if raise_on_error:
+                raise RuntimeError(f"query_routes failed ({r.status_code})")
         return None
 
     data = r.json()

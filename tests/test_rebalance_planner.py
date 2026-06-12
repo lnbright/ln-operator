@@ -38,10 +38,11 @@ def _source(local_ratio=0.90, cap=5_000_000):
     }
 
 
-def _budget(max_fee_ppm=14, ceiling=721):
+def _budget(max_fee_ppm=14, ceiling=721, earned_ppm=576):
     return {
         "max_fee_ppm": max_fee_ppm,
         "affordable_ceiling_ppm": ceiling,
+        "earned_ppm": earned_ppm,
         "reason": f"last_refill 7 ppm → {max_fee_ppm} ppm",
     }
 
@@ -115,6 +116,80 @@ class AccelerateBudgetTests(unittest.TestCase):
         self.assertEqual(args[1], 2_000_000)          # probe amount = min(deficit, surplus)
         self.assertEqual(kwargs["fee_limit_sat"], 1442)
         self.assertEqual(kwargs["outgoing_chan_id"], "222")
+
+
+class EarlyOutTests(unittest.TestCase):
+    @patch("engine.rebalance_planner.db.save_rebalance_attempt")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_no_route_records_and_skips(self, mqr, msave):
+        mqr.return_value = None  # confirmed no affordable route
+        skip = rp._queryroutes_early_out(_target(), _budget(), _source(), 999, record=True)
+        self.assertTrue(skip)
+        msave.assert_called_once()
+        # synthetic row: the depleted channel, a failure, distinctive reason, run_id
+        _, kw = msave.call_args
+        self.assertEqual(kw["success"], False)
+        self.assertEqual(kw["failure_reason"], "QR_NO_AFFORDABLE_ROUTE")
+        self.assertEqual(kw["run_id"], 999)
+
+    @patch("engine.rebalance_planner.db.save_rebalance_attempt")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_dry_run_skips_without_recording(self, mqr, msave):
+        mqr.return_value = None
+        skip = rp._queryroutes_early_out(_target(), _budget(), _source(), 999, record=False)
+        self.assertTrue(skip)
+        msave.assert_not_called()
+
+    @patch("engine.rebalance_planner.db.save_rebalance_attempt")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_affordable_route_does_not_skip(self, mqr, msave):
+        mqr.return_value = {"fee_ppm": 300, "hops": 3}  # a route exists ≤ ceiling
+        skip = rp._queryroutes_early_out(_target(), _budget(), _source(), 999, record=True)
+        self.assertFalse(skip)
+        msave.assert_not_called()
+
+    @patch("engine.rebalance_planner.db.save_rebalance_attempt")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_unjudged_never_early_outs(self, mqr, msave):
+        # earned_ppm None → keep full price discovery via real attempts; no probe.
+        skip = rp._queryroutes_early_out(_target(), _budget(earned_ppm=None), _source(), 999, True)
+        self.assertFalse(skip)
+        mqr.assert_not_called()
+        msave.assert_not_called()
+
+    @patch("engine.rebalance_planner.db.save_rebalance_attempt")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_probe_unavailable_never_strands(self, mqr, msave):
+        # A transport blip (raise) must NOT strand — fall through to normal attempt.
+        mqr.side_effect = RuntimeError("LND down")
+        skip = rp._queryroutes_early_out(_target(), _budget(), _source(), 999, record=True)
+        self.assertFalse(skip)
+        msave.assert_not_called()
+
+    @patch("engine.rebalance_planner.REBALANCE_QUERYROUTES_EARLYOUT_ENABLED", False)
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_disabled_flag_skips_probe(self, mqr):
+        skip = rp._queryroutes_early_out(_target(), _budget(), _source(), 999, record=True)
+        self.assertFalse(skip)
+        mqr.assert_not_called()
+
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_no_source_does_not_early_out(self, mqr):
+        skip = rp._queryroutes_early_out(_target(), _budget(), None, 999, record=True)
+        self.assertFalse(skip)
+        mqr.assert_not_called()
+
+    @patch("engine.rebalance_planner.db.save_rebalance_attempt")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_probes_min_chunk_at_ceiling(self, mqr, _msave):
+        mqr.return_value = None
+        rp._queryroutes_early_out(_target(), _budget(ceiling=721), _source(), 999, record=False)
+        args, kw = mqr.call_args
+        self.assertEqual(args[0], "ab" * 33)                 # dest = target peer
+        self.assertEqual(args[1], 100_000)                   # min-chunk probe size
+        self.assertEqual(kw["fee_limit_sat"], 72)            # 100k × 721 ppm / 1e6
+        self.assertEqual(kw["outgoing_chan_id"], "222")
+        self.assertTrue(kw["raise_on_error"])                # must distinguish no-route
 
 
 class AffordableCeilingTests(unittest.TestCase):

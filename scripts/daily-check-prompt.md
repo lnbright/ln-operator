@@ -76,7 +76,12 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
   out vs Ym in over 24h (pure sink), down from Zm 30d-avg" is the kind of line
   that should feed Diagnose and Suggestions, not just sit in a flows total.
 - **rebalance_log** — successes/failures, fees paid, per-channel breakdown,
-  cost ppm distribution. Note any channel with repeated failures.
+  cost ppm distribution. Note any channel with repeated failures. NOTE rows with
+  `failure_reason='QR_NO_AFFORDABLE_ROUTE'` are NOT real attempts — they're B8 v2
+  early-outs (a QueryRoutes dry-run found no route ≤ the affordable ceiling, so the
+  attempt was skipped and a synthetic failed cycle recorded to advance stranding).
+  fee_paid is 0. Count them toward the structural/capital story, not as wasted
+  routing attempts or lost fees.
 - **fee_updates** — broadcasts: how many, ppm deltas, reasons (sigmoid /
   floor / market mult / pin)
 - **alerts** — anything fired in the last 24h

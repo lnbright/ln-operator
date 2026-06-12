@@ -109,6 +109,12 @@
     value — so the accelerator can never spuriously strand the channel it rescues
     (accelerator-firing and `profit_capped` are mutually exclusive). Inert unless
     `earned×horizon > 2×anchor`; self-limiting (first success re-anchors).
+    **Relationship to B8 (below): the earn-ceiling accelerator is now B8's BLIND
+    FALLBACK** — B8 reads the real clearing price via QueryRoutes and is the
+    informed primary; this accelerator is the QueryRoutes-independent climb that
+    still escapes a poisoned anchor when B8 can't read a price (probe off/unavailable,
+    or a chunked refill B8 v1 doesn't probe). Both only raise toward the same
+    ceiling via `max()`, so the higher of (blind climb, informed price) wins.
   - **B8 — QueryRoutes budget acceleration** (`REBALANCE_QUERYROUTES_ENABLED`,
     `_accelerate_budget_with_queryroutes` in `rebalance_planner.py`): the escalation
     ladder discovers the clearing price by FAILING over several runs; a
@@ -126,10 +132,27 @@
     (`get_channel_rebalance_budget` stays call-free — fees/monitor call it per
     channel every run); any probe error/None leaves the budget untouched, so a flaky
     probe can't break planning or change spend. Inert when profit-capped/structural
-    (already at ceiling → no headroom → no probe). The case-3/4 *early-out* (skip an
-    infeasible attempt + drive structural flagging off the QueryRoutes verdict
-    instead of the failure count) is deliberately NOT here yet — it must substitute
-    for the failure-count-driven stranding, a separate design.
+    (already at ceiling → no headroom → no probe).
+  - **B8 v2 — QueryRoutes infeasibility early-out** (`REBALANCE_QUERYROUTES_EARLYOUT_ENABLED`,
+    `_queryroutes_early_out` in `rebalance_planner.py`): the other half of B8. In the
+    planner's gate-drop loop, a JUDGED depleted target the ladder says to rebalance is
+    probed at the MINIMUM chunk (`REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`, smallest amount
+    = strictly easiest to route) capped at its affordable ceiling. If no route exists,
+    refilling is a capital problem not price discovery, so the channel is dropped from
+    planning (skip the wasted attempt) AND — only on a real run, never a dry-run — a
+    synthetic failed cycle is recorded (`save_rebalance_attempt` with
+    `failure_reason='QR_NO_AFFORDABLE_ROUTE'`, fee 0, its own `run_id`). That row
+    advances `count_failures_since_last_success` exactly like a real failed cycle, so
+    the structural ladder still reaches the threshold and surfaces the capital decision
+    — **the early-out replaces the wasted attempts, NOT the stranding they would
+    eventually trigger** (the trap avoided: silently skipping would leave the channel in
+    limbo, never flagged). Safety rails: JUDGED-only (unjudged keep price discovery via
+    real attempts — `earned_ppm is None` → no probe); the probe uses
+    `query_routes(raise_on_error=True)` so a route ABOVE the ceiling reads as
+    no-affordable-route (case 3, correct) while a probe that's UNAVAILABLE (LND
+    down/transient) RAISES → we do NOT early-out, so a transport blip can never strand a
+    channel; `force` bypasses it (operator override). Min-chunk probing also covers the
+    chunked-refill case B8 v1's full-size probe misses.
   - **Layer 2 — soft outbound floor + raised ceiling** (`compute_fee_target`):
     `SIGMOID_MAX_PPM` is 750 (was 250) so a draining channel can defend with price.
     The `last_refill × REBALANCE_FEE_MARGIN` floor is HARD while forwarding but

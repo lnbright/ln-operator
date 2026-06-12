@@ -18,7 +18,8 @@ from config import (
     REBALANCE_DEFAULT_BUDGET_PPM, REBALANCE_MAX_BUDGET_PPM,
     REBALANCE_BUDGET_ESCALATION_STEP,
     REBALANCE_PROFIT_HORIZON, REBALANCE_STRUCTURAL_FAIL_THRESHOLD,
-    REBALANCE_QUERYROUTES_ENABLED,
+    REBALANCE_QUERYROUTES_ENABLED, REBALANCE_QUERYROUTES_EARLYOUT_ENABLED,
+    REBALANCE_QUERYROUTES_MIN_CHUNK_SATS,
 )
 import time
 
@@ -215,6 +216,65 @@ def _accelerate_budget_with_queryroutes(budget, target_ch, needs_outbound):
     return jumped
 
 
+def _queryroutes_early_out(target_ch, budget, source, run_id, record):
+    """B8 v2: skip a confirmed-infeasible refill this run (case 3/4).
+
+    The bid accelerator (B8 v1) speeds up an AFFORDABLE refill. This is the other
+    half: when even the most generous probe — the minimum chunk (smallest amount,
+    so strictly the easiest to route) at the affordable ceiling — finds NO route,
+    refilling this channel isn't price discovery, it's a capital problem. We skip
+    the wasted attempt AND (on a real run) record a synthetic failed cycle so
+    count_failures_since_last_success still climbs to the structural threshold and
+    surfaces the capital decision — the early-out replaces the wasted attempts, not
+    the stranding they would eventually trigger.
+
+    Conservative by construction:
+      - JUDGED channels only — an unjudged channel keeps full price discovery via
+        real attempts (we don't yet know its economics).
+      - probe pinned to the affordable ceiling — a route ABOVE the ceiling reads as
+        no-affordable-route (correct: case 3 is also a capital decision).
+      - probe UNAVAILABLE (LND down/transient) RAISES → we DON'T early-out, so a
+        transport blip can never strand a channel.
+      - records only on a real run (`record`), never on a dry-run preview.
+    Returns True to skip the channel, False to plan it normally.
+    """
+    if not REBALANCE_QUERYROUTES_EARLYOUT_ENABLED or source is None:
+        return False
+    if budget.get("earned_ppm") is None:        # unjudged → keep discovering
+        return False
+    ceiling = budget.get("affordable_ceiling_ppm")
+    if not ceiling:
+        return False
+
+    amount = REBALANCE_QUERYROUTES_MIN_CHUNK_SATS
+    ceiling_sats = max(1, int(amount * ceiling / 1_000_000))
+    try:
+        probe = lnd_client.query_routes(
+            target_ch["peer_pubkey"], amount,
+            fee_limit_sat=ceiling_sats,
+            outgoing_chan_id=source["chan_id"],
+            raise_on_error=True,
+        )
+    except Exception as e:                       # probe unavailable → never strand
+        log.debug("early-out probe unavailable for %s: %s", target_ch["peer_alias"], e)
+        return False
+    if probe is not None:                        # an affordable route exists
+        return False
+
+    log.info("rebalance: early-out %s — QueryRoutes finds no route ≤ %d ppm ceiling "
+             "at min-chunk; skipping attempt%s", target_ch["peer_alias"], ceiling,
+             ", recording infeasible cycle" if record else " (dry-run, not recorded)")
+    if record:
+        db.save_rebalance_attempt(
+            source["chan_id"], target_ch["chan_id"],
+            source["peer_alias"], target_ch["peer_alias"],
+            amount=amount, fee_paid=0, success=False,
+            failure_reason="QR_NO_AFFORDABLE_ROUTE",
+            budget_ppm=ceiling, run_id=run_id, triggered_by="auto",
+        )
+    return True
+
+
 def find_rebalance_candidates(channels=None, force=None):
     """Identify channels that need rebalancing.
 
@@ -280,7 +340,7 @@ def calculate_rebalance_amount(channel, direction="inbound", target_ratio=None):
     return amount
 
 
-def plan_rebalances(channels=None, force=None):
+def plan_rebalances(channels=None, force=None, record_early_outs=False):
     """Create a rebalancing plan with primary and fallback pairs.
 
     Generates ALL possible source→target pairs, ordered by priority.
@@ -313,16 +373,24 @@ def plan_rebalances(channels=None, force=None):
     if force is None and needs_inbound:
         now = int(time.time())
         has_source = bool(needs_outbound)
+        primary_source = needs_outbound[0] if needs_outbound else None
+        early_out_run_id = int(time.time())  # one cycle id for this run's early-outs
         kept = []
         for ch in needs_inbound:
             budget = get_channel_rebalance_budget(ch["chan_id"])
             signals = db.get_channel_signals(ch["chan_id"])
             act = decide_channel_action(ch, signals, budget, 0, has_source, now)
-            if act["action"] == "rebalance":
-                kept.append(ch)
-            else:
+            if act["action"] != "rebalance":
                 log.info("rebalance: skipping %s (%.0f%% local) — %s",
                          ch["peer_alias"], ch["local_ratio"] * 100, act["reason"])
+                continue
+            # B8 v2: the ladder says rebalance, but if QueryRoutes confirms no
+            # affordable route exists this run, skip the wasted attempt and record
+            # a synthetic failed cycle so the structural ladder still advances.
+            if _queryroutes_early_out(ch, budget, primary_source,
+                                      early_out_run_id, record_early_outs):
+                continue
+            kept.append(ch)
         needs_inbound = kept
 
     log.info("rebalance: %d depleted, %d overfull channel(s) found",
