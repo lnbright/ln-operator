@@ -34,14 +34,28 @@ do and a human won't:
 - **Grounded capital decisions** (§4) — for a channel rebalancing can't fix, a
   reasoned recommendation *with the numbers*, not a restatement of its state.
 
-**Don't repeat yourself across days.** The prior reports are in
-`logs/daily-check.log` — read the last few days BEFORE writing. A finding or
-suggestion you already made does NOT go in again unless its state *materially
-changed*: new dropped-demand, budget escalation, recovery, or a flip in the gate
-verdict. A channel stranded and unchanged for five days gets at most one
-"still stranded, unchanged since <date>" line — never a fresh paragraph
-re-deriving the same capital suggestion. Daily repetition trains the operator to
-ignore the report.
+**Don't repeat yourself across days — use the dedup store (B6), not your judgement.**
+A deterministic finding store decides what's new vs a repeat, so you never re-derive
+that from the log. As the LAST step before composing the summary, build the list of
+findings you'd report this run — each a dict `{"key","kind","entity","state","summary"}`
+where `key` is a STABLE id (e.g. `stranded:60289`, `conc:boltz`,
+`issue:htlc-monitor-gap`) and `state` is a short signature of the MATERIAL values
+(e.g. `earn=620;cap=776;drops=2.7m`) so a real change is detectable — then call ONCE:
+
+    from db import reconcile_findings
+    buckets = reconcile_findings(current_findings)   # persists + diffs; pure Python
+
+Report strictly from the buckets it returns:
+  - `new` → report in full (first time seen).
+  - `changed` → report the CHANGE only (carries `prev_state` + `first_seen`),
+    e.g. "bfx-lnd0 drops 2.7m→4.1m since 06-12".
+  - `unchanged` → SUPPRESS, or fold into ONE terse line
+    ("3 findings unchanged since <first_seen>: LNBiG/bfx/podcast stranded").
+  - `resolved` → one-time "✅ resolved: …" note (was open, now absent), then it's gone.
+Your only judgement is what counts as a finding and what its `state` should include;
+the dedup itself is the store's job. Call `reconcile_findings` exactly once, after
+you've decided every finding. Daily repetition trains the operator to ignore the
+report — this is how we stop it.
 
 **Terminology:** a channel the gate has stopped rebalancing (`structural=True` /
 `structural_flag_ts` set) is **STRANDED** in operator language — use that word in

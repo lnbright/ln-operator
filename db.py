@@ -368,6 +368,23 @@ CREATE TABLE IF NOT EXISTS channel_signals (
     inbound_fee_ppm               INTEGER NOT NULL DEFAULT 0,
     inbound_fee_set_ts            INTEGER NOT NULL DEFAULT 0
 );
+
+-- ─── Daily-check finding dedup (B6) ─────────────────────────────
+-- Deterministic memory for the daily-check agent so it reports a finding once,
+-- re-surfaces it only when it MATERIALLY changes, and notes it once when resolved
+-- — instead of re-deriving the same lines from the log every morning. `key` is a
+-- stable id the agent picks (e.g. 'stranded:60289'); `state` is a signature of the
+-- material values, so a state change means "report the change".
+CREATE TABLE IF NOT EXISTS daily_findings (
+    key         TEXT PRIMARY KEY,
+    kind        TEXT,                 -- category: 'stranded','inbound_concentration','issue',...
+    entity      TEXT,                 -- chan_id / peer / service the finding concerns
+    state       TEXT,                 -- signature of material values; change => re-surface
+    summary     TEXT,                 -- the one-liner last reported
+    first_seen  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    last_seen   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    status      TEXT NOT NULL DEFAULT 'open'   -- 'open' | 'resolved'
+);
 """
 
 
@@ -438,6 +455,79 @@ def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
         """, (source_chan, target_chan, source_alias, target_alias,
               amount, fee_paid, fee_ppm, int(success), failure_reason, duration,
               payment_hash, triggered_by, budget_ppm, run_id))
+
+
+def get_open_findings():
+    """All currently-open daily-check findings (B6), oldest first."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM daily_findings WHERE status='open' ORDER BY first_seen"
+        ).fetchall()]
+
+
+def reconcile_findings(current, now=None):
+    """Deterministic daily-report dedup (B6).
+
+    `current` is the list of findings the agent would report THIS run, each a dict
+    {"key", "kind", "entity", "state", "summary"}. `key` is a stable id the agent
+    picks (e.g. 'stranded:60289'); `state` is a signature of the material values, so
+    a change in `state` means the finding materially changed and should re-surface.
+
+    Diffs `current` against the stored OPEN findings, PERSISTS the new snapshot
+    (preserving each finding's original first_seen), and returns four buckets so the
+    agent reports only what's worth reporting — the dedup is pure Python, not agent
+    judgement:
+        new       — key never seen before → report in full
+        changed   — key seen but `state` differs → report the change (carries
+                    prev_state + first_seen)
+        unchanged — identical → suppress, or one terse "still … since <first_seen>"
+        resolved  — previously open, absent this run → one-time "resolved" note
+    """
+    now = now or int(time.time())
+    seen = {f["key"] for f in current}
+    out = {"new": [], "changed": [], "unchanged": [], "resolved": []}
+    with get_conn() as conn:
+        prior = {r["key"]: r for r in conn.execute(
+            "SELECT key, kind, entity, state, summary, first_seen "
+            "FROM daily_findings WHERE status='open'").fetchall()}
+
+        for f in current:
+            p = prior.get(f["key"])
+            if p is None:
+                # New to the OPEN set. A row may still exist in 'resolved' state
+                # (the finding went away and came back) — upsert reopens it as a
+                # fresh episode (first_seen reset to now), so it reports as new.
+                out["new"].append(dict(f, first_seen=now))
+                conn.execute(
+                    "INSERT INTO daily_findings "
+                    "(key, kind, entity, state, summary, first_seen, last_seen, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'open') "
+                    "ON CONFLICT(key) DO UPDATE SET "
+                    "  kind=excluded.kind, entity=excluded.entity, state=excluded.state, "
+                    "  summary=excluded.summary, first_seen=excluded.first_seen, "
+                    "  last_seen=excluded.last_seen, status='open'",
+                    (f["key"], f.get("kind"), f.get("entity"), f.get("state"),
+                     f.get("summary"), now, now))
+            elif (p["state"] or "") != (f.get("state") or ""):
+                out["changed"].append(dict(f, first_seen=p["first_seen"],
+                                           prev_state=p["state"]))
+                conn.execute(
+                    "UPDATE daily_findings SET kind=?, entity=?, state=?, summary=?, "
+                    "last_seen=? WHERE key=?",
+                    (f.get("kind"), f.get("entity"), f.get("state"),
+                     f.get("summary"), now, f["key"]))
+            else:
+                out["unchanged"].append(dict(f, first_seen=p["first_seen"]))
+                conn.execute("UPDATE daily_findings SET last_seen=? WHERE key=?",
+                             (now, f["key"]))
+
+        for key, p in prior.items():
+            if key not in seen:
+                out["resolved"].append(dict(p))
+                conn.execute(
+                    "UPDATE daily_findings SET status='resolved', last_seen=? WHERE key=?",
+                    (now, key))
+    return out
 
 
 def record_knob_snapshot(knobs: dict):

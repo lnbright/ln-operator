@@ -223,6 +223,13 @@
   (migrations added). run_id groups all plans executed in one pipeline run so
   failure counting is per-cycle, not per-attempt (see Layer-1 note above).
 - fee_overrides table: chan_id (PK), pinned_ppm, set_at, note — manual fee pins
+- daily_findings table (B6): key (PK), kind, entity, state, summary, first_seen,
+  last_seen, status — deterministic dedup memory for the daily-check agent so it
+  reports a finding once, re-surfaces only on a material `state` change, and notes
+  resolution once. `db.reconcile_findings(current)` diffs the agent's current-run
+  findings against the open set and returns new/changed/unchanged/resolved buckets
+  (persisting the snapshot); a resolved key that reappears reopens as a fresh
+  episode. Replaces the old "read the log and dedup by judgement" instruction.
 
 ## Services
 - Dashboard: systemd lnd-dashboard.service, port 4000. Unit file at services/lnd-dashboard.service.
