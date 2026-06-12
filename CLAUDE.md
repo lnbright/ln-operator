@@ -109,6 +109,27 @@
     value — so the accelerator can never spuriously strand the channel it rescues
     (accelerator-firing and `profit_capped` are mutually exclusive). Inert unless
     `earned×horizon > 2×anchor`; self-limiting (first success re-anchors).
+  - **B8 — QueryRoutes budget acceleration** (`REBALANCE_QUERYROUTES_ENABLED`,
+    `_accelerate_budget_with_queryroutes` in `rebalance_planner.py`): the escalation
+    ladder discovers the clearing price by FAILING over several runs; a
+    `lnd_client.query_routes` dry-run (no payment, same pathfinder + mission control
+    as `SendPaymentV2`) reads it directly. For each depleted target the planner
+    probes the primary pair (most-overfull source → target, pinned via
+    `outgoing_chan_id`, at the size it would attempt) capped at the affordable
+    ceiling (`affordable_ceiling_ppm` = `min(profit_cap, MAX)` judged / `MAX`
+    unjudged). If a route exists between the current escalated bid and the ceiling,
+    THIS run's `max_fee_ppm` jumps straight to that live cost — an affordable refill
+    lands now instead of after ~5 escalations (the bfx 14→721 grind). Conservative
+    by construction: only ever RAISES the bid (a max), never above the ceiling the
+    profit gate already permits (never overpays), never skips an attempt, never
+    writes a failure row or moves `last_refill`. Runs ONLY in the planner
+    (`get_channel_rebalance_budget` stays call-free — fees/monitor call it per
+    channel every run); any probe error/None leaves the budget untouched, so a flaky
+    probe can't break planning or change spend. Inert when profit-capped/structural
+    (already at ceiling → no headroom → no probe). The case-3/4 *early-out* (skip an
+    infeasible attempt + drive structural flagging off the QueryRoutes verdict
+    instead of the failure count) is deliberately NOT here yet — it must substitute
+    for the failure-count-driven stranding, a separate design.
   - **Layer 2 — soft outbound floor + raised ceiling** (`compute_fee_target`):
     `SIGMOID_MAX_PPM` is 750 (was 250) so a draining channel can defend with price.
     The `last_refill × REBALANCE_FEE_MARGIN` floor is HARD while forwarding but

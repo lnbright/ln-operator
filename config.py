@@ -150,6 +150,16 @@ REBALANCE_PROFIT_HORIZON           = 1.25       # judged budget cap = earned_ppm
                                                 # our older, lower outbound fees.
 REBALANCE_STRUCTURAL_FAIL_THRESHOLD= 5          # consecutive fails while profit-capped → flag structural
 
+# B8 — QueryRoutes-informed budget acceleration. When True, the planner runs a
+# QueryRoutes dry-run (no payment) for each depleted target's primary pair and,
+# if a route exists between the current escalated bid and the affordable ceiling,
+# raises THIS run's bid straight to that live route cost — so an affordable refill
+# lands now instead of grinding up the ×ESCALATION_STEP ladder over several runs.
+# It only ever RAISES the bid and only up TO the ceiling the profit gate already
+# permits (never overpays), never skips an attempt, and never touches the failure
+# counter or last_refill anchor. Set False to disable (one-line kill switch).
+REBALANCE_QUERYROUTES_ENABLED      = True
+
 # What counts as "balanced" for status reporting (no longer gates budget tiers)
 REBALANCE_BALANCED_RATIO = 0.30      # local must be above 30%...
 REBALANCE_BALANCED_RATIO_HIGH = 0.70 # ...and below 70% for time to count
@@ -227,6 +237,7 @@ _KNOB_NAMES = (
     "EARNED_PPM_WINDOW_DAYS", "EARNED_PPM_MIN_VOLUME_SATS",
     "EARNED_PPM_MAX_LOOKBACK_DAYS",
     "REBALANCE_PROFIT_HORIZON", "REBALANCE_STRUCTURAL_FAIL_THRESHOLD",
+    "REBALANCE_QUERYROUTES_ENABLED",
     # inbound fees / ladder
     "INBOUND_FEE_ENABLED", "INBOUND_DISCOUNT_MAX_PPM",
     "INBOUND_DISCOUNT_CLEAR_RATIO", "INBOUND_DISCOUNT_SAFETY_MARGIN_PPM",

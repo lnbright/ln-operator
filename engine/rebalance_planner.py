@@ -18,6 +18,7 @@ from config import (
     REBALANCE_DEFAULT_BUDGET_PPM, REBALANCE_MAX_BUDGET_PPM,
     REBALANCE_BUDGET_ESCALATION_STEP,
     REBALANCE_PROFIT_HORIZON, REBALANCE_STRUCTURAL_FAIL_THRESHOLD,
+    REBALANCE_QUERYROUTES_ENABLED,
 )
 import time
 
@@ -81,6 +82,12 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
     profit_cap = None
     if earned_ppm is not None:
         profit_cap = earned_ppm * REBALANCE_PROFIT_HORIZON
+
+    # The most this channel could ever justify paying: the profit cap for a judged
+    # channel, else the hard MAX. This is the headroom the escalation ladder climbs
+    # toward; B8's QueryRoutes acceleration may jump the bid up TO here but no further.
+    affordable_ceiling = (min(profit_cap, REBALANCE_MAX_BUDGET_PPM)
+                          if profit_cap is not None else REBALANCE_MAX_BUDGET_PPM)
 
     # Earn-ceiling accelerator: when a JUDGED channel's anchor sits well below
     # what it can profitably afford — e.g. one lucky-cheap refill poisoned
@@ -146,10 +153,66 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
         "earned_ppm": earned_ppm,
         "out_volume_sats": out_volume,
         "escalated_ppm": escalated,
+        "affordable_ceiling_ppm": int(round(affordable_ceiling)),
         "profit_capped": profit_capped,
         "structural": structural,
         "accelerated": accelerated,
     }
+
+
+def _accelerate_budget_with_queryroutes(budget, target_ch, needs_outbound):
+    """B8: raise the rebalance bid toward the live route cost, bounded by the ceiling.
+
+    The escalation ladder discovers price by FAILING over several runs (each adds
+    ESCALATION_STEP). A QueryRoutes dry-run reads the clearing price directly with
+    no payment, so an affordable refill can land THIS run instead of after N
+    escalations. We probe the primary pair (most-overfull source → this target) at
+    the size we'd actually attempt, capping the search at the affordable ceiling.
+
+    Conservative by construction: only ever RAISES the bid (a max), never above the
+    ceiling the profit gate already permits, never skips an attempt, never writes a
+    failure row or moves last_refill. Returns `budget` unchanged when disabled, when
+    there's no headroom (already at the ceiling), when there's no source, or when the
+    probe finds no affordable route / errors — so a flaky probe can never break
+    planning or change spend.
+    """
+    if not REBALANCE_QUERYROUTES_ENABLED or not needs_outbound:
+        return budget
+    current = budget["max_fee_ppm"]
+    ceiling = budget.get("affordable_ceiling_ppm")
+    if not ceiling or current >= ceiling:
+        return budget  # fully escalated / profit-capped → no room to accelerate
+
+    source = needs_outbound[0]  # most overfull — the primary pair
+    deficit = calculate_rebalance_amount(target_ch, "inbound")
+    surplus = calculate_rebalance_amount(source, "outbound")
+    amount = min(deficit, surplus)
+    if amount <= 0:
+        return budget
+
+    ceiling_sats = max(1, int(amount * ceiling / 1_000_000))
+    try:
+        probe = lnd_client.query_routes(
+            target_ch["peer_pubkey"], amount,
+            fee_limit_sat=ceiling_sats,
+            outgoing_chan_id=source["chan_id"],
+        )
+    except Exception as e:  # a probe must NEVER break planning
+        log.debug("queryroutes probe failed for %s: %s", target_ch["peer_alias"], e)
+        return budget
+    if not probe:
+        return budget  # no route within the ceiling (or probe unavailable)
+
+    c = probe["fee_ppm"]
+    if c <= current or c > ceiling:
+        return budget  # already affordable at current bid (case 1), or rounding noise
+
+    jumped = dict(budget)
+    jumped["max_fee_ppm"] = c
+    jumped["reason"] = budget["reason"] + f" → QueryRoutes raised to {c} ppm (live route ≤ ceiling)"
+    log.info("rebalance: %s bid accelerated %d→%d ppm via QueryRoutes (ceiling %d, %d hops)",
+             target_ch["peer_alias"], current, c, ceiling, probe["hops"])
+    return jumped
 
 
 def find_rebalance_candidates(channels=None, force=None):
@@ -279,6 +342,17 @@ def plan_rebalances(channels=None, force=None):
         return [], (f"{len(needs_inbound)} channel(s) depleted ({depleted}) but no overfull "
                     f"channel to rebalance from — need more channels or top up on-chain")
 
+    # Precompute each surviving target's budget ONCE here (not per source pair),
+    # applying the B8 QueryRoutes acceleration. This is the only place QueryRoutes
+    # runs — get_channel_rebalance_budget itself stays call-free (fees/monitor
+    # invoke it for every channel every run; live probes belong only on the plan
+    # path). Both the primary and fallback loops read these cached budgets.
+    target_budgets = {}
+    for target_ch in needs_inbound:
+        b = get_channel_rebalance_budget(target_ch["chan_id"])
+        target_budgets[target_ch["chan_id"]] = _accelerate_budget_with_queryroutes(
+            b, target_ch, needs_outbound)
+
     # Generate ALL possible source→target pairs, ordered by priority:
     # most depleted targets first, each paired with all available sources.
     # The executor tries pairs in order — if one fails, the next pair is tried.
@@ -291,7 +365,7 @@ def plan_rebalances(channels=None, force=None):
         if target_amount <= 0:
             continue
 
-        budget = get_channel_rebalance_budget(target_ch["chan_id"])
+        budget = target_budgets[target_ch["chan_id"]]
         max_fee_ppm = budget["max_fee_ppm"]
 
         # Try ALL sources for this target — a single source may not have
@@ -347,7 +421,7 @@ def plan_rebalances(channels=None, force=None):
         target_amount = calculate_rebalance_amount(target_ch, "inbound")
         if target_amount <= 0:
             continue
-        budget = get_channel_rebalance_budget(target_ch["chan_id"])
+        budget = target_budgets[target_ch["chan_id"]]
         max_fee_ppm = budget["max_fee_ppm"]
 
         for source_ch in needs_outbound:
