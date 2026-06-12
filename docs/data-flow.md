@@ -14,13 +14,29 @@ LND SubscribeHtlcEvents → htlc_monitor → forward_fail_log (SQLite)
   └─ Daily check: capital suggestions for structural channels
 
 LND /v1/payments → sync_rebalances → rebalance_log (SQLite)
-  ├─ Dashboard: rebalance history (auto + manual)
+  ├─ Dashboard: rebalance history (auto + manual; QR_NO_AFFORDABLE_ROUTE = skipped)
   ├─ Dashboard: per-channel rebal cost, net 30d, net lifetime
   ├─ Rebalance-failing alert
   ├─ Rebalance budget: last_refill_ppm + failure escalation, capped by the
   │   profitability gate (earned_ppm × REBALANCE_PROFIT_HORIZON for judged channels)
   └─ Outbound fee floor: soft ratchet of last_refill_ppm × REBALANCE_FEE_MARGIN
       (decays while idle, re-arms on fresh refill — state in channel_signals)
+
+LND QueryRoutes (dry-run, no payment — same pathfinder as SendPaymentV2 + MC)
+  ├─ Planner B8 v1: read the live route price → jump the bid to it (bounded by
+  │   the affordable ceiling) so an affordable refill lands this run
+  ├─ Planner B8 v2: no route within the ceiling → skip the attempt + record a
+  │   synthetic QR_NO_AFFORDABLE_ROUTE cycle (advances the structural ladder)
+  └─ suggest_peers stage 2: validate a candidate's live route to a sink (source_pubkey)
+
+LND describe_graph → refresh_graph (nightly) → graph_cache.json + graph_snapshots
+  ├─ plan: candidate generation + 2-hop diversity (no live pull / get_node_info)
+  ├─ suggest_peers stage 1: the sink's neighbours, scored by hub quality
+  └─ graph_snapshots: our network-position trend over time
+
+daily-check agent → reconcile.run_checks (DB arithmetic) + daily_findings (dedup)
+  ├─ reconcile: deterministic data-integrity issues the agent reports (not recomputes)
+  └─ daily_findings: report a finding once; re-surface only on a material change
 ```
 
 Offset-based sync — no duplicates. Manual rebalances are detected two ways and

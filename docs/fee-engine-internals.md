@@ -116,6 +116,15 @@ it never creates a `profit_capped`/`structural` state and leaves unjudged price
 discovery untouched. Inert unless `earned × horizon > 2 × anchor`. The dict adds
 `accelerated: bool`. Full detail in [Rebalance Budget](rebalance-budget.md#earn-ceiling-accelerator-poisoned-anchor-escape).
 
+**QueryRoutes intelligence** — the budget above *discovers* the clearing price by
+failing over runs; the planner additionally reads it directly via a QueryRoutes
+dry-run (no payment) and either jumps the bid to the live route cost (bounded by the
+same affordable ceiling) or, when no route exists within it, skips the wasted
+attempt and records a synthetic cycle that still advances the structural ladder.
+This runs only in the planner, never in `get_channel_rebalance_budget` (which
+fees/monitor call per channel every run). Knobs `REBALANCE_QUERYROUTES_*`; full
+detail in [Rebalance Budget](rebalance-budget.md#queryroutes-intelligence--read-the-price-instead-of-grinding-for-it).
+
 `get_channel_earned_ppm` widens its window when the standard 21 days hold less
 than `EARNED_PPM_MIN_VOLUME_SATS`: it doubles the lookback (21 → 42 → 84 →
 `EARNED_PPM_MAX_LOOKBACK_DAYS`, 90) until the volume suffices, and only returns

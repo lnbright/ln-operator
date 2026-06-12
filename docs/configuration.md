@@ -40,6 +40,14 @@ Key settings in `config.py`:
 | `REBALANCE_BUDGET_ESCALATION_STEP` | 0.20 | +20% per consecutive failure since last success |
 | `REBALANCE_FEE_MARGIN` | 1.1 | Outbound fee floor = last_refill × this (soft — decays while idle) |
 
+## QueryRoutes intelligence (read the live route price before grinding)
+See [rebalance-budget.md](rebalance-budget.md) for the full design.
+| Setting | Default | |
+|---------|---------|---|
+| `REBALANCE_QUERYROUTES_ENABLED` | True | v1 acceleration: probe the live route price (QueryRoutes dry-run, no payment) and jump the bid straight to it — bounded by the affordable ceiling — so an affordable refill lands this run instead of escalating over ~5. One-line kill switch |
+| `REBALANCE_QUERYROUTES_EARLYOUT_ENABLED` | True | v2 early-out: if a judged target has no route within its affordable ceiling, skip the wasted attempt and record a synthetic failed cycle so the structural ladder still advances. A probe that's *unavailable* (LND down) never strands — only a definite no-route does |
+| `REBALANCE_QUERYROUTES_MIN_CHUNK_SATS` | 100_000 | Feasibility-probe size for the early-out (smallest chunk = strictly easiest to route) |
+
 ## Profitability gate (Layer 1 — don't overpay to refill)
 | Setting | Default | |
 |---------|---------|---|

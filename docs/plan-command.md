@@ -19,10 +19,19 @@ anything below 10 is dropped as noise. Within each tier:
 2. **Diversity** (fraction of the candidate's peers that sit **outside your
    2-hop reachable set** — i.e. would actually expand your graph horizon,
    not just add another edge into nodes you can already reach through an
-   existing peer) is computed via a live `get_node_info` call per
-   prefiltered candidate, then used to rerank. Top 10 per tier are
-   surfaced. The 2-hop set is built once from the local `describe_graph()`
-   edges, so this costs no extra LND round-trips.
+   existing peer) reranks the prefiltered candidates; top 10 per tier are
+   surfaced.
+
+Both stages read the **cached network graph** ([graph-cache.md](graph-cache.md),
+refreshed nightly by `refresh_graph`) — the digest carries each node's metrics
+*and* its adjacency, so candidate generation and the diversity metric both come
+from the cache with **no live `describe_graph` pull and no per-candidate
+`get_node_info` round-trips** (the old path did ~90 of them and was the slow part).
+The 2-hop set is recomputed from your *current* peers via the cached adjacency, so
+it stays correct even if channels changed since the refresh. A live pull is used
+only as a fallback when the cache is absent (before the first `refresh_graph`).
+For a *targeted* "which peer to open toward this sink" question, see `suggest_peers`
+in [graph-cache.md](graph-cache.md).
 
 Why 2-hop, not direct-peer overlap: if "already in your graph" means just
 your direct peers, the metric collapses when your channel count is low —

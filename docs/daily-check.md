@@ -15,13 +15,28 @@ Each run inspects the SQLite DB and live LND state and produces an exec summary:
 
 - **Flows / rebalances / fees (24h)** — sats forwarded and earned, rebalance
   success/failure and cost, fee broadcasts by reason, sat-flow anomalies.
-- **Reconciliation** — cross-checks `rebalance_log` / `fee_updates` against LND
-  payments and the engine's own math to catch silent drift.
+- **Reconciliation** — the deterministic data-integrity checks run in Python
+  (`reconcile.run_checks`), not by hand: missing payment_hash, fee over the max
+  budget, duplicate payment_hash, chunk-fee spikes, pinned-channel violations. The
+  agent reports its findings instead of recomputing the arithmetic (an LLM gets
+  SQLite arithmetic subtly wrong). The checks that need live LND or engine state —
+  self-payment↔log matching, live `/v1/fees`, the fee hysteresis rule — stay
+  agent-side. See [graph-cache.md](graph-cache.md) and `reconcile.py`.
 - **Diagnosis** — depleted/overfull channels, repeated rebalance failures,
   inactive-channel timelines from LND's journal, fee asymmetries.
 - **Suggestions** — config tuning and peer ideas (text only — never auto-applied).
+  Capital suggestions name concrete peers via the peer-finder
+  (`suggest_peers_for`, see [graph-cache.md](graph-cache.md)) instead of
+  hand-waving "add a source"; an empty result is read as resize/close.
 - **Self-fix (code only)** — if it finds a genuine code bug it may edit, run
   `make test`, and commit/push; it reverts instead of pushing if tests fail.
+
+The report is **de-duplicated across days** by a deterministic store
+(`db.reconcile_findings`, `daily_findings` table): a finding is reported once, then
+re-surfaces only when its state *materially* changes, and is noted once when it
+resolves — so the agent stops repeating the same stranded/concentration lines every
+morning. Requires a fresh graph cache for the peer suggestions — the nightly
+`refresh_graph` cron (see the project README) runs ahead of this job.
 
 Delivery is owned by the cron wrapper, which appends the run's cost/duration and
 sends the Telegram message. A typical run is ~5–7 min and ~$1.50–2.00, capped by

@@ -21,7 +21,12 @@ ones (<20% local) via circular self-payments.
 Each channel's "rebalance fee budget" is its refill history with failure escalation, **capped
 by a profitability gate**: after a period of observation, we never
 pay more to refill than the channel can earn back. Channels that can't be
-profitably refilled are flagged as a capital decision. When rebalancing, if
+profitably refilled are flagged as a capital decision. Before grinding up the
+budget over many failed runs, the planner reads the **live route price via a
+QueryRoutes dry-run** (no payment): if an affordable route exists it jumps the bid
+straight to it (lands the refill this run instead of after ~5 escalations); if no
+route exists within the affordable ceiling it skips the wasted attempt and records
+the cycle so the channel still reaches its capital decision. When rebalancing, if
 the full amount can't route, it halves and retries several times, down to 100k sats; if one
 source→target pair has no route, it tries alternatives before giving up. Optional, off by default: a node-level
 **inbound-fee** ladder that pulls organic refill with a negative inbound fee
@@ -67,10 +72,18 @@ dashboard shows a freshness badge.
 Reads your on-chain wallet balance from LND and calculates how many channels you
 can afford after deducting anchor reserves, treasury, and on-chain fees. Shows the
 top 10 candidate peers per tier (hub / mid-tier / small) using a two-stage rank:
-centrality (channels + capacity) prefilters within each tier, then a live LND
-graph call computes diversity (% of their peers that sit outside your 2-hop
-reachable set — i.e. would actually expand your graph horizon) and reranks.
+centrality (channels + capacity) prefilters within each tier, then diversity (% of
+their peers that sit outside your 2-hop reachable set — i.e. would actually expand
+your graph horizon) reranks. Both stages read the **cached** network graph (see
+`refresh_graph`), so there's no live multi-MB pull or per-candidate round-trips.
 Offers to generate a deposit address with QR code at the end.
+
+For a **targeted** decision — "which peer should I open toward so refills into
+*this* sink get cheaper?" — use `suggest_peers <alias|pubkey>`: it pulls the sink's
+neighbours from the graph cache and validates each with a live QueryRoutes probe
+(the route a refill would take *after* you open to it), returning a ranked shortlist
+or, if nothing routes cheaply, the verdict that the answer is resize/close. See
+**[docs/graph-cache.md](docs/graph-cache.md)**.
 
 No external API dependencies — everything from your own LND node.
 
@@ -93,7 +106,14 @@ their inbound fees).
 
 ### Agent - daily review (Optional)
 
-Agent skill run every day reviewing the last 24hr of logs and data. Lands bug fixes and suggests actions to the user where human decision is needed.  
+Agent skill run every day reviewing the last 24hr of logs and data. Lands bug fixes and suggests actions to the user where human decision is needed.
+It leans on deterministic tooling rather than doing everything by hand: a Python
+**reconciliation** module (`reconcile.run_checks`) runs the data-integrity
+arithmetic (an LLM gets SQLite arithmetic subtly wrong), a **finding-dedup store**
+(`daily_findings`) makes it report something once and re-surface it only on a
+material change instead of repeating itself daily, and the **peer-finder**
+(`suggest_peers_for`) lets it name concrete candidate peers for capital
+suggestions. See **[docs/daily-check.md](docs/daily-check.md)**.
 
 ---
 
@@ -204,6 +224,11 @@ ln-operator pipeline --dry-run                   # preview the loop; broadcast &
 ln-operator plan                                 # read wallet balance, rank candidate peers to open to
 ln-operator plan --min-channel 3000000           # override the minimum channel size (sats)
 ln-operator plan --treasury 0.01                 # override the wallet-reserve (treasury) ratio
+ln-operator suggest_peers <alias|pubkey>         # which peer to open toward so refills into a sink get cheaper
+ln-operator suggest_peers LNBiG --no-validate    # stage-1 graph shortlist only (skip the live route check)
+# plan + suggest_peers read the cached network graph (see refresh_graph below);
+# suggest_peers validates each candidate with a live QueryRoutes probe — an empty
+# result means the capital answer is resize/close, not open. See docs/graph-cache.md.
 
 # ── REBALANCING ────────────────────────────────────────────
 ln-operator rebalance_channels                   # auto-rebalance using the 20/80 thresholds
@@ -234,6 +259,7 @@ ln-operator healthcheck                          # snapshot channel state, updat
 # ── SYNC & SIGNALS ─────────────────────────────────────────
 ln-operator sync_routing                         # pull new forwards + manual rebalances from LND into SQLite
 ln-operator recompute_signals                    # nightly job — refresh slow per-channel market signals
+ln-operator refresh_graph                        # nightly job — pull the network graph into the local cache
 
 # ── OFF-SITE BACKUP (run by systemd, not invoked manually) ──
 ln-operator backup [--trigger path|timer|manual] # rsync channel.backup to the configured BACKUP_SSH_HOST
@@ -247,9 +273,13 @@ ln-operator backup [--trigger path|timer|manual] # rsync channel.backup to the c
 
 # Nightly — refresh slow market signals (market multiplier per channel)
 15 3 * * * cd /path/to/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1
+
+# Nightly — cache the network graph (multi-MB pull; used by `plan` + `suggest_peers`
+# and the daily-check agent's capital suggestions). Runs ahead of the daily check.
+30 3 * * * cd /path/to/ln-operator && ./ln-operator refresh_graph >> logs/graph.log 2>&1
 ```
 
-These two lines are all the automation the node needs. The optional AI
+These three lines are all the automation the node needs. The optional AI
 daily-check agent is a **separate, opt-in** cron line (off by default — see the
 [Security](#security) section and [docs/daily-check.md](docs/daily-check.md)
 before enabling). It is gated by an env flag set **on the cron line itself**, and
@@ -403,8 +433,9 @@ skimmable. Full index: [docs/README.md](docs/README.md).
 - [Fee Engine Internals](docs/fee-engine-internals.md) — cadence, the layers, hysteresis, soft-floor ratchet, profitability gate, inbound-fee ladder, corner cases
 
 **Liquidity**
-- [Rebalance Budget](docs/rebalance-budget.md) — budget, failure escalation, the profitability gate, chunking, fallback pairs
+- [Rebalance Budget](docs/rebalance-budget.md) — budget, failure escalation, the profitability gate, the QueryRoutes acceleration + early-out, chunking, fallback pairs
 - [Plan Command](docs/plan-command.md) — tier-segmented peer ranking (centrality → diversity)
+- [Graph Cache & Peer-Finder](docs/graph-cache.md) — the cached network graph (`refresh_graph`) and targeted `suggest_peers`
 
 **Interface**
 - [Dashboard deep dive](docs/dashboard.md) — card-by-card tour ([live demo](https://www.lnbright.com/demo/)), Sat Flow drill-downs, and the watchtower health-badge logic
@@ -415,6 +446,7 @@ skimmable. Full index: [docs/README.md](docs/README.md).
 **Reference**
 - [Configuration](docs/configuration.md) — every `config.py` knob and its default
 - [Data Flow](docs/data-flow.md) — how LND data lands in SQLite and feeds each consumer
+- [Improvements](docs/improvements.md) — deferred enhancement backlog
 - [Alerts](docs/alerts.md) · [Logging](docs/logging.md) · [Channel Backup](docs/channel-backup.md) · [Known Limitations](docs/known-limitations.md)
 
 ---

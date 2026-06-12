@@ -206,6 +206,48 @@ The budget dict carries `accelerated: bool` alongside `profit_capped` /
 `structural`, and the reason string reads
 `last_refill 7 ppm accelerated toward earn-ceiling (20% of gap × 5 failed runs) → 721 ppm`.
 
+## QueryRoutes intelligence — read the price instead of grinding for it
+
+The escalation ladder and the earn-ceiling accelerator both *discover* the clearing
+price by **failing** over several runs. A **QueryRoutes dry-run** reads it directly
+— it's the same pathfinder `SendPaymentV2` uses (mission-control liquidity included),
+run with no payment. So the planner can act on the real route price now instead of
+groping toward it over days. (`lnd_client.query_routes`; runs only in the planner —
+`get_channel_rebalance_budget` stays call-free, since fees/monitor invoke it per
+channel every run.) Knobs: `REBALANCE_QUERYROUTES_ENABLED`,
+`REBALANCE_QUERYROUTES_EARLYOUT_ENABLED`, `REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`.
+
+Each depleted target's budget dict gains `affordable_ceiling_ppm` =
+`min(profit_cap, MAX)` for a judged channel, else `MAX` — the most it could ever
+justify paying. The two halves:
+
+**v1 — acceleration (`_accelerate_budget_with_queryroutes`).** Probe the primary
+pair (most-overfull source → target, pinned via `outgoing_chan_id`, at the size we'd
+attempt) capped at the affordable ceiling. If a route exists between the current
+escalated bid and the ceiling, **jump this run's bid straight to that live cost** —
+an affordable refill lands now instead of after ~5 escalations. It only ever *raises*
+the bid and only up to the ceiling the profit gate already permits (never overpays),
+never skips an attempt, and never moves `last_refill`. Any probe error or no-route
+leaves the budget untouched, so a flaky probe can't change spend. It's the informed
+primary; the blind earn-ceiling accelerator above is now its **fallback** for when
+the probe is off/unavailable or for chunked refills v1 doesn't probe.
+
+**v2 — infeasibility early-out (`_queryroutes_early_out`).** In the planner's
+gate-drop, a *judged* depleted target the ladder says to rebalance is probed at the
+**minimum chunk** (`REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`, smallest amount = strictly
+easiest to route) capped at the ceiling. If no route exists, refilling is a capital
+problem, not price discovery: the channel is dropped from planning (skip the wasted
+attempt) **and** — only on a real run, never a dry-run preview — a synthetic failed
+cycle is recorded (`rebalance_log` row, `failure_reason='QR_NO_AFFORDABLE_ROUTE'`,
+fee 0, its own `run_id`). That row advances `count_failures_since_last_success` like
+a real failed cycle, so the structural ladder still reaches its threshold and
+surfaces the capital decision — *the early-out replaces the wasted attempts, not the
+stranding they would eventually trigger.* Safety rails: judged-only (unjudged keep
+full price discovery via real attempts); a probe that's **unavailable** (LND down)
+raises and we do *not* early-out, so a transport blip can never strand a channel;
+`force` bypasses it. (These rows show as a muted `skipped` badge on the dashboard,
+not a failed attempt.)
+
 ## Outbound fee impact
 
 After the first successful refill at `R` ppm:
