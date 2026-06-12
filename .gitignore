@@ -13,6 +13,10 @@
 # Local baselines (channel state snapshots) — stays on the Pi
 baselines/
 
+# Network graph cache (B1) — regenerated from LND, stays on the Pi
+graph_cache.json
+graph_cache.json.tmp
+
 # Python
 venv/
 __pycache__/

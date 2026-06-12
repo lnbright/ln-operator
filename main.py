@@ -275,6 +275,28 @@ def cmd_monitor_htlcs(args):
     htlc_monitor.run()
 
 
+def cmd_refresh_graph(args):
+    """Pull the network graph and refresh the B1 cache.
+
+    describe_graph() is a multi-MB pull (up to ~300s on the Pi), so this runs from
+    a daily cron (ahead of the daily-check) rather than inline. The daily agent and
+    the B2 peer-finder read the cached digest instead of re-pulling LND.
+    """
+    import graph_cache
+    log = get_logger("main")
+    log.info("refresh_graph: starting")
+    print("\n⚡ LN Operator — Refresh Network Graph Cache")
+    print("=" * 45)
+    digest = graph_cache.refresh()
+    s = digest["stats"]
+    print(f"  nodes:          {s['total_nodes']:,}")
+    print(f"  channels:       {s['total_channels']:,}")
+    print(f"  total capacity: {s['total_capacity']:,} sats")
+    print(f"  our peers:      {len(digest['our_peers'])}")
+    print(f"  2-hop reach:    {len(digest['reachable_2hop']):,} nodes")
+    print(f"  cached to:      {graph_cache.CACHE_PATH}")
+
+
 def cmd_recompute_signals(args):
     """Refresh slow per-channel signals (market multiplier).
 
@@ -1180,6 +1202,9 @@ def main():
     p_signals = subparsers.add_parser("recompute_signals",
         help="[automated] Refresh slow per-channel signals (market multiplier). Designed for a nightly cron.")
 
+    p_refresh_graph = subparsers.add_parser("refresh_graph",
+        help="[automated] Pull the network graph into the B1 cache (multi-MB; daily cron ahead of daily-check).")
+
     p_monitor = subparsers.add_parser("monitor_htlcs",
         help="[automated] Long-running: record dropped forwards from LND's HTLC event stream (systemd)")
 
@@ -1224,6 +1249,8 @@ def main():
         cmd_clear_fee(args)
     elif args.command == "recompute_signals":
         cmd_recompute_signals(args)
+    elif args.command == "refresh_graph":
+        cmd_refresh_graph(args)
     elif args.command == "monitor_htlcs":
         cmd_monitor_htlcs(args)
     else:

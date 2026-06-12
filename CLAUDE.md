@@ -230,6 +230,28 @@
   findings against the open set and returns new/changed/unchanged/resolved buckets
   (persisting the snapshot); a resolved key that reappears reopens as a fresh
   episode. Replaces the old "read the log and dedup by judgement" instruction.
+- graph_snapshots table (B1): one row per `refresh_graph` run — total_nodes/channels/
+  capacity + our_channels/capacity/peers. Historical, so our network position
+  (growing / going dark) is trendable. Finally given a writer (`db.save_graph_snapshot`).
+
+## Graph cache (B1)
+- `graph_cache.py` — `describe_graph()` is a multi-MB pull (26k nodes / 98k channels
+  / ~16MB / ~30s on the Pi), so `ln-operator refresh_graph` (daily cron, 03:30) pulls
+  it ONCE and writes a compact processed digest to `graph_cache.json` (next to the DB;
+  gitignored; path overridable via `LN_OPERATOR_GRAPH_CACHE`). Atomic write (tmp +
+  os.replace). The daily-check agent and the B2 peer-finder call `graph_cache.load()`
+  (instant) instead of re-pulling LND.
+- Digest = per-node {alias, channels, capacity, avg_fee_ppm, neighbors[]} for every
+  node with ≥1 public channel, plus our 2-hop reachable set and network stats.
+  `neighbors` is the adjacency B2 walks for reachability / "if I opened to Y, what
+  does Y reach". `build_digest()` is pure (graph dict → digest), unit-tested without LND.
+- LIQUIDITY-BLIND by design: announced topology + fee policy only, NEVER costed
+  pathfinding (that's QueryRoutes — B8 — which sees real mission-control liquidity).
+- Full re-pull each refresh (no incremental diff). describe_graph is read-only, run
+  once daily off-peak — the same call `lncli describegraph` makes; not a hot path, no
+  meaningful LND load. (A true incremental graph would use SubscribeChannelGraph's
+  gossip stream, but that's an unjustified long-running daemon for a slowly-changing,
+  liquidity-blind structural cache that only needs daily freshness.)
 
 ## Services
 - Dashboard: systemd lnd-dashboard.service, port 4000. Unit file at services/lnd-dashboard.service.
@@ -247,3 +269,4 @@
 ## Crontab
 0 */2 * * * cd /home/youruser/ln-operator && ./ln-operator pipeline 2>&1
 15 3 * * * cd /home/youruser/ln-operator && ./ln-operator recompute_signals >> logs/signals.log 2>&1
+30 3 * * * cd /home/youruser/ln-operator && ./ln-operator refresh_graph >> logs/graph.log 2>&1

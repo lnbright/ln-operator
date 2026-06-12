@@ -457,6 +457,19 @@ def save_rebalance_attempt(source_chan, target_chan, source_alias, target_alias,
               payment_hash, triggered_by, budget_ppm, run_id))
 
 
+def save_graph_snapshot(total_nodes, total_channels, total_capacity,
+                        our_channels, our_capacity, our_peers):
+    """Record a network-position snapshot — one row per B1 graph-cache refresh,
+    so our graph position (are we growing / going dark?) is trendable over time."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO graph_snapshots "
+            "(total_nodes, total_channels, total_capacity, our_channels, "
+            " our_capacity, our_peers) VALUES (?, ?, ?, ?, ?, ?)",
+            (total_nodes, total_channels, total_capacity, our_channels,
+             our_capacity, our_peers))
+
+
 def get_open_findings():
     """All currently-open daily-check findings (B6), oldest first."""
     with get_conn() as conn:
