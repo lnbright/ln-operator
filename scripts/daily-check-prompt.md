@@ -72,10 +72,11 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
         - channel is **profit_capped / structural** → this is NOT recoverable by
           rebalancing (we've decided refilling it loses money). The dropped-sat
           total is the *capital* signal: it quantifies demand we're losing, which
-          justifies a capital suggestion (§4 — open inbound toward the destination,
-          splice, or resize). Quantify it: "Xm sats of forwards dropped on <peer>
-          for an empty channel that's structurally unprofitable to refill →
-          recommend <capital action>".
+          justifies a capital suggestion (§4 — classify the channel's flow shape
+          first, then recommend a fee/splice/swap/resize/close action *with the
+          reasoning*, not a bare verb). Quantify it: "Xm sats of forwards dropped
+          on <peer> for an empty channel that's structurally unprofitable to refill
+          → recommend <capital action>".
     - `FEE_INSUFFICIENT` — the sender under-paid our outbound fee. More likely now
       that Layer 2 raised the ceiling (SIGMOID_MAX_PPM 750) and the market-mult /
       fast-drain bump push fees higher: frequent FEE_INSUFFICIENT on a channel
@@ -332,19 +333,54 @@ Based on the day's data, think about whether to suggest:
   sources nor sinks meaningful flow over 30d is a resize/close candidate.
 - **Capital action for structural channels (always surface these explicitly).**
   For every channel flagged `structural` (from Diagnose), the tool has decided
-  rebalancing can't fix it — say so and give a concrete capital recommendation,
-  with numbers. Pick the option the data supports and explain why:
-    - **Add inbound** — open a new channel toward the destination this channel
-      feeds, or to a cheap inbound source that feeds it, or splice in capacity,
-      so the depleted side fills organically instead of by paid rebalances. Prefer
-      this when the channel still carries real outbound demand (forwards/INSUFFICIENT_BALANCE
-      drops) but can't be refilled cheaply.
+  rebalancing can't fix it. Don't emit a bare verb — the reader needs to know
+  *why* one action wins. Two steps:
+
+  **Step 1 — classify the channel's flow shape** from the 24h/30d sat-flow (the
+  `chan_in→chan_out` view). The right capital action depends entirely on the
+  shape, and mis-naming it is how you get nonsense like "open inbound toward the
+  destination":
+    - **Pure sink** — heavy `out`, ~0 `in` over 30d (e.g. an exchange-deposit
+      channel like `bfx-lnd0` at 0 in / 7.7m out). Demand only ever pushes *into*
+      the peer; nothing routes back to refill it. **Opening another channel toward
+      this peer does NOT help** — it just adds outbound that drains identically.
+      You may name where the draining flow is *sourced from* (the chan_in peers,
+      e.g. Boltz/CoinGate) for context, but never phrase that as "open inbound
+      toward the destination" — the destination is the sink; the inbound you'd
+      want is from a *source*, and for a pure sink there may be no organic source
+      at all.
+    - **Source-starved** — real outbound demand, refillable in principle, but the
+      only thing missing is a *cheap source* to rebalance from. Here a new channel
+      to a cheap inbound source (one whose own liquidity points at this channel's
+      destination) or a sibling source genuinely fixes it.
+    - **Dead-weight** — ~0 in AND ~0 out over 30d; the peer neither sources nor
+      sinks meaningful flow. Capital is just parked.
+
+  **Step 2 — recommend ONE action and explain why it wins and why the obvious
+  alternatives lose.** Terse, but the reasoning has to be there. The menu:
+    - **Raise outbound fee** — the lever you have *before* spending capital. If
+      the channel earns far below its refill price (e.g. earns 620, refill ≫3800),
+      the fee is too low to ever fund the refill: either it climbs toward
+      profitability or the channel is a loss-leader by definition. Right when
+      demand looks fee-tolerant.
+    - **Splice in capacity** — buys runway proportional to the daily drain. Does
+      NOT fix one-directionality, only delays empty. Right when demand is real and
+      worth serving and you just need a bigger tank between refills.
+    - **Swap-refill (loop-in)** — the honest "add inbound" for a pure sink:
+      on-chain → Lightning to top up local balance. Caveat it: you can't reliably
+      pin the inbound to *this specific* channel, so it's "possible, with a
+      path-control caveat," not a clean fix.
     - **Resize** — close and reopen smaller if it's oversized for its actual flow.
-    - **Close** — recover and redeploy the capital if it's a chronic dead-weight
-      sink that neither earns nor can be cheaply refilled.
-  Quote the evidence: `<peer> earns X ppm, refill needs ≫ that, N failed refills,
-  Ym sats of demand dropped — recommend <action> because <reason>`. Never recommend
-  force-closing a freshly-opened channel (see the inactive-channel guidance).
+    - **Close** — recover and redeploy if it's dead-weight, or a sink whose earned
+      ppm can never cover refill cost and whose fee can't rise without killing the
+      flow.
+
+  Put the shape, the recommended action, the rejected alternatives, and the
+  numbers in one line, e.g.:
+  `bfx-lnd0 pure sink (0 in / 7.7m out, fed by Boltz+CoinGate), earns 620 ppm,
+  refill ≫3800, 17 failed runs → raise fee toward profitability or close; more
+  channels toward bfx won't refill a sink`. Never recommend force-closing a
+  freshly-opened channel (see the inactive-channel guidance).
 
 Put these in the summary as `Suggestions:`. Do not edit config.py or open
 channels — these are human decisions.
