@@ -32,15 +32,16 @@ class ReconcileTests(unittest.TestCase):
         os.unlink(self.db_path)
 
     def _reb(self, ts_off=-3600, success=1, fee_ppm=100, payment_hash="h",
-             triggered_by="auto", src="S", tgt="T", amount=200_000):
+             triggered_by="auto", src="S", tgt="T", amount=200_000, budget_ppm=None):
         with db.get_conn() as c:
             c.execute(
                 "INSERT INTO rebalance_log (ts, source_chan_id, target_chan_id, "
                 "source_alias, target_alias, amount_sats, fee_paid_sats, fee_ppm, "
-                "success, payment_hash, triggered_by) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "success, payment_hash, triggered_by, budget_ppm) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (self.now + ts_off, src, tgt, "src", "tgt", amount,
-                 int(amount * fee_ppm / 1e6), fee_ppm, success, payment_hash, triggered_by))
+                 int(amount * fee_ppm / 1e6), fee_ppm, success, payment_hash,
+                 triggered_by, budget_ppm))
 
     def _fee(self, ts_off, chan="C", new_ppm=100, reason="sigmoid"):
         with db.get_conn() as c:
@@ -71,6 +72,40 @@ class ReconcileTests(unittest.TestCase):
         self.assertIn("rebalance_over_max_budget", self._codes(issues))
         self.assertEqual([i["severity"] for i in issues
                           if i["check"] == "rebalance_over_max_budget"], ["fail"])
+
+    def test_fee_within_budget_is_ok(self):
+        # paid 100 ppm under a 500 ppm recorded budget → clean
+        self._reb(fee_ppm=100, budget_ppm=500, payment_hash="b1")
+        self.assertNotIn("rebalance_over_budget", self._codes(reconcile.run_checks()))
+
+    def test_fee_over_recorded_budget_is_fail(self):
+        # paid 600 ppm against a 500 ppm budget (>500×1.1=550) → fail
+        self._reb(fee_ppm=600, budget_ppm=500, payment_hash="b2")
+        issues = reconcile.run_checks()
+        self.assertIn("rebalance_over_budget", self._codes(issues))
+        self.assertEqual([i["severity"] for i in issues
+                          if i["check"] == "rebalance_over_budget"], ["fail"])
+
+    def test_fee_within_10pct_buffer_is_ok(self):
+        # paid 540 ppm against a 500 budget — inside the 10% chunk buffer (550) → clean
+        self._reb(fee_ppm=540, budget_ppm=500, payment_hash="b3")
+        self.assertNotIn("rebalance_over_budget", self._codes(reconcile.run_checks()))
+
+    def test_null_budget_skips_budget_check(self):
+        # legacy row with no recorded budget → no budget invariant to assert
+        self._reb(fee_ppm=900, budget_ppm=None, payment_hash="b4")
+        self.assertNotIn("rebalance_over_budget", self._codes(reconcile.run_checks()))
+
+    def test_recorded_budget_over_max_is_fail(self):
+        self._reb(fee_ppm=100, budget_ppm=config.REBALANCE_MAX_BUDGET_PPM + 50,
+                  payment_hash="b5")
+        self.assertIn("rebalance_budget_over_max", self._codes(reconcile.run_checks()))
+
+    def test_manual_fee_over_budget_still_flagged(self):
+        # honoring a fee limit is universal — a manual row that overshot its budget
+        # is just as much a fee_limit-ignored bug as an auto one.
+        self._reb(fee_ppm=600, budget_ppm=500, triggered_by="manual", payment_hash="b6")
+        self.assertIn("rebalance_over_budget", self._codes(reconcile.run_checks()))
 
     def test_duplicate_payment_hash(self):
         self._reb(payment_hash="dup", src="S")

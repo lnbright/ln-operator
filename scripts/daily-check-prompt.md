@@ -108,7 +108,7 @@ Query the SQLite db at `ln_operator.db` (schema is in `db.py`) and check:
 - **alerts** — anything fired in the last 24h
 - **channel_signals** — current market_multiplier per channel (flag any pinned
   at MIN/MAX); also the profitability-gate / liquidity-ladder state:
-  `structural_flag_ts` (≠0 → judged a structural liquidity gap), `inbound_fee_ppm`
+  `structural_flag_ts` (≠0 → calibrated as a structural liquidity gap), `inbound_fee_ppm`
   (negative = a Layer-3 organic-refill discount is active), `floor_decay_started_ts`
   (≠0 → the outbound floor is decaying toward the clearing fee on an idle channel).
   For each channel also call `engine.get_channel_rebalance_budget(chan_id)` and read
@@ -212,95 +212,49 @@ Also run:
 
 ## 2. Reconcile data integrity
 
-These are the silent-failure modes — pipelines that look fine but are
-quietly producing wrong numbers. Always check, every day.
+Silent-failure modes — pipelines that look fine but quietly produce wrong numbers.
+**Detection is deterministic and lives in Python; your job is to investigate only
+what it flags.** Do NOT reconstruct budgets or fee math by hand — an LLM over SQLite
+gets it subtly, invisibly wrong, which is why this moved to code.
 
-**Run the deterministic checks first — don't redo their arithmetic by hand.**
-The DB-only reconciliations are now Python (an LLM doing arithmetic over SQLite gets
-it subtly, invisibly wrong). Call:
+**Step 1 — run the deterministic checks:**
 
     from reconcile import run_checks
     issues = run_checks(window_days=1)   # [{check, severity 'fail'|'warn', message}, …]
 
-Report every issue it returns verbatim under `Issues:` (a `fail` is always worth a
-line). It covers: rebalance success rows missing a payment_hash, fee_ppm over
-REBALANCE_MAX_BUDGET_PPM, duplicate payment_hash (double-logged), chunk-ppm spikes
-within an attempt, and pinned-channel broadcasts that aren't the pinned value. Do NOT
-re-derive these yourself. What it does NOT cover (still YOUR job, they need a live LND
-read or engine state the table doesn't hold): the self-payment↔log matching and
-amount/fee agreement below, new_fee_ppm vs live `/v1/fees`, and the fee-update
-hysteresis rule.
+Table-only, it covers: rebalance success rows missing a payment_hash; `fee_ppm` over
+`REBALANCE_MAX_BUDGET_PPM`; **`fee_ppm` over the budget the row recorded (×1.1); a
+recorded budget itself over the max;** duplicate payment_hash; chunk-ppm spikes within
+an attempt; pinned-channel non-pin broadcasts.
 
-**Payments ↔ rebalance_log:**
-- Pull last 24h of successful self-payments from LND (`/v1/payments`,
-  filter where final-hop pubkey == our pubkey). Compare against
-  `rebalance_log` rows. Every self-payment must have a matching row
-  (by `payment_hash`). Flag any LND payment we never logged.
-- For matched rows, confirm `amount_sats` and `fee_sats` agree with the
-  LND payment. Drift here usually means a sync bug.
-- Flag rebalance_log rows with no `payment_hash` that are newer than the
-  legacy backfill cutoff (engine.execute_rebalance has saved hashes since
-  the rebalance chunking change — anything recent without one is suspect).
-- Confirm no `forwarding_log` row is actually a leg of our own rebalance
-  (chan_id_in or chan_id_out matching a self-payment hop within the same
-  second). If found, those forwards are double-counted as revenue.
+**Step 2 — branch on the result:**
+  - **empty → §2 is DONE.** Don't re-derive anything "to be sure" — the deterministic
+    pass already did, faithfully. Report one line ("data integrity clean") or fold it
+    into the dedup. No hand-arithmetic.
+  - **non-empty → THIS is the work.** Python told you WHAT broke (e.g. "rebalance
+    id=812 paid 904 ppm > recorded budget 320 ×1.1"); you find WHY. Read that row and
+    its rebalance_log cluster, the matching LND payment, lnd.log around its timestamp,
+    and report the ROOT CAUSE, not the symptom. Quote actual values
+    (`expected X, got Y on chan_id=…`). Each issue is a one-line `Issues:` entry; a
+    `fail` always earns one.
 
-**Rebalance fees paid ↔ intended budget:**
-- For each successful auto rebalance row (`triggered_by='auto'`) in the
-  last 24h, reconstruct the budget that `engine.get_channel_rebalance_budget`
-  would have produced *at the time of the row*:
-    - `last_refill = most recent successful rebalance into the target chan
-       with timestamp < this row's timestamp`
-    - `failures = count of failed auto rebalances into the same target
-       between that prior success and this row`
-    - `budget_at_time = min((last_refill or REBALANCE_DEFAULT_BUDGET_PPM) ×
-       (1 + REBALANCE_BUDGET_ESCALATION_STEP × failures),
-       REBALANCE_MAX_BUDGET_PPM)`
-  Then assert `row.fee_ppm ≤ budget_at_time × 1.1` (the chunk wrapper adds
-  a 10% search buffer). Any overshoot is a bug — LND may have ignored the
-  fee_limit, or our plan passed a stale budget. NOTE (Layer 1 profitability
-  gate): for a JUDGED channel the live budget is *additionally* capped at
-  `earned_ppm × REBALANCE_PROFIT_HORIZON`, so the actual budget is ≤ the formula
-  above — the `≤` assertion still holds (the cap only lowers it). Don't flag a
-  channel whose `fee_ppm` is *below* `budget_at_time`; that's the gate working,
-  not a bug.
-- All successful auto rows must satisfy `fee_ppm ≤ REBALANCE_MAX_BUDGET_PPM`
-  as an absolute floor. Hard fail if violated.
-- Within a single rebalance attempt's chunks (same source→target within a
-  few seconds), per-chunk ppm should cluster. Flag any chunk that paid
-  ≥2× the median of the rest — likely a routing-fee spike that signals
-  the budget needs tightening.
-- Skip `triggered_by='manual'` rows for this check — no intent recorded.
+**Two detections still need a live LND read** (they're detection, not the
+hand-arithmetic above — run them daily, but they stay light):
+  - **Self-payment ↔ rebalance_log.** Pull last 24h of successful self-payments
+    (`/v1/payments`, final-hop pubkey == ours). Each must have a matching
+    `rebalance_log` row by `payment_hash` — flag any LND payment we never logged, and
+    any matched row whose `amount_sats`/`fee_sats` disagree with the payment. Also flag
+    a `forwarding_log` row that is actually a leg of one of these self-payments (same
+    hop, same second) → revenue double-counted.
+  - **new_fee_ppm ↔ live /v1/fees.** For channels broadcast in the last 24h, confirm
+    LND's live fee matches the `fee_updates.new_fee_ppm` we wrote; a mismatch means LND
+    silently dropped an update.
 
-**Fee updates ↔ engine math:**
-- For each `fee_updates` row in the last 24h, reconstruct what
-  `engine.compute_fee_target` would have produced given the recorded
-  `local_ratio_at_update`, the channel's `market_multiplier` from
-  `channel_signals`, and the `last_refill_ppm` from `rebalance_log` as of
-  that timestamp. The reconstructed `target_ppm` should match the row's
-  `new_ppm` within ±1 ppm (rounding). Any larger drift means either the
-  math changed or the broadcast bypassed the pipeline. CAVEAT — the outbound
-  fee is no longer a pure function of (local_ratio, market_mult, last_refill):
-  (a) the last-refill floor is SOFT — once a channel is idle ≥`FLOOR_DECAY_IDLE_SECONDS`
-  the effective floor decays toward the sigmoid/market clearing fee per
-  `channel_signals.floor_decay_started_ts`/`floor_decay_anchor_ppm` (so a row
-  *below* `last_refill × REBALANCE_FEE_MARGIN` with `source=floor-decaying` is
-  correct, not drift); (b) `SIGMOID_MAX_PPM` is 750; (c) a fast-drain cycle may
-  have bumped `market_multiplier` (persisted, so reading it back reconciles).
-  Reconstruct using `engine.compute_fee_target` itself (passing the channel's
-  `last_forward_ts` and the stored decay state) rather than the old closed-form,
-  or treat a `floor-decaying` row as expected.
-- For channels in `fee_overrides`, confirm every recent broadcast used the
-  pinned ppm. A non-pin broadcast on a pinned channel is a bug.
-- Cross-check `fee_updates.new_ppm` against the live LND `/v1/fees` for
-  each channel. A mismatch means LND silently ignored an update or we lost
-  state between writing the row and broadcasting.
-- Confirm hysteresis was respected: no two broadcasts within
-  `FEE_HYSTERESIS_COOLDOWN_SEC` for the same channel unless the row's
-  reason mentions snap or edge-crossing.
-
-Report each discrepancy as a one-line `Issues:` entry. Quote actual values
-(`expected X, got Y on chan_id=...`) — vague "data looks off" is useless.
+**Deliberately NOT verified — do not attempt by hand** (a wrong "check" is worse than
+none): the fee-update HYSTERESIS rule and a full `compute_fee_target` reconstruction.
+Both depend on engine state the tables don't hold (floor-decay anchors, cooldown
+escapes), so any table-only version false-positives on every legitimate floor-decay
+broadcast. Trust the engine's unit tests for those.
 
 ## 3. Diagnose
 

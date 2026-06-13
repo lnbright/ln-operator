@@ -7,8 +7,18 @@ assertions: `run_checks()` returns a list of issue dicts the agent just reads an
 reports, instead of recomputing.
 
 DB-only and pure (no LND): every check is a query + comparison, unit-tested against
-a throwaway DB. Two §2 checks deliberately stay agent-side, because a naive
-deterministic version is WORSE than none (it looks authoritative while being wrong):
+a throwaway DB.
+
+Budgets are verified as an INVARIANT, not a reconstruction: each row records the
+`budget_ppm` the planner/executor actually used, so we assert `fee_ppm ≤ budget_ppm ×
+1.1` and `budget_ppm ≤ REBALANCE_MAX_BUDGET_PPM` against that stored value. We do NOT
+re-derive `get_channel_rebalance_budget`'s multi-layer math (escalation × profit cap ×
+earn-ceiling accelerator × QueryRoutes pricing) here — mirroring engine internals in a
+"checker" false-positives the same way a table-only hysteresis check would. Subtle
+budget-logic bugs are the job of unit tests on the engine, not this reconciliation.
+
+Some §2 checks deliberately stay agent-side, because a naive deterministic version is
+WORSE than none (it looks authoritative while being wrong):
   - self-payment ↔ rebalance_log matching + live new_fee_ppm vs /v1/fees — need LND.
   - the fee-update HYSTERESIS rule — its cooldown escapes (snap Δ, edge-zone crossing)
     depend on engine state that isn't captured in `fee_updates.reason`, so checking it
@@ -30,6 +40,7 @@ log = get_logger("reconcile")
 
 CHUNK_CLUSTER_GAP_SEC = 120      # rows of one attempt's chunks land within ~seconds
 CHUNK_SPIKE_FACTOR = 2.0         # a chunk ≥ this × the cluster median = routing spike
+BUDGET_OVERSHOOT_FACTOR = 1.1    # chunk wrapper adds a 10% search buffer over the budget
 
 
 def _issue(check, severity, message):
@@ -51,12 +62,14 @@ def _check_rebalance_log(conn, cutoff):
     issues = []
     rows = conn.execute(
         "SELECT id, ts, source_chan_id, target_chan_id, source_alias, target_alias, "
-        "       fee_ppm, payment_hash, triggered_by "
+        "       fee_ppm, budget_ppm, payment_hash, triggered_by "
         "FROM rebalance_log WHERE success = 1 AND ts > ? ORDER BY ts",
         (cutoff,)).fetchall()
 
     for r in rows:
         pair = f"{r['source_alias'] or r['source_chan_id']}→{r['target_alias'] or r['target_chan_id']}"
+        fee = r["fee_ppm"] or 0
+        budget = r["budget_ppm"] or 0
         # 1. A recent AUTO success with no payment_hash — execute_rebalance has saved
         #    hashes since the chunking change, so a missing one is a sync/save bug.
         if r["triggered_by"] == "auto" and not (r["payment_hash"] or "").strip():
@@ -64,10 +77,27 @@ def _check_rebalance_log(conn, cutoff):
                 "rebalance_missing_hash", "warn",
                 f"auto rebalance id={r['id']} ({pair}) succeeded with no payment_hash"))
         # 2. fee_ppm above the absolute ceiling — LND ignored fee_limit, or a bug.
-        if r["triggered_by"] == "auto" and (r["fee_ppm"] or 0) > REBALANCE_MAX_BUDGET_PPM:
+        if r["triggered_by"] == "auto" and fee > REBALANCE_MAX_BUDGET_PPM:
             issues.append(_issue(
                 "rebalance_over_max_budget", "fail",
-                f"auto rebalance id={r['id']} ({pair}) paid {r['fee_ppm']:.0f} ppm > "
+                f"auto rebalance id={r['id']} ({pair}) paid {fee:.0f} ppm > "
+                f"REBALANCE_MAX_BUDGET_PPM {REBALANCE_MAX_BUDGET_PPM}"))
+        # 2a. Paid more than the budget RECORDED for this row (+10% chunk buffer) — LND
+        #     ignored the fee_limit or a stale budget reached the wire. We assert the
+        #     INVARIANT against the stored budget_ppm rather than re-deriving the
+        #     multi-layer budget formula here (mirroring the engine would false-positive
+        #     the same way the hysteresis check does — see module docstring).
+        if budget > 0 and fee > budget * BUDGET_OVERSHOOT_FACTOR:
+            issues.append(_issue(
+                "rebalance_over_budget", "fail",
+                f"rebalance id={r['id']} ({pair}) paid {fee:.0f} ppm > recorded budget "
+                f"{budget:.0f} ppm ×{BUDGET_OVERSHOOT_FACTOR:g} ({budget * BUDGET_OVERSHOOT_FACTOR:.0f})"))
+        # 2b. The budget the row recorded itself exceeds the absolute ceiling — a bug in
+        #     budget computation (the planner should clamp to REBALANCE_MAX_BUDGET_PPM).
+        if r["triggered_by"] == "auto" and budget > REBALANCE_MAX_BUDGET_PPM:
+            issues.append(_issue(
+                "rebalance_budget_over_max", "fail",
+                f"auto rebalance id={r['id']} ({pair}) recorded budget {budget:.0f} ppm > "
                 f"REBALANCE_MAX_BUDGET_PPM {REBALANCE_MAX_BUDGET_PPM}"))
 
     # 3. The same payment_hash on >1 row = the same payment double-logged (e.g. the

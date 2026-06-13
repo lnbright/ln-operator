@@ -266,12 +266,20 @@
 - reconcile.py: `run_checks(window_days)` — the §2 data-integrity arithmetic the
   daily-check agent used to do by hand (an LLM gets SQLite arithmetic subtly wrong),
   now deterministic DB-only assertions returning [{check, severity, message}]. Covers
-  missing payment_hash on a success row, fee_ppm > REBALANCE_MAX_BUDGET_PPM, duplicate
-  payment_hash, chunk-ppm spikes, pinned-channel non-pin broadcasts. Deliberately does
-  NOT check the fee hysteresis rule (its cooldown escapes — snap Δ / edge-zone crossing
-  — depend on engine state absent from `fee_updates`, so a table-only check
-  false-positives on every legitimate floor-decay broadcast) nor the LND-requiring
-  matches (self-payment↔log, live /v1/fees) — those stay agent-side.
+  missing payment_hash on a success row, fee_ppm > REBALANCE_MAX_BUDGET_PPM, **fee_ppm >
+  the row's recorded `budget_ppm` ×1.1, a recorded `budget_ppm` > REBALANCE_MAX_BUDGET_PPM**,
+  duplicate payment_hash, chunk-ppm spikes, pinned-channel non-pin broadcasts. Budgets
+  are checked as an INVARIANT against the stored `budget_ppm` (the max_fee_ppm the
+  planner/executor actually used), NOT by re-deriving `get_channel_rebalance_budget`'s
+  multi-layer math (escalation × profit cap × earn-ceiling accelerator × QueryRoutes
+  pricing) — mirroring engine internals in a checker false-positives the same way a
+  table-only hysteresis check would; subtle budget-logic bugs are the engine's unit
+  tests' job. Deliberately does NOT check the fee hysteresis rule (its cooldown escapes
+  — snap Δ / edge-zone crossing — depend on engine state absent from `fee_updates`, so a
+  table-only check false-positives on every legitimate floor-decay broadcast) nor the
+  LND-requiring matches (self-payment↔log, live /v1/fees) — those stay agent-side, and
+  the agent now does deep §2 analysis ONLY when `run_checks` reports a failure (clean →
+  one line, no hand-arithmetic).
 - graph_snapshots table: one row per `refresh_graph` run — total_nodes/channels/
   capacity + our_channels/capacity/peers. Historical, so our network position
   (growing / going dark) is trendable. Finally given a writer (`db.save_graph_snapshot`).
