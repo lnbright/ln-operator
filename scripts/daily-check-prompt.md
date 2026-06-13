@@ -238,17 +238,15 @@ an attempt; pinned-channel non-pin broadcasts.
     (`expected X, got Y on chan_id=…`). Each issue is a one-line `Issues:` entry; a
     `fail` always earns one.
 
-**Two detections still need a live LND read** (they're detection, not the
-hand-arithmetic above — run them daily, but they stay light):
-  - **Self-payment ↔ rebalance_log.** Pull last 24h of successful self-payments
-    (`/v1/payments`, final-hop pubkey == ours). Each must have a matching
-    `rebalance_log` row by `payment_hash` — flag any LND payment we never logged, and
-    any matched row whose `amount_sats`/`fee_sats` disagree with the payment. Also flag
-    a `forwarding_log` row that is actually a leg of one of these self-payments (same
-    hop, same second) → revenue double-counted.
-  - **new_fee_ppm ↔ live /v1/fees.** For channels broadcast in the last 24h, confirm
-    LND's live fee matches the `fee_updates.new_fee_ppm` we wrote; a mismatch means LND
-    silently dropped an update.
+That's the whole of §2 — no live-LND reconciliation to run by hand. Two LND-dependent
+checks that used to live here (self-payment ↔ rebalance_log matching, and
+new_fee_ppm ↔ live `/v1/fees`) were dropped: both are real failure modes but already
+covered by machinery that runs continuously, so neither ever fired. `sync_rebalances`
+already reconciles every circular self-payment into `rebalance_log` (the self-payment
+check was just re-verifying sync), and the 2h pipeline reads live `/v1/fees` each run
+and re-broadcasts on divergence (so an LND fee-reset self-heals within 2h, faster than
+this daily check would notice). If a real LND-reset guard is ever wanted, its home is a
+deterministic assertion in the pipeline right after broadcast, not this report.
 
 **Deliberately NOT verified — do not attempt by hand** (a wrong "check" is worse than
 none): the fee-update HYSTERESIS rule and a full `compute_fee_target` reconstruction.
