@@ -446,11 +446,35 @@ Based on the day's data, think about whether to suggest:
 
   **Step 2 — recommend ONE action and explain why it wins and why the obvious
   alternatives lose.** Terse, but the reasoning has to be there. The menu:
-    - **Raise outbound fee** — the lever you have *before* spending capital. If
-      the channel earns far below its refill price (e.g. earns 620, refill ≫3800),
-      the fee is too low to ever fund the refill: either it climbs toward
-      profitability or the channel is a loss-leader by definition. Right when
-      demand looks fee-tolerant.
+    - **Raise outbound fee** — the lever you have *before* spending capital, BUT
+      the fee engine already drives outbound fees autonomously every cycle
+      (sigmoid × market-multiplier, fast-drain bump, floor decay), so **before you
+      propose ANY fee change you MUST read the channel's CURRENT fee and what set
+      it** — query the latest `fee_updates` row for the channel (it carries the
+      `new_fee_ppm` and the `reason` string showing `sigmoid=… mult=… floor=… →
+      <ppm>`), or the live `/v1/fees` policy. Only then judge whether the lever has
+      any room left:
+        - If the engine has already pushed the channel to its **sigmoid × market
+          ceiling** (sigmoid maxed at `SIGMOID_MAX_PPM`=750, market mult near
+          `MARKET_MULT_MAX`=+1.0 → ~2× ≈ 1500, or a high decaying floor), the fee
+          lever is **EXHAUSTED** — there is nothing to "raise". Say so explicitly
+          ("already at <ppm>, engine-maxed"). Do NOT suggest "raise the fee" — it's
+          a no-op the operator can't act on and it's already higher than any number
+          you'd name. **"Capital decision" is never an acceptable stopping point on
+          its own** — when the fee lever is exhausted you MUST then walk the capital
+          menu below (splice / swap-refill / resize / close, + the Step-3 redeploy)
+          and produce the FULL recommendation: name the ONE action you'd take, give
+          its numbers, and say why the obvious alternatives lose — exactly as you
+          would if you'd picked a capital action from the top. Never emit a bare
+          "this is a capital decision" with no option attached.
+        - The only manual headroom above the engine ceiling is `overwrite_fee` to
+          PIN a fee higher than the sigmoid×market max — recommend that ONLY when
+          demand is genuinely fee-tolerant (it was still forwarding at the ceiling),
+          and name the current ppm and the pin target. On a pure sink already
+          draining at the ceiling, pinning higher just kills the last flow — don't.
+        - Genuine "raise" advice only applies when the channel earns far below its
+          refill price AND the engine has NOT yet reached the ceiling (room to
+          climb). Quote the current ppm in the recommendation either way.
     - **Splice in capacity** — buys runway proportional to the daily drain. Does
       NOT fix one-directionality, only delays empty. Right when demand is real and
       worth serving and you just need a bigger tank between refills. NOTE: splice
@@ -479,12 +503,16 @@ Based on the day's data, think about whether to suggest:
   the one lever with zero on-chain cost.
 
   Put the shape, the recommended action, the rejected alternatives, and the
-  numbers in one line, e.g.:
+  numbers in one line — and quote the CURRENT engine-set fee so "raise" vs
+  "already maxed" is unambiguous, e.g.:
   `bfx-lnd0 pure sink (0 in / 7.7m out, fed by Boltz+CoinGate), earns 620 ppm,
-  refill ≫3800, 17 failed runs → raise fee toward profitability (no on-chain
-  cost) before closing; more channels toward bfx won't refill a sink`. Never
-  recommend force-closing a freshly-opened channel (see the inactive-channel
-  guidance).
+  fee already engine-maxed at 1460 ppm (sigmoid 730 × mult +1.0), refill ≫1460,
+  17 failed runs → fee lever exhausted → swap-refill (loop-in ~3m sats, path-control
+  caveat) to keep serving the real demand; reject splice (only delays empty on a
+  one-directional sink) and close (earns 620 ppm × 7.7m/30d, worth keeping if a
+  refill path exists); more channels toward bfx won't refill a sink`. Note this
+  ends on a NAMED action with reasons, not "capital decision". Never recommend
+  force-closing a freshly-opened channel (see the inactive-channel guidance).
 
   **Step 3 — couple it: redeploy, don't just free capital.** A bare "close" or
   "resize-down" recovers sats but is only half an answer — the operator is left
