@@ -51,6 +51,13 @@ Report strictly from the buckets it returns:
     e.g. "bfx-lnd0 drops 2.7m→4.1m since 06-12".
   - `unchanged` → SUPPRESS, or fold into ONE terse line
     ("3 findings unchanged since <first_seen>: LNBiG/bfx/podcast stranded").
+    When folding, do NOT re-state the recommendation in compressed form — that
+    is exactly where vague verbs leak back in ("capital action remains the only
+    mover", "open inbound toward their sinks"). Either point to the standing
+    recommendation by date ("recommendation on record since <first_seen>, numbers
+    unmoved") or, if you re-surface the action at all, it must meet the FULL
+    Step-1/Step-2 bar (correct direction, a NAMED lever, named peer or declared
+    empty) — being a repeat earns no shortcut.
   - `resolved` → one-time "✅ resolved: …" note (was open, now absent), then it's gone.
 Your only judgement is what counts as a finding and what its `state` should include;
 the dedup itself is the store's job. Call `reconcile_findings` exactly once, after
@@ -429,9 +436,20 @@ Based on the day's data, think about whether to suggest:
     - **Dead-weight** — ~0 in AND ~0 out over 30d; the peer neither sources nor
       sinks meaningful flow. Capital is just parked.
 
-  **Naming the peer.** Whenever the action is "open a channel" (source-starved,
-  or a sink you judge worth feeding), DON'T hand-wave "add a 2nd source" — name
-  candidates. Call the targeted peer-finder with the sink's PEER pubkey:
+  **Naming the peer — MANDATORY whenever a suggestion contains the words "open",
+  "inbound", "add a source/peer", or any open-a-channel idea.** You may NOT ship
+  a line like "open inbound toward their sinks" — it names no node, and toward a
+  *sink* it's the banned direction (you open toward a SOURCE that routes into the
+  sink, never toward the sink itself). Before writing any such line you MUST run
+  the targeted peer-finder and let its result decide:
+    - **non-empty** → the channel is actually source-starved: name the top 1–2
+      candidates WITH evidence (`open toward <alias> (<pubkey-prefix>): NNNch,
+      route Xppm/Yh, reach+Z%`).
+    - **empty** → that IS the verdict: no peer has a cheap live route in, so it's a
+      true pure sink — drop "open" entirely and say the levers are
+      swap-refill / splice / close. Never paper over an empty result with a vague
+      "open inbound" hand-wave.
+  Call it with the sink's PEER pubkey:
 
       from peer_finder import suggest_peers_for
       cands = suggest_peers_for("<target peer pubkey>")   # graph cache + live QueryRoutes
@@ -560,8 +578,15 @@ channels — these are human decisions.
 ## 5. Exec summary
 
 Compose a summary that mirrors the pipeline-run Telegram style: emoji +
-bold section headers, with sub-bullets indented two spaces under `•`.
-Keep it terse — section lines under ~80 chars, ≤3 suggestion bullets.
+bold section headers. Keep it terse — top-level lines under ~80 chars, ≤3
+top-level suggestion bullets.
+
+**Use nested sub-bullets for anything with internal structure** rather than
+cramming it into one dense line. A capital suggestion in particular has four
+parts (shape / lever / why it wins / rejected alternatives) — break them onto
+indented sub-points under the `•` so each is scannable. Terse ≠ one-line: a
+2–4-line nested bullet that's clear beats a single run-on line that hides the
+reasoning. Indent sub-bullets two more spaces under their parent `•` with `-`.
 
 Format (Markdown — Telegram renders `*bold*`):
 
@@ -574,7 +599,10 @@ Format (Markdown — Telegram renders `*bold*`):
 🔧 *Fixed:* <commit hash + one-line, or "nothing">
 
 💡 *Suggestions:*
-  • <up to 3 bullets, terse>
+  • <headline — channel + shape>
+    - lever: <the ONE action + numbers>
+    - why: <why it wins; why the obvious alternatives lose>
+  • <up to 3 top-level bullets; flat one-liners fine when there's nothing to break out>
 ```
 
 The Pulse line is a single-line heartbeat, NOT a place to expand — everything on
