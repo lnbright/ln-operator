@@ -164,6 +164,12 @@ def run():
             log.info("htlc_monitor stopping")
             return
         except Exception as e:
+            # urllib3 sometimes surfaces a read-timeout as ConnectionError
+            # ("Read timed out.") — same idle-node case, skip the backoff window.
+            if isinstance(e, requests.exceptions.ConnectionError) and "Read timed out" in str(e):
+                log.debug("htlcevents idle read-timeout (ConnectionError) — resubscribing")
+                backoff = _RECONNECT_MIN
+                continue
             log.warning("htlcevents stream dropped: %s — reconnecting in %ds",
                         e, backoff)
             time.sleep(backoff)
