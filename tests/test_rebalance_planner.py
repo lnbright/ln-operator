@@ -125,7 +125,7 @@ class ProbeForceModeTests(unittest.TestCase):
 
     @patch("engine.rebalance_planner.lnd_client.query_routes")
     def test_force_probes_unjudged_for_diagnostics(self, mqr):
-        # unjudged → auto skips entirely, but force probes anyway (ceiling exists)
+        # calibrating → auto skips entirely, but force probes anyway (ceiling exists)
         mqr.side_effect = _by_source({"S1": 300})
         b = _budget(earned_ppm=None)
         b["affordable_ceiling_ppm"] = 1000

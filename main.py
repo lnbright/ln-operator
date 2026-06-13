@@ -19,6 +19,7 @@ Usage:
 """
 
 import sys
+import select
 import argparse
 import time
 from datetime import datetime
@@ -609,31 +610,67 @@ def _cheapest_probe_source(probe_results):
     return min(routed, key=lambda r: r["cost_ppm"])
 
 
+def _any_feasible_route(plans):
+    """True if ANY target has at least one source with a live route ≤ ceiling.
+
+    False means every probe that ran came back no-route/unavailable — refilling
+    is a capital problem, not a price one. (Returns False only when probes
+    actually ran; an empty/unprobed plan set is handled by the caller.)
+    """
+    return any(_cheapest_probe_source(p.get("probe_results")) for p in plans)
+
+
+def _prompt_proceed_with_timeout(prompt, timeout=30, default=False):
+    """Ask the operator a yes/no question, defaulting after `timeout` seconds.
+
+    Returns True only on an explicit y/yes. Anything else — n/no, an empty
+    line, the timeout firing, or a non-interactive stdin (cron/pipe) — returns
+    `default` (No), so an unattended run never blocks and never spends sats it
+    wasn't told to.
+    """
+    if not sys.stdin.isatty():
+        return default
+    print(prompt, end="", flush=True)
+    rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+    if not rlist:
+        print(f"\n  (no response in {timeout}s — defaulting to "
+              f"{'yes' if default else 'no'})")
+        return default
+    ans = sys.stdin.readline().strip().lower()
+    if ans in ("y", "yes"):
+        return True
+    if ans in ("n", "no"):
+        return False
+    return default
+
+
 def _show_queryroutes_intel(plans):
     """Print the QueryRoutes probe gloss + per-source results for each target.
 
     Surfaced under --force so the operator sees exactly what the dry-run probe
     found before any sats move: the real refill clearing price per overfull
     source (or no-route / unavailable), pulled from the same QueryRoutes call
-    SendPaymentV2's pathfinder uses.
+    SendPaymentV2's pathfinder uses. Each target is tagged with its calibration
+    state (calibrating / calibrated / stranded) — force looks at all three.
     """
     # One probe set per target — dedupe by target, keep first-seen order.
     seen = {}
     for p in plans:
         tid = p["target_chan_id"]
         if tid not in seen:
-            seen[tid] = (p["target_alias"], p.get("probe_results") or [])
+            seen[tid] = (p["target_alias"], p.get("target_state", "calibrating"),
+                         p.get("probe_results") or [])
 
-    if not any(pr for _, pr in seen.values()):
+    if not any(pr for _, _, pr in seen.values()):
         return  # probe disabled / nothing to show
 
     print(f"\n  QueryRoutes probe (dry-run pathfinding — no sats moved):")
     print(f"    Pricing the real refill route from each overfull source at the")
     print(f"    min chunk, the same way a live rebalance would route it.")
-    for alias, probe in seen.values():
-        print(f"\n    → {alias}:")
+    for alias, state, probe in seen.values():
+        print(f"\n    → {alias} [{state}]:")
         if not probe:
-            print(f"        (not probed — unjudged/disabled, will attempt blind)")
+            print(f"        (not probed — disabled, will attempt blind)")
             continue
         for r in sorted(probe, key=lambda r: (r["status"] != "route",
                                               r.get("cost_ppm") or 0)):
@@ -645,8 +682,7 @@ def _show_queryroutes_intel(plans):
                 mark = "probe unavailable"
             print(f"        {r['source_alias']}: {mark}")
         if not _cheapest_probe_source(probe):
-            print(f"        ⚠ no affordable live route from any source — "
-                  f"will attempt anyway (force), but a refill may not clear.")
+            print(f"        ⚠ no affordable live route from any source.")
 
 
 def _print_manual_rebalance_hints(failed_plans):
@@ -785,8 +821,21 @@ def cmd_rebalance_channels(args):
         return []
 
     # Under --force, show what the QueryRoutes probe found before moving sats.
+    # If EVERY probe that ran came back no-route, refilling looks infeasible at an
+    # affordable price — confirm with the operator (30s, default No) before
+    # burning attempts. No → show the manual_rebalance commands and stop.
     if force is not None:
         _show_queryroutes_intel(plans)
+        probed = any(p.get("probe_results") for p in plans)
+        if probed and not _any_feasible_route(plans):
+            proceed = _prompt_proceed_with_timeout(
+                "\n  No affordable route found from any source for any target.\n"
+                "  Try the rebalance anyway? [y/N] (30s, default N): ",
+                timeout=30, default=False)
+            if not proceed:
+                print("\n  Skipping auto-rebalance.")
+                _print_manual_rebalance_hints(primaries)
+                return []
 
     print(f"\nExecuting {len(primaries)} primary plan(s) (+ {len(fallbacks)} fallback(s)):\n")
     results = execute_rebalance_plans(plans, log)

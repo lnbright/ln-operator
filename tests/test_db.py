@@ -21,11 +21,11 @@ DAY = 86400
 
 
 class EarnedPpmWideningTests(unittest.TestCase):
-    """Evidence widening in get_channel_earned_ppm — the unjudged-cliff fix.
+    """Evidence widening in get_channel_earned_ppm — the calibrating-cliff fix.
 
     A channel whose volume sits just outside the standard window must stay
-    judged on that older evidence; only a channel with too little volume in
-    the whole max lookback is unjudged."""
+    calibrated on that older evidence; only a channel with too little volume in
+    the whole max lookback is calibrating."""
 
     def setUp(self):
         fd, self.db_path = tempfile.mkstemp(suffix=".db")
@@ -48,7 +48,7 @@ class EarnedPpmWideningTests(unittest.TestCase):
             """, (self.now - age_days * DAY, chan_out, amount_out, amount_out, fee))
 
     def test_recent_volume_uses_standard_window(self):
-        # Enough volume inside 21d → judged on it; older traffic not pulled in.
+        # Enough volume inside 21d → calibrated on it; older traffic not pulled in.
         self._forward("chan", 5, config.EARNED_PPM_MIN_VOLUME_SATS, 2_000)
         self._forward("chan", config.EARNED_PPM_WINDOW_DAYS + 5,
                       config.EARNED_PPM_MIN_VOLUME_SATS, 0)  # would dilute ppm to 1000

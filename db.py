@@ -107,7 +107,7 @@ def _migrate_channel_signals_v2():
     These back the fee-redesign layers:
       - floor_decay_* : Layer 2 soft outbound floor (decays toward the clearing
         fee while a channel sits idle at/above the last-refill floor).
-      - structural_flag_ts : Layer 1/3 — when a channel was judged a structural
+      - structural_flag_ts : Layer 1/3 — when a channel was calibrated a structural
         liquidity gap (rebalance not profitable, organic refill failed).
       - inbound_fee_* : Layer 3 — last broadcast inbound fee (signed; negative =
         discount) and its timestamp for inbound hysteresis.
@@ -314,7 +314,7 @@ CREATE TABLE IF NOT EXISTS alerts (
 -- ─── Channel maturity tracking ──────────────────────────────────
 -- Tracks how much time each channel has spent in a balanced state. This is now
 -- a dashboard-only stat ("balanced N days"); it no longer feeds the rebalance
--- budget, which judges profitability live from earned_ppm (judged/unjudged) +
+-- budget, which judges profitability live from earned_ppm (calibrated/calibrating) +
 -- last_refill_ppm + failure escalation. No PROVEN/maturity tiering remains.
 CREATE TABLE IF NOT EXISTS channel_maturity (
     chan_id          TEXT PRIMARY KEY,
@@ -925,12 +925,12 @@ def get_channel_earned_ppm(chan_id, days=EARNED_PPM_WINDOW_DAYS):
     volume suffices or the cap is hit. Adverse evidence must age out gradually,
     not expire at a cliff: without this, a profit-capped channel that goes quiet
     (often BECAUSE it is depleted and can't forward) sheds its cap — and its
-    structural verdict — the moment the trailing window drains below the judging
+    structural verdict — the moment the trailing window drains below the calibrating
     threshold, and the budget snaps back to full failure-escalation (up to
     REBALANCE_MAX_BUDGET_PPM) with no profitability evidence ever consulted.
 
     Returns (None, out_volume) only when even the max lookback holds too little
-    traffic to trust the ratio. None is the "unjudged" sentinel the profit gate
+    traffic to trust the ratio. None is the "calibrating" sentinel the profit gate
     keys off (it must NOT treat a genuinely quiet/new channel as unprofitable).
     """
     now = int(time.time())

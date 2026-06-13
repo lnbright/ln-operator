@@ -248,7 +248,7 @@ class SoftFloorDecayTests(unittest.TestCase):
 # ─── get_channel_rebalance_budget ────────────────────────────────
 
 class RebalanceBudgetTests(unittest.TestCase):
-    # earned_ppm=None (unjudged) on the legacy cases → profit cap never binds,
+    # earned_ppm=None (calibrating) on the legacy cases → profit cap never binds,
     # so escalation behaves exactly as before.
     def test_bootstrap_default_when_no_history(self):
         with patch("db.get_last_refill_ppm", return_value=None), \

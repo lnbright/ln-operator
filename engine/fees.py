@@ -511,7 +511,7 @@ def recompute_all_signals():
         last_refill = db.get_last_refill_ppm(chan_id)
         failures = db.count_failures_since_last_success(chan_id)
 
-        # Layer 1: stamp the structural-liquidity flag when a channel is judged
+        # Layer 1: stamp the structural-liquidity flag when a channel is calibrated
         # unprofitable to refill and keeps failing. First-stamp on entry, keep
         # the original timestamp thereafter, clear when it recovers. Local import
         # avoids a load-order cycle in engine/__init__.

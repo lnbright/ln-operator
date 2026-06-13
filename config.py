@@ -129,20 +129,20 @@ REBALANCE_FEE_MARGIN               = 1.1    # outbound fee floor = last_refill �
 # ─── Profitability gate (Layer 1) ────────────────────────────────
 # Don't pay more to refill a channel than it can earn back. The escalation above
 # still bootstraps/discovers price freely; this caps it for channels we have
-# enough data to JUDGE. A judged channel's budget is capped at its trailing
+# enough data to CALIBRATE. A calibrated channel's budget is capped at its trailing
 # earned-ppm × horizon (≈ how many fill/drain cycles we'll wait to recoup).
-# Unjudged channels (too little volume to trust the ratio) keep full escalation.
+# Calibrating channels (too little volume to trust the ratio) keep full escalation.
 EARNED_PPM_WINDOW_DAYS             = 21         # trailing window for per-channel earned-ppm
-EARNED_PPM_MIN_VOLUME_SATS         = 2_000_000  # min OUT-traffic to trust the ratio; below → unjudged
+EARNED_PPM_MIN_VOLUME_SATS         = 2_000_000  # min OUT-traffic to trust the ratio; below → calibrating
 EARNED_PPM_MAX_LOOKBACK_DAYS       = 90         # evidence widening: if the standard window holds
                                                 # < MIN_VOLUME, double it (21→42→84→90) until volume
                                                 # suffices or this cap is hit. Adverse evidence ages,
                                                 # it doesn't expire — without this, a profit-capped
                                                 # channel that goes quiet sheds its cap the moment the
                                                 # 21d window drains and the budget snaps back to full
-                                                # escalation (the "unjudged cliff"). Only a channel
-                                                # with < MIN_VOLUME out-traffic in 90d is unjudged.
-REBALANCE_PROFIT_HORIZON           = 1.25       # judged budget cap = earned_ppm × this.
+                                                # escalation (the "calibrating cliff"). Only a channel
+                                                # with < MIN_VOLUME out-traffic in 90d is calibrating.
+REBALANCE_PROFIT_HORIZON           = 1.25       # calibrated budget cap = earned_ppm × this.
                                                 # ≈ break-even: only refill if demonstrated
                                                 # willingness-to-pay (earned_ppm) roughly covers
                                                 # the recoup price (refill × FEE_MARGIN). The 0.25
@@ -151,7 +151,7 @@ REBALANCE_PROFIT_HORIZON           = 1.25       # judged budget cap = earned_ppm
 REBALANCE_STRUCTURAL_FAIL_THRESHOLD= 5          # consecutive fails while profit-capped → flag structural
 
 # QueryRoutes intelligence. When True, the planner runs ONE QueryRoutes
-# dry-run (no payment) per overfull SOURCE for each JUDGED depleted target, at the
+# dry-run (no payment) per overfull SOURCE for each CALIBRATED depleted target, at the
 # minimum chunk (smallest amount = strictly easiest to route) capped at the
 # affordable ceiling. That single set of probes drives BOTH halves:
 #   - pricing: price the bid off the CHEAPEST feasible source (raise the budget up
@@ -171,7 +171,7 @@ REBALANCE_QUERYROUTES_ENABLED      = True
 # records a synthetic failed cycle (failure_reason QR_NO_AFFORDABLE_ROUTE) so the
 # failure count still climbs to the structural threshold and surfaces the capital
 # decision. Infeasibility is UNIVERSAL — only ALL sources failing justifies the
-# drop, never a single source's no-route. Safety: judged-only; a probe that is
+# drop, never a single source's no-route. Safety: calibrated-only; a probe that is
 # UNAVAILABLE (LND down) is UNKNOWN, never no-route, so a transport blip can't
 # strand; never records on a dry-run. Set False to keep the pricing/ranking benefit
 # of the probe while never stranding (a no-route channel just attempts normally).

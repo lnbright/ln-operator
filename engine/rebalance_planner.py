@@ -39,23 +39,23 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
     REBALANCE_MAX_BUDGET_PPM — this discovers price.
 
     Profitability gate (Layer 1): for channels with enough trailing OUT-volume to
-    JUDGE, cap the budget at earned_ppm × REBALANCE_PROFIT_HORIZON — never pay more
+    CALIBRATE, cap the budget at earned_ppm × REBALANCE_PROFIT_HORIZON — never pay more
     to refill than the channel can earn back within ~horizon fill/drain cycles.
-    Channels we can't judge (earned_ppm is None) keep full escalation untouched —
+    Channels we can't calibrate (earned_ppm is None) keep full escalation untouched —
     capping them would kill the price-discovery the escalation exists for.
-    A judged channel whose escalation exceeds the profit cap is `profit_capped`;
+    A calibrated channel whose escalation exceeds the profit cap is `profit_capped`;
     if it has also failed REBALANCE_STRUCTURAL_FAIL_THRESHOLD times it is
     `structural` (rebalancing is the wrong tool — needs the Layer-3 ladder/capital).
 
-    Earn-ceiling accelerator: for a JUDGED channel whose anchor sits well below
+    Earn-ceiling accelerator: for a CALIBRATED channel whose anchor sits well below
     what it can profitably afford (a single lucky-cheap refill can poison
     `last_refill` to a value far under `earned_ppm`), plain escalation crawls up
     at STEP-of-a-tiny-base per run and never rediscovers the clearing price. So
     each failed run instead closes STEP of the gap between the anchor and the
     affordable ceiling (`min(profit_cap, MAX)`), reaching it in 1/STEP (=5) runs.
     It reuses ESCALATION_STEP (no new knob), only ever RAISES the budget (a max),
-    only fires for judged channels, and climbs only up TO the ceiling — so it
-    never creates a `profit_capped`/`structural` state and leaves unjudged price
+    only fires for calibrated channels, and climbs only up TO the ceiling — so it
+    never creates a `profit_capped`/`structural` state and leaves calibrating price
     discovery untouched. It is inert unless `earned_ppm × horizon > 2 × anchor`.
 
     Recovery escape: `structural` describes a depleted channel that can't be
@@ -84,21 +84,21 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
     if earned_ppm is not None:
         profit_cap = earned_ppm * REBALANCE_PROFIT_HORIZON
 
-    # The most this channel could ever justify paying: the profit cap for a judged
+    # The most this channel could ever justify paying: the profit cap for a calibrated
     # channel, else the hard MAX. This is the headroom the escalation ladder climbs
     # toward; the QueryRoutes probe may set the bid up TO here but no further.
     affordable_ceiling = (min(profit_cap, REBALANCE_MAX_BUDGET_PPM)
                           if profit_cap is not None else REBALANCE_MAX_BUDGET_PPM)
 
-    # Earn-ceiling accelerator: when a JUDGED channel's anchor sits well below
+    # Earn-ceiling accelerator: when a CALIBRATED channel's anchor sits well below
     # what it can profitably afford — e.g. one lucky-cheap refill poisoned
     # last_refill to 7 ppm on a channel earning 576 — plain escalation crawls
     # up at STEP-of-a-tiny-base per run and effectively never rediscovers the
     # clearing price. Instead let each failed run close STEP of the gap between
     # the anchor and the affordable ceiling, reaching it in 1/STEP (=5) runs.
     # Reuses STEP — no new knob. It only ever RAISES escalated (a max), only for
-    # judged channels, and only up TO the ceiling (= the profit cap), so it can
-    # never create a profit_capped/structural state and never touches unjudged
+    # calibrated channels, and only up TO the ceiling (= the profit cap), so it can
+    # never create a profit_capped/structural state and never touches calibrating
     # price discovery. Inert when earnings don't justify it: the gap is only
     # positive once ceiling > 2·base (earned×horizon > 2·last_refill).
     accelerated = False
@@ -195,11 +195,11 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record, force=False):
     `force` = operator override (the `rebalance_channels --force` command). In
     force mode the probe still prices/ranks and reports per-source results, but it
     NEVER strands (drop is always False) and NEVER records a synthetic cycle, and
-    it probes UNJUDGED channels too (purely for diagnostics — the JUDGED-only rail
+    it probes CALIBRATING channels too (purely for diagnostics — the CALIBRATED-only rail
     exists to avoid stranding, which force doesn't do).
 
     Conservative by construction:
-      - JUDGED only in AUTO mode — unjudged keeps full price discovery via real
+      - CALIBRATED only in AUTO mode — calibrating keeps full price discovery via real
         attempts; force probes everything for visibility but can't strand.
       - a probe that's UNAVAILABLE (LND down) is treated as UNKNOWN, never as
         no-route → a transport blip can never strand a channel.
@@ -213,12 +213,12 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record, force=False):
     # REBALANCE_QUERYROUTES_ENABLED gates the probe (pricing + cheapest-first
     # ranking — pure upside, never strands). The drop/strand on an all-no-route
     # verdict is separately gated below by REBALANCE_QUERYROUTES_EARLYOUT_ENABLED.
-    # Unjudged channels skip the probe in AUTO mode (price discovery via real
+    # Calibrating channels skip the probe in AUTO mode (price discovery via real
     # attempts), but force probes them anyway — it only diagnoses, never strands.
     if not REBALANCE_QUERYROUTES_ENABLED or not sources:
         return keep
     if budget.get("earned_ppm") is None and not force:
-        return keep  # unjudged + auto → plan normally
+        return keep  # calibrating + auto → plan normally
     ceiling = budget.get("affordable_ceiling_ppm")
     if not ceiling:
         return keep
@@ -399,7 +399,7 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
     rebalance_target = force if force is not None else REBALANCE_TARGET
 
     # Layer 1/3 gate: drop targets the liquidity ladder says we should NOT pay to
-    # refill (judged structurally unprofitable, or being defended with an inbound
+    # refill (calibrated structurally unprofitable, or being defended with an inbound
     # discount instead). This is where the profit gate actually stops the grind —
     # the channel falls out of planning. `force` is an explicit operator override,
     # so honour it and skip the gate. outbound_ppm doesn't affect the rebalance
@@ -409,6 +409,7 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
     target_budgets = {}
     target_source_order = {}
     target_probe = {}  # tid -> per-source QueryRoutes intel (for --force display)
+    target_state = {}  # tid -> "calibrating" | "calibrated" | "stranded"
 
     if needs_inbound:
         now = int(time.time())
@@ -418,6 +419,15 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
         kept = []
         for ch in needs_inbound:
             budget = get_channel_rebalance_budget(ch["chan_id"])
+            # Calibration state for the operator display: a channel with enough
+            # trailing volume to price (earned_ppm) is CALIBRATED; one that has
+            # also tripped the structural flag is STRANDED; otherwise CALIBRATING.
+            if budget.get("structural"):
+                target_state[ch["chan_id"]] = "stranded"
+            elif budget.get("earned_ppm") is not None:
+                target_state[ch["chan_id"]] = "calibrated"
+            else:
+                target_state[ch["chan_id"]] = "calibrating"
             # force is an explicit operator override of the profit/structural gate;
             # skip the ladder verdict and let the channel be planned regardless.
             if not forced:
@@ -528,6 +538,7 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
                 "max_fee_ppm": max_fee_ppm,
                 "budget_reason": budget["reason"],
                 "probe_results": target_probe.get(target_ch["chan_id"], []),
+                "target_state": target_state.get(target_ch["chan_id"], "calibrating"),
             })
 
             # Reserve this source capacity and reduce target remaining
@@ -579,6 +590,7 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
                 "max_fee_ppm": max_fee_ppm,
                 "budget_reason": budget["reason"],
                 "probe_results": target_probe.get(target_ch["chan_id"], []),
+                "target_state": target_state.get(target_ch["chan_id"], "calibrating"),
                 "is_fallback": True,
             })
 
