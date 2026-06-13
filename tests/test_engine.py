@@ -282,6 +282,21 @@ class RebalanceBudgetTests(unittest.TestCase):
             r = engine.get_channel_rebalance_budget("chan")
         self.assertEqual(r["max_fee_ppm"], config.REBALANCE_MAX_BUDGET_PPM)
 
+    def test_accelerator_never_exceeds_max_budget(self):
+        # #4 invariant (reconcile.rebalance_budget_over_max guards this at runtime):
+        # the earn-ceiling accelerator RAISES the budget, so verify its own clamp —
+        # earnings high enough that earned×horizon blows past MAX must still land at
+        # exactly MAX, never above. A poisoned-low anchor + max failures fires the
+        # accelerator toward the ceiling = min(earned×horizon, MAX) = MAX.
+        with patch("db.get_last_refill_ppm", return_value=10), \
+             patch("db.count_failures_since_last_success",
+                   return_value=config.REBALANCE_STRUCTURAL_FAIL_THRESHOLD), \
+             patch("db.get_channel_earned_ppm", return_value=(1_000_000.0, 50_000_000)):
+            r = engine.get_channel_rebalance_budget("chan")
+        self.assertLessEqual(r["max_fee_ppm"], config.REBALANCE_MAX_BUDGET_PPM)
+        self.assertEqual(r["max_fee_ppm"], config.REBALANCE_MAX_BUDGET_PPM)
+        self.assertFalse(r["profit_capped"])   # cap far above MAX → MAX binds, not the cap
+
     # ── Layer 1 profitability gate ──
     def test_unjudged_keeps_full_escalation(self):
         # No earned-ppm assessment → escalation runs free (this is the LNbits
@@ -749,6 +764,49 @@ class InboundDiscountPpmTests(unittest.TestCase):
         # same-channel fee stays positive.
         d = engine.inbound_discount_ppm(0.0, 30)
         self.assertGreaterEqual(d, -(30 - config.INBOUND_DISCOUNT_SAFETY_MARGIN_PPM))
+
+
+# ─── update_all_fees: pinned-channel broadcast (#7 invariant) ─────
+
+class FeePinBroadcastTests(unittest.TestCase):
+    """#7 invariant — a pinned channel broadcasts EXACTLY its pinned ppm, never a
+    computed sigmoid/floor value. This is the dev-time guard for reconcile's
+    runtime `fee_pin_violation` check: catch a pin-bypass before it ships, not the
+    morning after."""
+
+    def _run(self, pinned_ppm, current_ppm, local_ratio=0.5):
+        channels = [{"chan_id": "C", "channel_point": "cp", "peer_alias": "peer",
+                     "local_ratio": local_ratio, "active": True}]
+        fee_report = {"channel_fees": [
+            {"channel_point": "cp", "base_fee_msat": 0, "fee_per_mil": current_ppm}]}
+        with patch("lnd_client.get_channels", return_value=channels), \
+             patch("lnd_client.resolve_aliases", side_effect=lambda c: c), \
+             patch("lnd_client.get_fee_report", return_value=fee_report), \
+             patch("db.get_fee_overrides", return_value={"C": {"pinned_ppm": pinned_ppm}}), \
+             patch("db.get_channel_signals", return_value={}), \
+             patch("db.get_last_refill_ppm", return_value=None):
+            return engine.update_all_fees(dry_run=True)
+
+    def test_pinned_channel_broadcasts_the_pin(self):
+        # pin 250 over a live 300 → the broadcast target IS the pin, sourced "pin".
+        updates = self._run(pinned_ppm=250, current_ppm=300)
+        self.assertEqual(len(updates), 1)
+        u = updates[0]
+        self.assertEqual(u["new_ppm"], 250)     # never a sigmoid/floor value
+        self.assertTrue(u["pinned"])
+        self.assertEqual(u["source"], "pin")
+        self.assertTrue(u["broadcast"])
+
+    def test_pin_equal_to_current_does_not_rebroadcast(self):
+        # pin already live → nothing to broadcast (and so nothing that could violate).
+        self.assertEqual(self._run(pinned_ppm=300, current_ppm=300), [])
+
+    def test_pin_overrides_a_draining_channel_sigmoid(self):
+        # local_ratio 0.0 would drive sigmoid toward SIGMOID_MAX_PPM; the pin must
+        # win regardless, proving the pin short-circuits the whole fee computation.
+        updates = self._run(pinned_ppm=120, current_ppm=700, local_ratio=0.0)
+        self.assertEqual(updates[0]["new_ppm"], 120)
+        self.assertEqual(updates[0]["source"], "pin")
 
 
 if __name__ == "__main__":
