@@ -26,7 +26,8 @@ from datetime import datetime
 
 import db
 import engine
-from config import REBALANCE_LOW_THRESHOLD, REBALANCE_HIGH_THRESHOLD, REBALANCE_MAX_AMOUNT_RATIO
+from config import (REBALANCE_LOW_THRESHOLD, REBALANCE_HIGH_THRESHOLD,
+                    REBALANCE_MAX_AMOUNT_RATIO, REBALANCE_QUERYROUTES_MIN_CHUNK_SATS)
 from logging_config import setup_logging, get_logger, set_console_level
 import advisor
 import telegram_bot
@@ -664,9 +665,14 @@ def _show_queryroutes_intel(plans):
     if not any(pr for _, _, pr in seen.values()):
         return  # probe disabled / nothing to show
 
+    chunk = REBALANCE_QUERYROUTES_MIN_CHUNK_SATS
     print(f"\n  QueryRoutes probe (dry-run pathfinding — no sats moved):")
-    print(f"    Pricing the real refill route from each overfull source at the")
-    print(f"    min chunk, the same way a live rebalance would route it.")
+    print(f"    ATTENTION: a probe is a point-in-time dry run. A green route can")
+    print(f"    still FAIL the real rebalance — liquidity shifts and gossip/fee")
+    print(f"    updates land between probing and paying. Treat it as a price")
+    print(f"    estimate, not a guarantee.")
+    print(f"    Routing min chunk = {chunk:,} sats to each overfull source, the")
+    print(f"    same way a live rebalance would route it (cost ≤ affordable ceiling).")
     for alias, state, probe in seen.values():
         print(f"\n    → {alias} [{state}]:")
         if not probe:
@@ -675,14 +681,14 @@ def _show_queryroutes_intel(plans):
         for r in sorted(probe, key=lambda r: (r["status"] != "route",
                                               r.get("cost_ppm") or 0)):
             if r["status"] == "route":
-                mark = f"{r['cost_ppm']} ppm"
+                mark = f"✅ {r['cost_ppm']} ppm"
             elif r["status"] == "no_route":
-                mark = "no route ≤ ceiling"
+                mark = "❌ no route ≤ ceiling"
             else:
-                mark = "probe unavailable"
+                mark = "⚠️  probe unavailable (LND/transport)"
             print(f"        {r['source_alias']}: {mark}")
         if not _cheapest_probe_source(probe):
-            print(f"        ⚠ no affordable live route from any source.")
+            print(f"        ❌ no affordable live route from any source.")
 
 
 def _print_manual_rebalance_hints(failed_plans):
