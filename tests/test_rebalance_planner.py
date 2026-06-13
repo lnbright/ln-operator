@@ -44,7 +44,17 @@ def _by_source(costs, raises=()):
     return fake
 
 
-class ProbeFeasibilityTests(unittest.TestCase):
+class _ProbeTestBase(unittest.TestCase):
+    """Stub get_channel_edge so the last-hop lookup adds 0 ppm (no live LND call);
+    last-hop accounting itself is covered by ProbeLastHopTests."""
+    def setUp(self):
+        p = patch("engine.rebalance_planner.lnd_client.get_channel_edge",
+                  return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
+
+
+class ProbeFeasibilityTests(_ProbeTestBase):
     @patch("engine.rebalance_planner.db.save_rebalance_attempt")
     @patch("engine.rebalance_planner.lnd_client.query_routes")
     def test_all_sources_no_route_drops_and_records(self, mqr, msave):
@@ -108,7 +118,7 @@ class ProbeFeasibilityTests(unittest.TestCase):
         msave.assert_not_called()
 
 
-class ProbeForceModeTests(unittest.TestCase):
+class ProbeForceModeTests(_ProbeTestBase):
     """force=True: diagnose + price + rank, but NEVER strand and NEVER record."""
 
     @patch("engine.rebalance_planner.db.save_rebalance_attempt")
@@ -144,7 +154,50 @@ class ProbeForceModeTests(unittest.TestCase):
         self.assertEqual(v["source_order"], ["S2", "S1"])
 
 
-class ProbePricingTests(unittest.TestCase):
+class ProbeLastHopTests(_ProbeTestBase):
+    """The target peer's final-hop fee into our channel is added to each source's
+    cost (the probe routes to dest=target_peer, so LND omits it)."""
+
+    def _edge(self, target_pub, base_msat=0, rate_ppm=0, disabled=False):
+        return {"node1_pub": target_pub, "node2_pub": "ff" * 33,
+                "node1_policy": {"fee_base_msat": str(base_msat),
+                                 "fee_rate_milli_msat": str(rate_ppm),
+                                 "disabled": disabled},
+                "node2_policy": {"fee_base_msat": "0", "fee_rate_milli_msat": "0"}}
+
+    @patch("engine.rebalance_planner.lnd_client.get_channel_edge")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_last_hop_rate_added_to_cost(self, mqr, medge):
+        # target peer charges 200 ppm outbound into us; probe route costs 50 ppm
+        # → reported cost = 250 ppm (and the bid jumps to 250, ≤ 721 ceiling).
+        medge.return_value = self._edge("ab" * 33, rate_ppm=200)
+        mqr.side_effect = _by_source({"S1": 50})
+        v = rp._queryroutes_probe(_target(), _budget(14, 721), [_source("S1")],
+                                  999, record=True)
+        self.assertEqual(v["probe_results"][0]["cost_ppm"], 250)
+        self.assertEqual(v["budget"]["max_fee_ppm"], 250)
+
+    @patch("engine.rebalance_planner.lnd_client.get_channel_edge")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_last_hop_base_fee_amortised(self, mqr, medge):
+        # 1000 msat base over a 100k probe = 10 ppm, added on top of a 0 ppm route.
+        medge.return_value = self._edge("ab" * 33, base_msat=1000)
+        mqr.side_effect = _by_source({"S1": 0})
+        v = rp._queryroutes_probe(_target(), _budget(14, 721), [_source("S1")],
+                                  999, record=True)
+        self.assertEqual(v["probe_results"][0]["cost_ppm"], 10)
+
+    @patch("engine.rebalance_planner.lnd_client.get_channel_edge")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_edge_lookup_failure_degrades_to_probe_cost(self, mqr, medge):
+        medge.side_effect = RuntimeError("LND down")
+        mqr.side_effect = _by_source({"S1": 50})
+        v = rp._queryroutes_probe(_target(), _budget(14, 721), [_source("S1")],
+                                  999, record=True)
+        self.assertEqual(v["probe_results"][0]["cost_ppm"], 50)
+
+
+class ProbePricingTests(_ProbeTestBase):
     @patch("engine.rebalance_planner.lnd_client.query_routes")
     def test_prices_off_cheapest_and_ranks_cheapest_first(self, mqr):
         # S1=300, S2=150 → bid jumps to 150, order = [S2, S1]

@@ -161,9 +161,56 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
     }
 
 
+def _target_inbound_ppm(target_ch, amount_sats):
+    """The fee the TARGET PEER charges to forward the final hop INTO our channel
+    (target_peer → us) — the ONE hop the probe omits.
+
+    The probe routes to `dest=target_peer`, so LND charges nothing for the hop into
+    it (it's the destination). But the real rebalance is a circular self-payment
+    (`us → source → … → target_peer → us`, last_hop pinned to target_peer), where
+    the target peer is an INTERMEDIATE forwarding into our channel and DOES charge
+    its outbound fee on the target channel. Add it back — exactly as peer_finder's
+    `_first_hop_ppm` adds the source's omitted first hop, but on the LAST hop.
+
+    One `get_channel_edge` lookup; a node's OWN advertised policy (node1_policy if
+    it is node1, else node2_policy) is its outbound forwarding fee, so direction is
+    unambiguous. Base fee is amortised over `amount_sats` so the result is directly
+    comparable to the probe's amount-derived `fee_ppm`. Returns 0.0 on any failure /
+    disabled edge (degrade to probe-only cost rather than break pricing).
+    """
+    chan_id = target_ch.get("chan_id")
+    pubkey = target_ch.get("peer_pubkey")
+    if not chan_id or not pubkey:
+        return 0.0
+    try:
+        edge = lnd_client.get_channel_edge(chan_id)
+    except Exception as e:
+        log.debug("rebalance probe: target edge %s lookup failed: %s", chan_id, e)
+        return 0.0
+    if not edge:
+        return 0.0
+    if edge.get("node1_pub") == pubkey:
+        pol = edge.get("node1_policy")
+    elif edge.get("node2_pub") == pubkey:
+        pol = edge.get("node2_policy")
+    else:
+        return 0.0
+    if not pol or pol.get("disabled"):
+        return 0.0
+    base_msat = int(pol.get("fee_base_msat", 0) or 0)
+    rate_ppm = int(pol.get("fee_rate_milli_msat", 0) or 0)
+    fee_msat = base_msat + amount_sats * rate_ppm / 1000.0
+    return fee_msat * 1000.0 / amount_sats if amount_sats else 0.0
+
+
 def _queryroutes_probe(target_ch, budget, sources, run_id, record, force=False):
     """ONE min-chunk QueryRoutes dry-run per source — drives BOTH the
     infeasibility early-out AND the bid, from the same probes.
+
+    Each source's cost is the probe's end-to-end `fee_ppm` PLUS the target peer's
+    fee to forward the final hop into our channel (`_target_inbound_ppm`) — the
+    probe terminates AT the target peer (a free destination hop) but the real
+    circular rebalance pays that peer's outbound fee, so it's added back here.
 
     For a depleted target it probes every overfull source at the MINIMUM chunk
     (`REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`; smallest amount = strictly the easiest
@@ -224,7 +271,13 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record, force=False):
         return keep
 
     amount = REBALANCE_QUERYROUTES_MIN_CHUNK_SATS
-    ceiling_sats = max(1, int(amount * ceiling / 1_000_000))
+    # The target peer's fee to forward the final hop into our channel — omitted by
+    # the probe (it routes to dest=target_peer, a free destination hop) but paid by
+    # the real circular rebalance. Add it to every source's cost, and shrink the
+    # probe's fee_limit by it so a route + that final hop together stay ≤ ceiling.
+    last_hop_ppm = _target_inbound_ppm(target_ch, amount)
+    effective_ceiling = max(0.0, ceiling - last_hop_ppm)
+    ceiling_sats = max(1, int(amount * effective_ceiling / 1_000_000))
     routed = []      # (source, cost_ppm) for sources with a live route ≤ ceiling
     unavailable = 0  # probes that errored — UNKNOWN, never counted as no-route
     probe_results = []  # per-source intel for operator display (force mode)
@@ -244,10 +297,11 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record, force=False):
                                   "status": "unavailable", "cost_ppm": None})
             continue
         if probe is not None:
-            routed.append((s, probe["fee_ppm"]))
+            cost = int(round(probe["fee_ppm"] + last_hop_ppm))  # + target's final hop
+            routed.append((s, cost))
             probe_results.append({"source_chan_id": s["chan_id"],
                                   "source_alias": s["peer_alias"],
-                                  "status": "route", "cost_ppm": probe["fee_ppm"]})
+                                  "status": "route", "cost_ppm": cost})
         else:
             probe_results.append({"source_chan_id": s["chan_id"],
                                   "source_alias": s["peer_alias"],

@@ -126,7 +126,16 @@
     CALIBRATED depleted target, at the MINIMUM chunk (`REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`)
     capped at the affordable ceiling (`affordable_ceiling_ppm` = `min(profit_cap, MAX)`
     calibrated / `MAX` calibrating). That single set of probes drives BOTH halves, and the
-    sources are ranked cheapest-first on the way out so the executor pays the cheapest:
+    sources are ranked cheapest-first on the way out so the executor pays the cheapest.
+    **Each source's cost = the probe's end-to-end `fee_ppm` PLUS the target peer's fee
+    to forward the final hop into our channel** (`_target_inbound_ppm`): the probe routes
+    to `dest=target_peer`, so LND charges nothing for the hop into it (free destination
+    hop), but the real circular rebalance (`us→source→…→target_peer→us`) pays that peer's
+    outbound fee on the target channel — so it's added back via one `get_channel_edge`
+    lookup (target peer's own policy, base amortised over the chunk), and the probe's
+    `fee_limit` is shrunk by it so route+final-hop stays ≤ ceiling. This is the SAME
+    omission peer_finder fixes with `_first_hop_ppm`, but on the LAST hop — without it
+    direct neighbours read a deceptively low/0 ppm (their inbound fee invisible).
     - **pricing** (was "v1"): price the bid off the CHEAPEST feasible source — raise
       `max_fee_ppm` up to its live cost (bounded by the ceiling), so an affordable
       refill lands now AND via the cheapest source, instead of the ~5-run grind (bfx
