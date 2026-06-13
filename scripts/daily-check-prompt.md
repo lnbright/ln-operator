@@ -222,10 +222,12 @@ gets it subtly, invisibly wrong, which is why this moved to code.
     from reconcile import run_checks
     issues = run_checks(window_days=1)   # [{check, severity 'fail'|'warn', message}, …]
 
-Table-only, it covers: rebalance success rows missing a payment_hash; `fee_ppm` over
-`REBALANCE_MAX_BUDGET_PPM`; **`fee_ppm` over the budget the row recorded (×1.1); a
-recorded budget itself over the max;** duplicate payment_hash; chunk-ppm spikes within
-an attempt; pinned-channel non-pin broadcasts.
+Table-only, it covers the runtime-only failure modes (things a unit test can't
+reproduce): rebalance success rows missing a payment_hash; `fee_ppm` over
+`REBALANCE_MAX_BUDGET_PPM`; `fee_ppm` over the budget the row recorded (×1.1);
+duplicate payment_hash; chunk-ppm spikes within an attempt. (Pure-logic invariants —
+budget ≤ max, a pinned channel broadcasting its pin — are NOT here; they're covered by
+engine unit tests, so a runtime re-check would add nothing.)
 
 **Step 2 — branch on the result:**
   - **empty → §2 is DONE.** Don't re-derive anything "to be sure" — the deterministic
@@ -238,15 +240,7 @@ an attempt; pinned-channel non-pin broadcasts.
     (`expected X, got Y on chan_id=…`). Each issue is a one-line `Issues:` entry; a
     `fail` always earns one.
 
-That's the whole of §2 — no live-LND reconciliation to run by hand. Two LND-dependent
-checks that used to live here (self-payment ↔ rebalance_log matching, and
-new_fee_ppm ↔ live `/v1/fees`) were dropped: both are real failure modes but already
-covered by machinery that runs continuously, so neither ever fired. `sync_rebalances`
-already reconciles every circular self-payment into `rebalance_log` (the self-payment
-check was just re-verifying sync), and the 2h pipeline reads live `/v1/fees` each run
-and re-broadcasts on divergence (so an LND fee-reset self-heals within 2h, faster than
-this daily check would notice). If a real LND-reset guard is ever wanted, its home is a
-deterministic assertion in the pipeline right after broadcast, not this report.
+That's the whole of §2 — no live-LND reconciliation to run by hand.
 
 **Deliberately NOT verified — do not attempt by hand** (a wrong "check" is worse than
 none): the fee-update HYSTERESIS rule and a full `compute_fee_target` reconstruction.

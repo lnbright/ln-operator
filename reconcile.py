@@ -9,20 +9,27 @@ reports, instead of recomputing.
 DB-only and pure (no LND): every check is a query + comparison, unit-tested against
 a throwaway DB.
 
-Budgets are verified as an INVARIANT, not a reconstruction: each row records the
-`budget_ppm` the planner/executor actually used, so we assert `fee_ppm ≤ budget_ppm ×
-1.1` and `budget_ppm ≤ REBALANCE_MAX_BUDGET_PPM` against that stored value. We do NOT
-re-derive `get_channel_rebalance_budget`'s multi-layer math (escalation × profit cap ×
-earn-ceiling accelerator × QueryRoutes pricing) here — mirroring engine internals in a
-"checker" false-positives the same way a table-only hysteresis check would. Subtle
-budget-logic bugs are the job of unit tests on the engine, not this reconciliation.
+What it checks is deliberately narrow: the failure modes that can ONLY surface at
+runtime — LND ignoring a fee_limit (`fee_ppm` over the row's recorded `budget_ppm` ×1.1,
+or over the absolute max), a payment double-logged across writers, a routing-fee spike
+within a chunk cluster, a missing payment_hash from a partial write. These are emergent /
+external conditions a unit test can't reproduce.
 
-The fee-update HYSTERESIS rule is deliberately NOT checked — a naive deterministic
-version is WORSE than none (it looks authoritative while being wrong). Its cooldown
-escapes (snap Δ, edge-zone crossing) depend on engine state that isn't captured in
-`fee_updates.reason`, so checking it from the table alone false-positives on every
-legitimate floor-decay/snap broadcast. Verifying it correctly means mirroring engine
-internals — left to a future engine-faithful check.
+It does NOT check pure-logic invariants on our own code — those are caught earlier and
+better by unit tests, so a runtime re-assertion adds nothing:
+  - the budget never exceeding REBALANCE_MAX_BUDGET_PPM is a clamp inside
+    `get_channel_rebalance_budget` (engine tests: test_capped_at_max_budget /
+    test_accelerator_never_exceeds_max_budget).
+  - a pinned channel broadcasting exactly its pin is a property of `update_all_fees`
+    (engine tests: FeePinBroadcastTests).
+We assert the budget INVARIANT against the stored `budget_ppm` (the value actually used),
+never by re-deriving the multi-layer budget math — mirroring engine internals in a
+"checker" false-positives the same way a table-only hysteresis check would.
+
+The fee-update HYSTERESIS rule is also deliberately NOT checked — a naive deterministic
+version is WORSE than none. Its cooldown escapes (snap Δ, edge-zone crossing) depend on
+engine state that isn't captured in `fee_updates.reason`, so checking it from the table
+alone false-positives on every legitimate floor-decay/snap broadcast.
 
 Two LND-dependent §2 checks (self-payment ↔ rebalance_log matching, live new_fee_ppm vs
 /v1/fees) were removed entirely, not moved here: both are real failure modes already
@@ -60,7 +67,6 @@ def run_checks(window_days=1, now=None):
     issues = []
     with db.get_conn() as conn:
         issues += _check_rebalance_log(conn, cutoff)
-        issues += _check_fee_updates(conn, cutoff)
     return issues
 
 
@@ -98,13 +104,11 @@ def _check_rebalance_log(conn, cutoff):
                 "rebalance_over_budget", "fail",
                 f"rebalance id={r['id']} ({pair}) paid {fee:.0f} ppm > recorded budget "
                 f"{budget:.0f} ppm ×{BUDGET_OVERSHOOT_FACTOR:g} ({budget * BUDGET_OVERSHOOT_FACTOR:.0f})"))
-        # 2b. The budget the row recorded itself exceeds the absolute ceiling — a bug in
-        #     budget computation (the planner should clamp to REBALANCE_MAX_BUDGET_PPM).
-        if r["triggered_by"] == "auto" and budget > REBALANCE_MAX_BUDGET_PPM:
-            issues.append(_issue(
-                "rebalance_budget_over_max", "fail",
-                f"auto rebalance id={r['id']} ({pair}) recorded budget {budget:.0f} ppm > "
-                f"REBALANCE_MAX_BUDGET_PPM {REBALANCE_MAX_BUDGET_PPM}"))
+        # NOTE: "recorded budget itself > REBALANCE_MAX_BUDGET_PPM" is NOT checked here —
+        # it's a pure-logic invariant on get_channel_rebalance_budget's own clamp, fully
+        # covered by engine unit tests (test_capped_at_max_budget /
+        # test_accelerator_never_exceeds_max_budget). A runtime checker would only
+        # re-assert what the tests already guarantee.
 
     # 3. The same payment_hash on >1 row = the same payment double-logged (e.g. the
     #    executor AND sync both recording it) → revenue/cost double-count.
@@ -150,25 +154,9 @@ def _chunk_outliers(cluster):
                 f"{CHUNK_SPIKE_FACTOR:g}× cluster median {median:.0f} — routing spike"))
     return out
 
-
-def _check_fee_updates(conn, cutoff):
-    issues = []
-    pins = {r["chan_id"]: r["pinned_ppm"]
-            for r in conn.execute("SELECT chan_id, pinned_ppm FROM fee_overrides").fetchall()}
-    rows = conn.execute(
-        "SELECT id, ts, chan_id, peer_alias, new_fee_ppm, reason "
-        "FROM fee_updates WHERE ts > ? ORDER BY chan_id, ts", (cutoff,)).fetchall()
-
-    # 5. A pinned channel broadcasting anything other than its pinned ppm (and not
-    #    via a pin-reason update) means the override was bypassed — a bug.
-    for r in rows:
-        pin = pins.get(r["chan_id"])
-        if pin is not None and r["new_fee_ppm"] != pin and "pin" not in (r["reason"] or "").lower():
-            issues.append(_issue(
-                "fee_pin_violation", "fail",
-                f"pinned channel {r['peer_alias'] or r['chan_id']} broadcast "
-                f"{r['new_fee_ppm']} ppm ≠ pinned {pin} (reason: {r['reason']})"))
-
-    # (Hysteresis cooldown is intentionally NOT checked here — see module docstring:
-    # its escape conditions aren't reconstructable from fee_updates alone.)
-    return issues
+# NOTE: fee_updates is no longer reconciled here. The pinned-channel broadcast
+# invariant (a pinned channel must broadcast exactly its pin) is a pure-logic
+# property of update_all_fees, now covered by engine unit tests
+# (test_engine.FeePinBroadcastTests) — a runtime checker would only re-assert what
+# the tests guarantee. The hysteresis rule remains deliberately unchecked (its
+# cooldown escapes aren't reconstructable from fee_updates alone — see docstring).

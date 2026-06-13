@@ -266,17 +266,22 @@
 - reconcile.py: `run_checks(window_days)` — the §2 data-integrity arithmetic the
   daily-check agent used to do by hand (an LLM gets SQLite arithmetic subtly wrong),
   now deterministic DB-only assertions returning [{check, severity, message}]. Covers
-  missing payment_hash on a success row, fee_ppm > REBALANCE_MAX_BUDGET_PPM, **fee_ppm >
-  the row's recorded `budget_ppm` ×1.1, a recorded `budget_ppm` > REBALANCE_MAX_BUDGET_PPM**,
-  duplicate payment_hash, chunk-ppm spikes, pinned-channel non-pin broadcasts. Budgets
-  are checked as an INVARIANT against the stored `budget_ppm` (the max_fee_ppm the
-  planner/executor actually used), NOT by re-deriving `get_channel_rebalance_budget`'s
-  multi-layer math (escalation × profit cap × earn-ceiling accelerator × QueryRoutes
-  pricing) — mirroring engine internals in a checker false-positives the same way a
-  table-only hysteresis check would; subtle budget-logic bugs are the engine's unit
-  tests' job. Deliberately does NOT check the fee hysteresis rule (its cooldown escapes
-  — snap Δ / edge-zone crossing — depend on engine state absent from `fee_updates`, so a
-  table-only check false-positives on every legitimate floor-decay broadcast). The
+  ONLY runtime-only failure modes (things a unit test can't reproduce): missing
+  payment_hash on a success row, fee_ppm > REBALANCE_MAX_BUDGET_PPM, **fee_ppm > the
+  row's recorded `budget_ppm` ×1.1** (both = LND ignored the fee_limit), duplicate
+  payment_hash, chunk-ppm spikes. The fee>budget check is an INVARIANT against the stored
+  `budget_ppm` (the max_fee_ppm actually used), NOT a re-derivation of
+  `get_channel_rebalance_budget`'s multi-layer math — mirroring engine internals in a
+  checker false-positives the way a table-only hysteresis check would. Deliberately does
+  NOT check **pure-logic invariants on our own code** — those are caught earlier by unit
+  tests, so a runtime re-assertion adds nothing: budget ≤ REBALANCE_MAX_BUDGET_PPM (the
+  clamp in `get_channel_rebalance_budget`; engine tests test_capped_at_max_budget /
+  test_accelerator_never_exceeds_max_budget) and a pinned channel broadcasting exactly
+  its pin (`update_all_fees`; engine test FeePinBroadcastTests) were REMOVED from
+  reconcile once those tests existed. Also does NOT check the fee hysteresis rule (its
+  cooldown escapes — snap Δ / edge-zone crossing — depend on engine state absent from
+  `fee_updates`, so a table-only check false-positives on every legitimate floor-decay
+  broadcast). The
   agent now does deep §2 analysis ONLY when `run_checks` reports a failure (clean → one
   line, no hand-arithmetic). The two LND-requiring matches that used to be agent-side
   (self-payment↔log, live /v1/fees) were DROPPED, not kept: both are real failure modes

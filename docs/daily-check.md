@@ -17,14 +17,16 @@ Each run inspects the SQLite DB and live LND state and produces an exec summary:
   success/failure and cost, fee broadcasts by reason, sat-flow anomalies.
 - **Reconciliation** — the deterministic data-integrity checks run in Python
   (`reconcile.run_checks`), not by hand: missing payment_hash, fee over the max
-  budget, fee over the row's recorded budget (×1.1) and a recorded budget over the
-  max, duplicate payment_hash, chunk-fee spikes, pinned-channel violations. The
-  agent reports the issues (an LLM gets SQLite arithmetic subtly wrong) and does
-  deeper analysis ONLY when a check fails — clean run, one line. The fee-hysteresis
-  rule stays unverified (engine state the tables don't hold). Two LND-dependent
-  checks (self-payment↔log matching, live `/v1/fees`) were dropped as redundant —
-  `sync_rebalances` already reconciles self-payments into `rebalance_log`, and the
-  2h pipeline self-heals an LND fee-reset within a cycle. See `reconcile.py`.
+  budget, fee over the row's recorded budget (×1.1), duplicate payment_hash,
+  chunk-fee spikes. These are the **runtime-only** failure modes (LND ignoring a
+  fee_limit, double-logged payments, routing spikes) a unit test can't reproduce.
+  The agent reports the issues (an LLM gets SQLite arithmetic subtly wrong) and does
+  deeper analysis ONLY when a check fails — clean run, one line. Pure-logic invariants
+  (budget ≤ max, a pinned channel broadcasting its pin) are NOT checked here — they're
+  covered by engine unit tests, so a runtime re-assertion adds nothing. The
+  fee-hysteresis rule stays unverified (engine state the tables don't hold), and two
+  LND-dependent checks (self-payment↔log matching, live `/v1/fees`) were dropped as
+  redundant with `sync_rebalances` and the 2h pipeline self-heal. See `reconcile.py`.
 - **Diagnosis** — depleted/overfull channels, repeated rebalance failures,
   inactive-channel timelines from LND's journal, fee asymmetries.
 - **Suggestions** — config tuning and peer ideas (text only — never auto-applied).

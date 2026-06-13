@@ -43,13 +43,6 @@ class ReconcileTests(unittest.TestCase):
                  int(amount * fee_ppm / 1e6), fee_ppm, success, payment_hash,
                  triggered_by, budget_ppm))
 
-    def _fee(self, ts_off, chan="C", new_ppm=100, reason="sigmoid"):
-        with db.get_conn() as c:
-            c.execute(
-                "INSERT INTO fee_updates (ts, chan_id, peer_alias, new_fee_ppm, "
-                "local_ratio, reason) VALUES (?,?,?,?,?,?)",
-                (self.now + ts_off, chan, "peer", new_ppm, 0.5, reason))
-
     def _codes(self, issues):
         return sorted(i["check"] for i in issues)
 
@@ -96,11 +89,6 @@ class ReconcileTests(unittest.TestCase):
         self._reb(fee_ppm=900, budget_ppm=None, payment_hash="b4")
         self.assertNotIn("rebalance_over_budget", self._codes(reconcile.run_checks()))
 
-    def test_recorded_budget_over_max_is_fail(self):
-        self._reb(fee_ppm=100, budget_ppm=config.REBALANCE_MAX_BUDGET_PPM + 50,
-                  payment_hash="b5")
-        self.assertIn("rebalance_budget_over_max", self._codes(reconcile.run_checks()))
-
     def test_manual_fee_over_budget_still_flagged(self):
         # honoring a fee limit is universal — a manual row that overshot its budget
         # is just as much a fee_limit-ignored bug as an auto one.
@@ -124,18 +112,6 @@ class ReconcileTests(unittest.TestCase):
         for i, ppm in enumerate([100, 400]):
             self._reb(ts_off=-3600 + i * 600, fee_ppm=ppm, payment_hash=f"d{i}")
         self.assertNotIn("rebalance_chunk_spike", self._codes(reconcile.run_checks()))
-
-    def test_pin_violation(self):
-        with db.get_conn() as c:
-            c.execute("INSERT INTO fee_overrides (chan_id, pinned_ppm) VALUES ('C', 250)")
-        self._fee(-3600, chan="C", new_ppm=300, reason="sigmoid")  # not the pinned 250
-        self.assertIn("fee_pin_violation", self._codes(reconcile.run_checks()))
-
-    def test_pinned_value_broadcast_is_ok(self):
-        with db.get_conn() as c:
-            c.execute("INSERT INTO fee_overrides (chan_id, pinned_ppm) VALUES ('C', 250)")
-        self._fee(-3600, chan="C", new_ppm=250, reason="manual pin: 250 ppm")
-        self.assertNotIn("fee_pin_violation", self._codes(reconcile.run_checks()))
 
     def test_window_excludes_old_rows(self):
         self._reb(ts_off=-5 * 86400, payment_hash="", triggered_by="auto")  # 5d old
