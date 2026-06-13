@@ -581,12 +581,16 @@ Compose a summary that mirrors the pipeline-run Telegram style: emoji +
 bold section headers. Keep it terse — top-level lines under ~80 chars, ≤3
 top-level suggestion bullets.
 
-**Use nested sub-bullets for anything with internal structure** rather than
-cramming it into one dense line. A capital suggestion in particular has four
-parts (shape / lever / why it wins / rejected alternatives) — break them onto
-indented sub-points under the `•` so each is scannable. Terse ≠ one-line: a
-2–4-line nested bullet that's clear beats a single run-on line that hides the
-reasoning. Indent sub-bullets two more spaces under their parent `•` with `-`.
+**Any bullet carrying ≥2 distinct clauses/causes MUST break into sub-bullets** —
+this is a hard rule, not a preference. If a bullet states more than one cause, or
+pairs an observation with an action, or runs past ~80 chars, split it: a short
+headline on the `•` line, then indented `-` sub-points (one per cause / lever /
+consequence / action). A single run-on line that chains "X because Y plus Z, watch
+W" is exactly the format to avoid — it hides the reasoning. A capital suggestion
+in particular has four parts (shape / lever / why it wins / rejected alternatives),
+one sub-bullet each. Terse ≠ one-line: a 2–4-line nested bullet that's scannable
+beats a dense run-on. Indent sub-bullets two more spaces under their parent `•`
+with `-`. Only a genuinely single-clause point stays a flat one-liner.
 
 Format (Markdown — Telegram renders `*bold*`):
 
