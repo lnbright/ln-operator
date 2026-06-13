@@ -17,14 +17,20 @@ earn-ceiling accelerator × QueryRoutes pricing) here — mirroring engine inter
 "checker" false-positives the same way a table-only hysteresis check would. Subtle
 budget-logic bugs are the job of unit tests on the engine, not this reconciliation.
 
-Some §2 checks deliberately stay agent-side, because a naive deterministic version is
-WORSE than none (it looks authoritative while being wrong):
-  - self-payment ↔ rebalance_log matching + live new_fee_ppm vs /v1/fees — need LND.
-  - the fee-update HYSTERESIS rule — its cooldown escapes (snap Δ, edge-zone crossing)
-    depend on engine state that isn't captured in `fee_updates.reason`, so checking it
-    from the table alone false-positives on every legitimate floor-decay/snap broadcast.
-    Verifying it correctly means mirroring engine internals — left to the agent /
-    a future engine-faithful check.
+The fee-update HYSTERESIS rule is deliberately NOT checked — a naive deterministic
+version is WORSE than none (it looks authoritative while being wrong). Its cooldown
+escapes (snap Δ, edge-zone crossing) depend on engine state that isn't captured in
+`fee_updates.reason`, so checking it from the table alone false-positives on every
+legitimate floor-decay/snap broadcast. Verifying it correctly means mirroring engine
+internals — left to a future engine-faithful check.
+
+Two LND-dependent §2 checks (self-payment ↔ rebalance_log matching, live new_fee_ppm vs
+/v1/fees) were removed entirely, not moved here: both are real failure modes already
+covered continuously, so neither ever fired. `sync_rebalances` reconciles every circular
+self-payment into `rebalance_log` (the check just re-verified sync), and `update_all_fees`
+reads live /v1/fees every 2h and re-broadcasts on divergence (an LND fee-reset self-heals
+within 2h). A real LND-reset guard, if wanted, belongs as a post-broadcast assertion in
+the pipeline, not here.
 
 Each issue: {"check", "severity" ('fail'|'warn'), "message"}. Empty list = clean.
 """
