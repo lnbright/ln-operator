@@ -283,14 +283,7 @@
   `fee_updates`, so a table-only check false-positives on every legitimate floor-decay
   broadcast). The
   agent now does deep §2 analysis ONLY when `run_checks` reports a failure (clean → one
-  line, no hand-arithmetic). The two LND-requiring matches that used to be agent-side
-  (self-payment↔log, live /v1/fees) were DROPPED, not kept: both are real failure modes
-  but already covered continuously — `sync_rebalances` reconciles every circular
-  self-payment into `rebalance_log` (the check just re-verified sync), and `update_all_fees`
-  reads live /v1/fees every 2h run and re-broadcasts on divergence (an LND fee-reset
-  self-heals within 2h). Neither ever fired in weeks of runs. A real LND-reset guard, if
-  wanted, belongs as a deterministic post-broadcast assertion in the pipeline, not the
-  daily report.
+  line, no hand-arithmetic).
 - graph_snapshots table: one row per `refresh_graph` run — total_nodes/channels/
   capacity + our_channels/capacity/peers. Historical, so our network position
   (growing / going dark) is trendable. Finally given a writer (`db.save_graph_snapshot`).
