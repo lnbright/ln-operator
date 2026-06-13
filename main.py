@@ -556,6 +556,11 @@ def execute_rebalance_plans(plans, log, executor=None):
         if executor is engine.execute_rebalance:
             extra["on_progress"] = lambda m: print(f"      {m}", flush=True)
         result = executor(capped, dry_run=False, **extra)
+        # Tag the result with its pair identity so callers can attribute
+        # per-target success/failure (e.g. the --force manual_rebalance hint).
+        result.setdefault("target_chan_id", target_id)
+        result.setdefault("target_alias", p["target_alias"])
+        result.setdefault("source_alias", p["source_alias"])
         results.append(result)
 
         moved = result.get("amount", 0) if result.get("success") else 0
@@ -594,6 +599,84 @@ def execute_rebalance_plans(plans, log, executor=None):
                   f"{result.get('failure_reason', 'unknown')}")
 
     return results
+
+
+def _cheapest_probe_source(probe_results):
+    """The lowest-cost source that returned a live route, or None."""
+    routed = [r for r in (probe_results or []) if r.get("status") == "route"]
+    if not routed:
+        return None
+    return min(routed, key=lambda r: r["cost_ppm"])
+
+
+def _show_queryroutes_intel(plans):
+    """Print the QueryRoutes probe gloss + per-source results for each target.
+
+    Surfaced under --force so the operator sees exactly what the dry-run probe
+    found before any sats move: the real refill clearing price per overfull
+    source (or no-route / unavailable), pulled from the same QueryRoutes call
+    SendPaymentV2's pathfinder uses.
+    """
+    # One probe set per target — dedupe by target, keep first-seen order.
+    seen = {}
+    for p in plans:
+        tid = p["target_chan_id"]
+        if tid not in seen:
+            seen[tid] = (p["target_alias"], p.get("probe_results") or [])
+
+    if not any(pr for _, pr in seen.values()):
+        return  # probe disabled / nothing to show
+
+    print(f"\n  QueryRoutes probe (dry-run pathfinding — no sats moved):")
+    print(f"    Pricing the real refill route from each overfull source at the")
+    print(f"    min chunk, the same way a live rebalance would route it.")
+    for alias, probe in seen.values():
+        print(f"\n    → {alias}:")
+        if not probe:
+            print(f"        (not probed — unjudged/disabled, will attempt blind)")
+            continue
+        for r in sorted(probe, key=lambda r: (r["status"] != "route",
+                                              r.get("cost_ppm") or 0)):
+            if r["status"] == "route":
+                mark = f"{r['cost_ppm']} ppm"
+            elif r["status"] == "no_route":
+                mark = "no route ≤ ceiling"
+            else:
+                mark = "probe unavailable"
+            print(f"        {r['source_alias']}: {mark}")
+        if not _cheapest_probe_source(probe):
+            print(f"        ⚠ no affordable live route from any source — "
+                  f"will attempt anyway (force), but a refill may not clear.")
+
+
+def _print_manual_rebalance_hints(failed_plans):
+    """Tell the operator how to refill by hand when forced auto-rebalance fails.
+
+    For each still-depleted target prints a ready-to-paste manual_rebalance
+    command, pre-filled with the cheapest source the probe found (or the
+    primary source) and the observed clearing price.
+    """
+    if not failed_plans:
+        return
+    print(f"\n  Some targets didn't refill. Drive a specific pair by hand:")
+    seen = set()
+    for p in failed_plans:
+        tid = p["target_chan_id"]
+        if tid in seen:
+            continue
+        seen.add(tid)
+        cheapest = _cheapest_probe_source(p.get("probe_results"))
+        if cheapest:
+            src = cheapest["source_alias"]
+            ppm = cheapest["cost_ppm"]
+        else:
+            src = p["source_alias"]
+            ppm = p["max_fee_ppm"]
+        amount = p.get("target_total_deficit", p["amount_sats"])
+        print(f"    ln-operator manual_rebalance '{src}' '{p['target_alias']}' "
+              f"{amount} {ppm}")
+    print(f"    (manual_rebalance bypasses the profit/structural gate — it's the")
+    print(f"     only way to refill a target the auto gate would strand.)")
 
 
 def cmd_rebalance_channels(args):
@@ -690,14 +773,35 @@ def cmd_rebalance_channels(args):
                       f"(capped to remaining deficit at run time)")
                 print(f"      Fee cap:  {fp['max_fee_ppm']} ppm")
 
+        # Under --force, surface the QueryRoutes probe intel (what the live
+        # pathfinder found per source) — the probe runs but never strands here.
+        if force is not None:
+            _show_queryroutes_intel(plans)
+
         # Show scenarios if there are depleted channels without fallbacks
         _show_rebalance_scenarios(force)
 
         print(f"\n  [DRY RUN] No payments executed.")
         return []
 
+    # Under --force, show what the QueryRoutes probe found before moving sats.
+    if force is not None:
+        _show_queryroutes_intel(plans)
+
     print(f"\nExecuting {len(primaries)} primary plan(s) (+ {len(fallbacks)} fallback(s)):\n")
     results = execute_rebalance_plans(plans, log)
+
+    # Under --force, point the operator at manual_rebalance for any target that
+    # didn't refill (zero sats landed) — the deliberate fallback when the auto
+    # path can't find an affordable route but the operator wants the refill.
+    if force is not None:
+        moved_by_target = {}
+        for r in results:
+            if r.get("success"):
+                tid = r.get("target_chan_id")
+                moved_by_target[tid] = moved_by_target.get(tid, 0) + r.get("amount", 0)
+        failed = [p for p in primaries if not moved_by_target.get(p["target_chan_id"])]
+        _print_manual_rebalance_hints(failed)
 
     return results
 

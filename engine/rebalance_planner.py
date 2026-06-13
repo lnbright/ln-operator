@@ -161,7 +161,7 @@ def get_channel_rebalance_budget(chan_id, local_ratio=None):
     }
 
 
-def _queryroutes_probe(target_ch, budget, sources, run_id, record):
+def _queryroutes_probe(target_ch, budget, sources, run_id, record, force=False):
     """ONE min-chunk QueryRoutes dry-run per source — drives BOTH the
     infeasibility early-out AND the bid, from the same probes.
 
@@ -188,24 +188,37 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record):
     safe upper bound for the cap that still lets larger/whole-amount routes settle
     under it, and one probe covers chunked refills a full-amount probe would miss.
 
-    Returns {"drop": bool, "budget": <budget dict>, "source_order": [chan_id, …]}.
+    Returns {"drop": bool, "budget": <budget dict>, "source_order": [chan_id, …],
+    "probe_results": [{source_chan_id, source_alias, status, cost_ppm}, …]} —
+    `probe_results` is the per-source intel surfaced to the operator under --force.
+
+    `force` = operator override (the `rebalance_channels --force` command). In
+    force mode the probe still prices/ranks and reports per-source results, but it
+    NEVER strands (drop is always False) and NEVER records a synthetic cycle, and
+    it probes UNJUDGED channels too (purely for diagnostics — the JUDGED-only rail
+    exists to avoid stranding, which force doesn't do).
 
     Conservative by construction:
-      - JUDGED only — unjudged keeps full price discovery via real attempts.
+      - JUDGED only in AUTO mode — unjudged keeps full price discovery via real
+        attempts; force probes everything for visibility but can't strand.
       - a probe that's UNAVAILABLE (LND down) is treated as UNKNOWN, never as
         no-route → a transport blip can never strand a channel.
-      - records the synthetic cycle only on a real run (`record`).
+      - records the synthetic cycle only on a real auto run (`record`, not force).
       - never bids above the ceiling; the bid only ever RAISES (a max).
     """
     default_order = [s["chan_id"] for s in sources]
-    keep = {"drop": False, "budget": budget, "source_order": default_order}
+    keep = {"drop": False, "budget": budget, "source_order": default_order,
+            "probe_results": []}
 
     # REBALANCE_QUERYROUTES_ENABLED gates the probe (pricing + cheapest-first
     # ranking — pure upside, never strands). The drop/strand on an all-no-route
     # verdict is separately gated below by REBALANCE_QUERYROUTES_EARLYOUT_ENABLED.
-    if (not REBALANCE_QUERYROUTES_ENABLED or not sources
-            or budget.get("earned_ppm") is None):
-        return keep  # disabled, no source, or unjudged → plan normally
+    # Unjudged channels skip the probe in AUTO mode (price discovery via real
+    # attempts), but force probes them anyway — it only diagnoses, never strands.
+    if not REBALANCE_QUERYROUTES_ENABLED or not sources:
+        return keep
+    if budget.get("earned_ppm") is None and not force:
+        return keep  # unjudged + auto → plan normally
     ceiling = budget.get("affordable_ceiling_ppm")
     if not ceiling:
         return keep
@@ -214,6 +227,7 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record):
     ceiling_sats = max(1, int(amount * ceiling / 1_000_000))
     routed = []      # (source, cost_ppm) for sources with a live route ≤ ceiling
     unavailable = 0  # probes that errored — UNKNOWN, never counted as no-route
+    probe_results = []  # per-source intel for operator display (force mode)
     for s in sources:
         try:
             probe = lnd_client.query_routes(
@@ -225,9 +239,19 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record):
             log.debug("probe unavailable for %s via %s: %s",
                       target_ch["peer_alias"], s["peer_alias"], e)
             unavailable += 1
+            probe_results.append({"source_chan_id": s["chan_id"],
+                                  "source_alias": s["peer_alias"],
+                                  "status": "unavailable", "cost_ppm": None})
             continue
         if probe is not None:
             routed.append((s, probe["fee_ppm"]))
+            probe_results.append({"source_chan_id": s["chan_id"],
+                                  "source_alias": s["peer_alias"],
+                                  "status": "route", "cost_ppm": probe["fee_ppm"]})
+        else:
+            probe_results.append({"source_chan_id": s["chan_id"],
+                                  "source_alias": s["peer_alias"],
+                                  "status": "no_route", "cost_ppm": None})
 
     if routed:
         # Feasible. Rank sources cheapest-first (probed by cost, then any
@@ -248,7 +272,8 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record):
             log.info("rebalance: %s bid set to %d ppm via QueryRoutes "
                      "(cheapest of %d feasible source(s), ceiling %d)",
                      target_ch["peer_alias"], cheapest, len(routed), ceiling)
-        return {"drop": False, "budget": out, "source_order": ranked}
+        return {"drop": False, "budget": out, "source_order": ranked,
+                "probe_results": probe_results}
 
     if unavailable:
         # No source routed, but some probe was unavailable → can't prove the
@@ -256,14 +281,17 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record):
         log.debug("rebalance: %s — no route found but %d probe(s) unavailable; "
                   "planning normally (won't strand on a blip)",
                   target_ch["peer_alias"], unavailable)
-        return keep
+        return {**keep, "probe_results": probe_results}
 
-    # Every source returned a DEFINITE no-route → infeasible. Only strand if the
-    # early-out is enabled; otherwise leave the channel to attempt normally.
-    if not REBALANCE_QUERYROUTES_EARLYOUT_ENABLED:
-        log.debug("rebalance: %s — no affordable route via any source, but early-out "
-                  "disabled; planning normally", target_ch["peer_alias"])
-        return keep
+    # Every source returned a DEFINITE no-route → infeasible. Force never strands
+    # (operator override — attempt anyway and let the manual_rebalance hint fire);
+    # auto strands only if the early-out is enabled, else attempts normally.
+    if force or not REBALANCE_QUERYROUTES_EARLYOUT_ENABLED:
+        log.debug("rebalance: %s — no affordable route via any source; %s",
+                  target_ch["peer_alias"],
+                  "force override, planning anyway" if force
+                  else "early-out disabled, planning normally")
+        return {**keep, "probe_results": probe_results}
     log.info("rebalance: early-out %s — no route ≤ %d ppm ceiling via ANY of %d "
              "source(s) at min-chunk; skipping%s", target_ch["peer_alias"], ceiling,
              len(sources), ", recording infeasible cycle" if record else " (dry-run, not recorded)")
@@ -277,7 +305,8 @@ def _queryroutes_probe(target_ch, budget, sources, run_id, record):
             amount=amount, fee_paid=0, success=False,
             failure_reason="QR_NO_AFFORDABLE_ROUTE",
             budget_ppm=ceiling, run_id=run_id, triggered_by="auto")
-    return {"drop": True, "budget": budget, "source_order": default_order}
+    return {"drop": True, "budget": budget, "source_order": default_order,
+            "probe_results": probe_results}
 
 
 def find_rebalance_candidates(channels=None, force=None):
@@ -379,26 +408,34 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
     # (or, in force mode, with the plain budget + the default overfull order).
     target_budgets = {}
     target_source_order = {}
+    target_probe = {}  # tid -> per-source QueryRoutes intel (for --force display)
 
-    if force is None and needs_inbound:
+    if needs_inbound:
         now = int(time.time())
         has_source = bool(needs_outbound)
         run_id = int(time.time())  # one cycle id for this run's early-outs
+        forced = force is not None
         kept = []
         for ch in needs_inbound:
             budget = get_channel_rebalance_budget(ch["chan_id"])
-            signals = db.get_channel_signals(ch["chan_id"])
-            act = decide_channel_action(ch, signals, budget, 0, has_source, now)
-            if act["action"] != "rebalance":
-                log.info("rebalance: skipping %s (%.0f%% local) — %s",
-                         ch["peer_alias"], ch["local_ratio"] * 100, act["reason"])
-                continue
-            # ONE min-chunk QueryRoutes probe per source — drops the channel if
-            # NO source has an affordable route (and records the cycle), otherwise
-            # prices the bid off the cheapest feasible source and ranks the sources
-            # cheapest-first for execution. See _queryroutes_probe.
-            verdict = _queryroutes_probe(ch, budget, needs_outbound, run_id, record_early_outs)
-            if verdict["drop"]:
+            # force is an explicit operator override of the profit/structural gate;
+            # skip the ladder verdict and let the channel be planned regardless.
+            if not forced:
+                signals = db.get_channel_signals(ch["chan_id"])
+                act = decide_channel_action(ch, signals, budget, 0, has_source, now)
+                if act["action"] != "rebalance":
+                    log.info("rebalance: skipping %s (%.0f%% local) — %s",
+                             ch["peer_alias"], ch["local_ratio"] * 100, act["reason"])
+                    continue
+            # ONE min-chunk QueryRoutes probe per source — in auto mode drops the
+            # channel if NO source has an affordable route (and records the cycle);
+            # in force mode it only diagnoses + prices + ranks (never strands).
+            # Either way it prices the bid off the cheapest feasible source and
+            # ranks sources cheapest-first for execution. See _queryroutes_probe.
+            verdict = _queryroutes_probe(ch, budget, needs_outbound, run_id,
+                                         record_early_outs, force=forced)
+            target_probe[ch["chan_id"]] = verdict.get("probe_results") or []
+            if verdict["drop"]:  # auto only — force never sets drop
                 continue
             target_budgets[ch["chan_id"]] = verdict["budget"]
             target_source_order[ch["chan_id"]] = verdict["source_order"]
@@ -422,8 +459,8 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
         return [], (f"{len(needs_inbound)} channel(s) depleted ({depleted}) but no overfull "
                     f"channel to rebalance from — need more channels or top up on-chain")
 
-    # Force mode skips the gate + QueryRoutes probe, so fill any target the probe
-    # didn't price with the plain budget and the default (most-overfull) order.
+    # Fill any target the probe didn't price (probe disabled / no ceiling) with
+    # the plain budget and the default (most-overfull) order.
     source_by_id = {s["chan_id"]: s for s in needs_outbound}
     for target_ch in needs_inbound:
         tid = target_ch["chan_id"]
@@ -490,6 +527,7 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
                 "max_fee_sats": max_fee,
                 "max_fee_ppm": max_fee_ppm,
                 "budget_reason": budget["reason"],
+                "probe_results": target_probe.get(target_ch["chan_id"], []),
             })
 
             # Reserve this source capacity and reduce target remaining
@@ -540,6 +578,7 @@ def plan_rebalances(channels=None, force=None, record_early_outs=False):
                 "max_fee_sats": max_fee,
                 "max_fee_ppm": max_fee_ppm,
                 "budget_reason": budget["reason"],
+                "probe_results": target_probe.get(target_ch["chan_id"], []),
                 "is_fallback": True,
             })
 

@@ -108,6 +108,42 @@ class ProbeFeasibilityTests(unittest.TestCase):
         msave.assert_not_called()
 
 
+class ProbeForceModeTests(unittest.TestCase):
+    """force=True: diagnose + price + rank, but NEVER strand and NEVER record."""
+
+    @patch("engine.rebalance_planner.db.save_rebalance_attempt")
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_force_all_no_route_never_drops_or_records(self, mqr, msave):
+        mqr.return_value = None  # every source: definite no-route
+        v = rp._queryroutes_probe(_target(), _budget(), [_source("S1"), _source("S2")],
+                                  999, record=True, force=True)
+        self.assertFalse(v["drop"])          # force never strands
+        msave.assert_not_called()            # force never records a synthetic cycle
+        # per-source results still surfaced for the operator
+        self.assertEqual([r["status"] for r in v["probe_results"]],
+                         ["no_route", "no_route"])
+
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_force_probes_unjudged_for_diagnostics(self, mqr):
+        # unjudged → auto skips entirely, but force probes anyway (ceiling exists)
+        mqr.side_effect = _by_source({"S1": 300})
+        b = _budget(earned_ppm=None)
+        b["affordable_ceiling_ppm"] = 1000
+        v = rp._queryroutes_probe(_target(), b, [_source("S1")], 999,
+                                  record=False, force=True)
+        self.assertFalse(v["drop"])
+        self.assertEqual(v["probe_results"][0]["cost_ppm"], 300)
+
+    @patch("engine.rebalance_planner.lnd_client.query_routes")
+    def test_force_still_prices_and_ranks(self, mqr):
+        mqr.side_effect = _by_source({"S1": 300, "S2": 150})
+        v = rp._queryroutes_probe(_target(), _budget(14, 721),
+                                  [_source("S1"), _source("S2")], 999,
+                                  record=True, force=True)
+        self.assertEqual(v["budget"]["max_fee_ppm"], 150)
+        self.assertEqual(v["source_order"], ["S2", "S1"])
+
+
 class ProbePricingTests(unittest.TestCase):
     @patch("engine.rebalance_planner.lnd_client.query_routes")
     def test_prices_off_cheapest_and_ranks_cheapest_first(self, mqr):

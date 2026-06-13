@@ -149,13 +149,25 @@
     over fewer sats), so the 100k price is the worst case → a safe upper bound for the
     cap that still lets larger/whole-amount routes settle under it, and one probe
     covers chunked refills a full-amount probe would miss (so no separate full-amount
-    "v1" probe is needed). Safety rails: JUDGED-only (`earned_ppm is None` → no probe);
+    "v1" probe is needed). Safety rails: JUDGED-only in AUTO (`earned_ppm is None` → no
+    probe; force probes unjudged for diagnostics only — see below);
     a probe that's UNAVAILABLE (LND down) is UNKNOWN, never no-route, so a transport
     blip can never strand; never moves `last_refill` (only a real success does); runs
-    ONLY in the planner (`get_channel_rebalance_budget` stays call-free); `force`
-    bypasses it. Up to (#sources × #depleted targets) dry-run probes per run — cheap,
-    both counts small. Returns `{drop, budget, source_order}`; the planner threads
-    `source_order` into both the primary and fallback plan loops.
+    ONLY in the planner (`get_channel_rebalance_budget` stays call-free). **`force`
+    (the `rebalance_channels --force <ratio>` operator command) runs the probe in
+    DIAGNOSTIC mode** (`_queryroutes_probe(..., force=True)`): it still prices the bid
+    + ranks sources cheapest-first AND probes UNJUDGED channels too (auto skips them),
+    but NEVER strands (`drop` always False) and NEVER records a synthetic cycle — the
+    operator is explicitly overriding the profit/structural gate, so the probe is for
+    VISIBILITY, not gating. `cmd_rebalance_channels` prints the per-source intel
+    (`probe_results`: status route/no_route/unavailable + clearing ppm) before moving
+    sats (`_show_queryroutes_intel`), and after a forced run points the operator at
+    `manual_rebalance` for any target that landed zero sats
+    (`_print_manual_rebalance_hints`, pre-filled with the cheapest probed source +
+    its observed ppm). Up to (#sources × #depleted targets) dry-run probes per run —
+    cheap, both counts small. Returns `{drop, budget, source_order, probe_results}`;
+    the planner threads `source_order` into both the primary and fallback plan loops
+    and stashes `probe_results` on every plan dict.
   - **Layer 2 — soft outbound floor + raised ceiling** (`compute_fee_target`):
     `SIGMOID_MAX_PPM` is 750 (was 250) so a draining channel can defend with price.
     The `last_refill × REBALANCE_FEE_MARGIN` floor is HARD while forwarding but
