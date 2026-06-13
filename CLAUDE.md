@@ -262,7 +262,7 @@
   resolution once. `db.reconcile_findings(current)` diffs the agent's current-run
   findings against the open set and returns new/changed/unchanged/resolved buckets
   (persisting the snapshot); a resolved key that reappears reopens as a fresh
-  episode. Replaces the old "read the log and dedup by judgement" instruction.
+  episode. Replaces the old "read the log and dedup by assessment" instruction.
 - reconcile.py: `run_checks(window_days)` — the §2 data-integrity arithmetic the
   daily-check agent used to do by hand (an LLM gets SQLite arithmetic subtly wrong),
   now deterministic DB-only assertions returning [{check, severity, message}]. Covers

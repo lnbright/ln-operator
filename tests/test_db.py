@@ -87,7 +87,7 @@ class EarnedPpmWideningTests(unittest.TestCase):
         self.assertEqual(vol, config.EARNED_PPM_MIN_VOLUME_SATS // 2)
 
     def test_widened_window_aggregates_partial_volumes(self):
-        # Half the volume recent, half older — neither alone judges, together they do.
+        # Half the volume recent, half older — neither alone qualifies, together they do.
         half = config.EARNED_PPM_MIN_VOLUME_SATS // 2
         self._forward("chan", 5, half, 1_000)
         self._forward("chan", config.EARNED_PPM_WINDOW_DAYS + 10, half, 3_000)

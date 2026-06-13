@@ -23,10 +23,11 @@ by a profitability gate**: after a period of observation, we never
 pay more to refill than the channel can earn back. Channels that can't be
 profitably refilled are flagged as a capital decision. Before grinding up the
 budget over many failed runs, the planner reads the **live route price via a
-QueryRoutes dry-run** (no payment): if an affordable route exists it jumps the bid
-straight to it (lands the refill this run instead of after ~5 escalations); if no
-route exists within the affordable ceiling it skips the wasted attempt and records
-the cycle so the channel still reaches its capital decision. When rebalancing, if
+QueryRoutes dry-run** (no payment) — priced over the *full circular path*, including
+the target peer's fee to forward the final hop into our channel: if an affordable
+route exists it jumps the bid straight to it (lands the refill this run instead of
+after ~5 escalations); if no route exists within the affordable ceiling it skips the
+wasted attempt and records the cycle so the channel still reaches its capital decision. When rebalancing, if
 the full amount can't route, it halves and retries several times, down to 100k sats; if one
 source→target pair has no route, it tries alternatives before giving up. Optional, off by default: a node-level
 **inbound-fee** ladder that pulls organic refill with a negative inbound fee
@@ -235,8 +236,13 @@ ln-operator suggest_peers bfx --amount 1000000   # probe at a custom size (defau
 # ── REBALANCING ────────────────────────────────────────────
 ln-operator rebalance_channels                   # auto-rebalance using the 20/80 thresholds
 ln-operator rebalance_channels --dry-run         # show channel status + per-force-level scenarios
-ln-operator rebalance_channels --force           # ignore thresholds, target 50% local on all
-ln-operator rebalance_channels --force 0.4       # ignore thresholds, target 40% local on all
+ln-operator rebalance_channels --force           # ignore thresholds + gate, target 50% local on all
+ln-operator rebalance_channels --force 0.4       # ignore thresholds + gate, target 40% local on all
+# --force covers EVERY channel (calibrating/calibrated/stranded). It runs the
+# QueryRoutes probe diagnostically — shows per-source ✅/❌ live cost (incl. the
+# target peer's inbound fee) without ever stranding. If no source has an affordable
+# route it asks "try anyway? [y/N]" (30s, default No); No/timeout or any target that
+# lands zero sats prints a ready-to-paste manual_rebalance command.
 ln-operator manual_rebalance <src> <tgt> <amount_sats> <max_ppm>  # pin ONE pair, bypass the gate (recorded as manual)
 ln-operator manual_rebalance Boltz bfx-lnd0 1778389 773 --dry-run # preview that exact pair; move nothing
 # manual_rebalance forces the source→target you name (alias or chan_id), skipping

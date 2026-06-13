@@ -314,7 +314,7 @@ CREATE TABLE IF NOT EXISTS alerts (
 -- ─── Channel maturity tracking ──────────────────────────────────
 -- Tracks how much time each channel has spent in a balanced state. This is now
 -- a dashboard-only stat ("balanced N days"); it no longer feeds the rebalance
--- budget, which judges profitability live from earned_ppm (calibrated/calibrating) +
+-- budget, which assesses profitability live from earned_ppm (calibrated/calibrating) +
 -- last_refill_ppm + failure escalation. No PROVEN/maturity tiering remains.
 CREATE TABLE IF NOT EXISTS channel_maturity (
     chan_id          TEXT PRIMARY KEY,
@@ -489,7 +489,7 @@ def reconcile_findings(current, now=None):
     Diffs `current` against the stored OPEN findings, PERSISTS the new snapshot
     (preserving each finding's original first_seen), and returns four buckets so the
     agent reports only what's worth reporting — the dedup is pure Python, not agent
-    judgement:
+    assessment:
         new       — key never seen before → report in full
         changed   — key seen but `state` differs → report the change (carries
                     prev_state + first_seen)

@@ -44,7 +44,7 @@ Key settings in `config.py`:
 See [rebalance-budget.md](rebalance-budget.md) for the full design.
 | Setting | Default | |
 |---------|---------|---|
-| `REBALANCE_QUERYROUTES_ENABLED` | True | Run the probe: one QueryRoutes dry-run (no payment) per source for each judged depleted target. Prices the bid off the cheapest feasible source — bounded by the affordable ceiling — so a refill lands this run via the cheapest source instead of escalating over ~5 runs. One-line kill switch |
+| `REBALANCE_QUERYROUTES_ENABLED` | True | Run the probe: one QueryRoutes dry-run (no payment) per source for each calibrated depleted target. Prices the bid off the cheapest feasible source — bounded by the affordable ceiling — so a refill lands this run via the cheapest source instead of escalating over ~5 runs. One-line kill switch |
 | `REBALANCE_QUERYROUTES_EARLYOUT_ENABLED` | True | The drop/strand half: if NO source has a route within the affordable ceiling, skip the wasted attempt and record a synthetic failed cycle so the structural ladder still advances. A probe that's *unavailable* (LND down) never strands — only all-sources-no-route does. Off → the probe still prices/ranks but never strands |
 | `REBALANCE_QUERYROUTES_MIN_CHUNK_SATS` | 100_000 | Feasibility-probe size for the early-out (smallest chunk = strictly easiest to route) |
 
@@ -52,10 +52,10 @@ See [rebalance-budget.md](rebalance-budget.md) for the full design.
 | Setting | Default | |
 |---------|---------|---|
 | `EARNED_PPM_WINDOW_DAYS` | 21 | Trailing window for per-channel earned-ppm |
-| `EARNED_PPM_MIN_VOLUME_SATS` | 2,000,000 | Min OUT-traffic to trust the ratio; below → "unjudged" (full escalation, no cap) |
-| `EARNED_PPM_MAX_LOOKBACK_DAYS` | 90 | Evidence expiry clock, both directions: earned-ppm window doubles (21→42→84→90) until volume suffices (unjudged only if quieter — prevents the unjudged cliff), and rebalance *failures* older than this stop counting toward escalation/structural (a re-entering channel resumes at last_refill × 1.0) |
-| `REBALANCE_PROFIT_HORIZON` | 1.25 | Judged budget cap = earned_ppm × this (≈ break-even on the recoup price) |
-| `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` | 5 | Consecutive fails while profit-capped → flag structural (capital decision) |
+| `EARNED_PPM_MIN_VOLUME_SATS` | 2,000,000 | Min OUT-traffic to trust the ratio; below → "calibrating" (full escalation, no cap) |
+| `EARNED_PPM_MAX_LOOKBACK_DAYS` | 90 | Evidence expiry clock, both directions: earned-ppm window doubles (21→42→84→90) until volume suffices (calibrating only if quieter — prevents the calibrating cliff), and rebalance *failures* older than this stop counting toward escalation/structural (a re-entering channel resumes at last_refill × 1.0) |
+| `REBALANCE_PROFIT_HORIZON` | 1.25 | Calibrated budget cap = earned_ppm × this (≈ break-even on the recoup price) |
+| `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` | 10 | Consecutive fails while profit-capped → flag structural/stranded (capital decision) |
 
 ## Soft outbound floor decay (Layer 2)
 | Setting | Default | |

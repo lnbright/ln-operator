@@ -18,7 +18,7 @@ LND /v1/payments → sync_rebalances → rebalance_log (SQLite)
   ├─ Dashboard: per-channel rebal cost, net 30d, net lifetime
   ├─ Rebalance-failing alert
   ├─ Rebalance budget: last_refill_ppm + failure escalation, capped by the
-  │   profitability gate (earned_ppm × REBALANCE_PROFIT_HORIZON for judged channels)
+  │   profitability gate (earned_ppm × REBALANCE_PROFIT_HORIZON for calibrated channels)
   └─ Outbound fee floor: soft ratchet of last_refill_ppm × REBALANCE_FEE_MARGIN
       (decays while idle, re-arms on fresh refill — state in channel_signals)
 

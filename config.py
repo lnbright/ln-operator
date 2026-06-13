@@ -148,7 +148,7 @@ REBALANCE_PROFIT_HORIZON           = 1.25       # calibrated budget cap = earned
                                                 # the recoup price (refill × FEE_MARGIN). The 0.25
                                                 # over 1.0 allows for earned_ppm being measured at
                                                 # our older, lower outbound fees.
-REBALANCE_STRUCTURAL_FAIL_THRESHOLD= 5          # consecutive fails while profit-capped → flag structural
+REBALANCE_STRUCTURAL_FAIL_THRESHOLD= 10         # consecutive fails while profit-capped → flag structural (stranded)
 
 # QueryRoutes intelligence. When True, the planner runs ONE QueryRoutes
 # dry-run (no payment) per overfull SOURCE for each CALIBRATED depleted target, at the

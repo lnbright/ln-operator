@@ -9,13 +9,13 @@ The most recent successful refill ppm for a channel anchors both:
 escalated = (last_refill_ppm OR DEFAULT_BUDGET)
              × (1 + ESCALATION_STEP × failures_since_last_success)
 
-# JUDGED channels only — earn-ceiling accelerator (raises escalated, never lowers):
+# CALIBRATED channels only — earn-ceiling accelerator (raises escalated, never lowers):
 ceiling   = min(earned_ppm × PROFIT_HORIZON, MAX_BUDGET)
 escalated = max(escalated,
                 anchor + (ceiling − anchor) × min(1, ESCALATION_STEP × failures))
 
-budget    = min(escalated, MAX_BUDGET)                     # if UNJUDGED
-budget    = min(escalated, earned_ppm × PROFIT_HORIZON, MAX_BUDGET)  # if JUDGED
+budget    = min(escalated, MAX_BUDGET)                     # if CALIBRATING
+budget    = min(escalated, earned_ppm × PROFIT_HORIZON, MAX_BUDGET)  # if CALIBRATED
 
 fee_floor = soft ratchet of last_refill_ppm × REBALANCE_FEE_MARGIN
             (0 if no successful refill yet — sigmoid alone)
@@ -24,21 +24,21 @@ fee_floor = soft ratchet of last_refill_ppm × REBALANCE_FEE_MARGIN
 ## Profitability gate (Layer 1)
 
 Escalation alone would happily pay 2500 ppm to refill a channel that only earns
-200 — the classic "buy expensive, sell cheap" bleed. The gate caps a **judged**
+200 — the classic "buy expensive, sell cheap" bleed. The gate caps a **calibrated**
 channel's budget at `earned_ppm × REBALANCE_PROFIT_HORIZON` (1.25 ≈ break-even
 on the recoup price): never pay more to refill than the channel can earn back.
 
-- **Judged** = trailing OUT-volume ≥ `EARNED_PPM_MIN_VOLUME_SATS` (2M over
+- **Calibrated** = trailing OUT-volume ≥ `EARNED_PPM_MIN_VOLUME_SATS` (2M over
   `EARNED_PPM_WINDOW_DAYS`), so `earned_ppm = Σ fee_earned / Σ amount_out` is
   trustworthy. The cap applies. If the standard 21d window is too quiet, it
   **widens** (doubling, up to `EARNED_PPM_MAX_LOOKBACK_DAYS` = 90d) before the
-  channel is declared unjudged — evidence ages, it doesn't expire at a cliff.
-- **Unjudged** = too little volume *even over the max lookback* to trust the
+  channel is declared calibrating — evidence ages, it doesn't expire at a cliff.
+- **Calibrating** = too little volume *even over the max lookback* to trust the
   ratio → **no cap, full escalation** (capping a low-volume channel would kill
   price discovery and it'd never bootstrap). The gate is opt-in by evidence.
 
-A judged channel whose escalation exceeds the cap is `profit_capped`; if it has
-also failed `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` (5) **runs** (see
+A calibrated channel whose escalation exceeds the cap is `profit_capped`; if it has
+also failed `REBALANCE_STRUCTURAL_FAIL_THRESHOLD` (10) **runs** (see
 [Failure unit](#failure-unit-the-run-not-the-attempt)) it is `structural` —
 `plan_rebalances` drops it (refilling is a losing trade), the verdict stamps
 `structural_flag_ts` and fires a one-time `structural_liquidity` alert, and the
@@ -69,7 +69,7 @@ blind spot, so on a steady sink it tends to persist until you act:
 - **Earnings climb** until `earned_ppm × PROFIT_HORIZON > escalated_budget` →
   `profit_capped` false → cleared. Realistic only if the channel starts earning
   far more on outbound than it did.
-- **Channel goes UNJUDGED** — only if OUT-volume falls below
+- **Channel goes CALIBRATING** — only if OUT-volume falls below
   `EARNED_PPM_MIN_VOLUME_SATS` over the *full max lookback*
   (`EARNED_PPM_MAX_LOOKBACK_DAYS`, 90d): then `earned_ppm` is `None`, the
   profit cap evaporates, and `profit_capped` is false → cleared. This used to
@@ -146,10 +146,10 @@ anchors to the actual paid ppm.
 clock that ages out earned-ppm evidence. Escalation's semantics assume each
 failure tested a price; a profit-capped channel's failures all tested the
 *cap*, not the escalated levels, so carrying them into a later re-entry
-(e.g. after the channel goes unjudged) would bid prices that were never
+(e.g. after the channel goes calibrating) would bid prices that were never
 actually refused. With expiry, a channel returning from a long quiet resumes
 at `last_refill × 1.0` and rebuilds escalation from fresh runs. Side
-effect, deliberate: a standing structural flag on a channel that stays judged
+effect, deliberate: a standing structural flag on a channel that stays calibrated
 gets a free 5-run re-probe roughly once a quarter instead of being
 permanent — markets move, and failed attempts cost nothing.
 
@@ -170,7 +170,7 @@ tiny the budget barely moves. A **single lucky-cheap refill** can pin
 crawls for days, never high enough to route, so the channel sits depleted
 losing revenue with no alarm (it isn't `structural` — it's plainly profitable).
 
-For a **judged** channel the accelerator fixes this by escalating against what
+For a **calibrated** channel the accelerator fixes this by escalating against what
 the channel can *afford* instead of the poisoned anchor. Each failed run closes
 `STEP` of the gap between the anchor and the affordable ceiling
 (`min(earned_ppm × PROFIT_HORIZON, MAX_BUDGET)`):
@@ -187,7 +187,7 @@ from 14 to ~721 ppm. Properties (all deliberate, all tested):
   per-run rate and the fraction-of-gap-per-failure.
 - **Up-only** — it's a `max()`, so it can only raise the budget. Channels
   earning at or below their refill cost are untouched.
-- **Judged-only** — `earned_ppm is None` (unjudged) → skipped entirely, so
+- **Calibrated-only** — `earned_ppm is None` (calibrating) → skipped entirely, so
   bootstrap price discovery on low-volume channels is unchanged.
 - **Inert unless it matters** — the gap only beats plain escalation once
   `ceiling > 2 × anchor` (i.e. `earned × horizon > 2 × last_refill`). A channel
@@ -218,14 +218,26 @@ fees/monitor invoke it per channel every run.) Knobs: `REBALANCE_QUERYROUTES_ENA
 `REBALANCE_QUERYROUTES_EARLYOUT_ENABLED`, `REBALANCE_QUERYROUTES_MIN_CHUNK_SATS`.
 
 Each depleted target's budget dict gains `affordable_ceiling_ppm` =
-`min(profit_cap, MAX)` for a judged channel, else `MAX` — the most it could ever
+`min(profit_cap, MAX)` for a calibrated channel, else `MAX` — the most it could ever
 justify paying.
 
 ### One probe per source, doing two jobs
 
-For each *judged* depleted target the planner runs **one min-chunk probe per overfull
+For each *calibrated* depleted target the planner runs **one min-chunk probe per overfull
 source**, capped at the ceiling, and that single set of probes drives both halves
-(sources are ranked cheapest-first on the way out so the executor pays the cheapest):
+(sources are ranked cheapest-first on the way out so the executor pays the cheapest).
+
+**Each source's cost includes the target peer's final hop into our channel.** The
+probe routes to `dest=target_peer`, so LND charges nothing for the hop *into* it (a
+free destination hop) — but the real rebalance is a circular self-payment
+(`us → source → … → target_peer → us`, last hop pinned to the target peer), where the
+target peer is an **intermediate** that forwards into our channel and *does* charge its
+outbound fee. So `_target_inbound_ppm` adds it back via one `get_channel_edge` lookup
+(the target peer's own policy, base amortised over the chunk), and the probe's
+`fee_limit` is shrunk by it so route + final-hop together stay ≤ ceiling. This is the
+same omission [`peer_finder` fixes with `_first_hop_ppm`](plan-command.md), but on the
+**last** hop — without it a direct neighbour reads a deceptively low / `0 ppm` cost (its
+inbound fee invisible, e.g. ACINQ's ~500 ppm reading as 0).
 
 - **Pricing.** Price the bid off the **cheapest feasible source** — raise this run's
   `max_fee_ppm` up to its live cost (bounded by the ceiling). An affordable refill
@@ -260,13 +272,16 @@ source**, capped at the ceiling, and that single set of probes drives both halve
   the price paid: the executor's pathfinder still finds and pays the cheapest route
   under it, and `last_refill` anchors to the actual paid ppm, so the conservative cap
   never inflates anything.
-- **Safety rails.** Judged-only (unjudged keep full price discovery via real
-  attempts); a probe that's **unavailable** (LND down) is *unknown*, never no-route,
-  so a transport blip can't strand; `force` bypasses the probe entirely.
+- **Safety rails.** Calibrated-only in auto mode (calibrating channels keep full price
+  discovery via real attempts); a probe that's **unavailable** (LND down) is *unknown*,
+  never no-route, so a transport blip can't strand. `force` does **not** bypass the
+  probe — it runs it diagnostically (prices + ranks + probes calibrating channels too)
+  but never strands; see [Force Mode](#force-mode).
 
-The probe returns `{drop, budget, source_order}`; the planner threads `source_order`
-into both the primary and fallback plan loops so the cheapest feasible source is
-tried first.
+The probe returns `{drop, budget, source_order, probe_results}`; the planner threads
+`source_order` into both the primary and fallback plan loops so the cheapest feasible
+source is tried first, and stashes `probe_results` (per-source status + cost) on every
+plan dict for the `--force` display.
 
 ## Outbound fee impact
 
@@ -330,5 +345,32 @@ separate gating. This means:
 
 ## Force Mode
 
-`--force 0.4` ignores thresholds, targets 40% on all channels. `--dry-run`
+`ln-operator rebalance_channels --force [ratio]` (default `0.5`) ignores the
+20/80 thresholds **and** the profit/structural gate, targeting `ratio`% local on
+**every** channel — calibrating, calibrated, *and* stranded alike. `--dry-run`
 shows per-channel end states at different force levels so you can pick.
+
+Force is an explicit operator override, so it changes how the QueryRoutes probe
+behaves — for **visibility**, never gating:
+
+- **The probe runs diagnostically.** It still prices the bid off the cheapest
+  feasible source and ranks sources cheapest-first, and it probes *calibrating*
+  channels too (auto skips them). But it **never strands** (`drop` stays false)
+  and **never records** a synthetic failed cycle — the operator is overriding the
+  gate on purpose.
+- **It shows the intel before moving sats** (`_show_queryroutes_intel`): an
+  `ATTENTION` banner (a probe is point-in-time — a green route can still fail the
+  real payment as liquidity/gossip shift), the routing min-chunk size, and per
+  source a ✅ live-route + ppm, ❌ no-route-≤-ceiling, or ⚠️ unavailable. Each
+  target is tagged with its state — `[calibrating]` / `[calibrated]` /
+  `[stranded]`.
+- **If every probe comes back no-route**, it asks `Try the rebalance anyway?
+  [y/N]` with a **30-second timeout defaulting to No** (`_prompt_proceed_with_timeout`;
+  a non-interactive stdin — cron/pipe — takes the default instantly, never
+  blocking). **No / timeout** → print the `manual_rebalance` commands and skip the
+  auto-attempt; **Yes** → attempt anyway.
+- **Either way**, after the run any target that landed zero sats gets a
+  ready-to-paste `manual_rebalance` command (`_print_manual_rebalance_hints`),
+  pre-filled with the cheapest source the probe found and its observed ppm (or the
+  primary source + bid when no source routed) — the deliberate next step when the
+  auto path can't find an affordable route but you want the refill.

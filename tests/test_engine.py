@@ -284,7 +284,7 @@ class RebalanceBudgetTests(unittest.TestCase):
 
     # ── Layer 1 profitability gate ──
     def test_unjudged_keeps_full_escalation(self):
-        # No earned-ppm judgement → escalation runs free (this is the LNbits
+        # No earned-ppm assessment → escalation runs free (this is the LNbits
         # bootstrap case the gate must NOT clamp to a useless low budget).
         with patch("db.get_last_refill_ppm", return_value=2000), \
              patch("db.count_failures_since_last_success", return_value=3), \
@@ -327,7 +327,7 @@ class RebalanceBudgetTests(unittest.TestCase):
         # channel earning 576. Plain escalation after 5 fails = 14 ppm and never
         # finds a route. The accelerator closes the full gap (STEP×5 = 1.0) to
         # the affordable ceiling (earned×horizon), so it bids that instead.
-        fails = config.REBALANCE_STRUCTURAL_FAIL_THRESHOLD             # 5
+        fails = config.REBALANCE_STRUCTURAL_FAIL_THRESHOLD             # 10
         earned = 576.0
         with patch("db.get_last_refill_ppm", return_value=7), \
              patch("db.count_failures_since_last_success", return_value=fails), \
@@ -383,7 +383,7 @@ class RebalanceBudgetTests(unittest.TestCase):
         self.assertFalse(r["profit_capped"])
 
     def test_accelerator_skipped_for_unjudged(self):
-        # No earned-ppm judgement → no ceiling to accelerate toward; plain
+        # No earned-ppm assessment → no ceiling to accelerate toward; plain
         # escalation runs free, preserving bootstrap price discovery.
         with patch("db.get_last_refill_ppm", return_value=7), \
              patch("db.count_failures_since_last_success", return_value=5), \
