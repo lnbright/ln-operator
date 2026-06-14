@@ -34,6 +34,17 @@ do and a human won't:
 - **Grounded capital decisions** (§4) — for a channel rebalancing can't fix, a
   reasoned recommendation *with the numbers*, not a restatement of its state.
 
+**Carve-out — during a revenue drought the full balance SHAPE is in scope.** The
+"don't restate balances" rule is about not parroting the dashboard's per-channel
+list. It does NOT bar analysing the *distribution*: when the node is in a drought
+(see the §5 zero-revenue rule), the full local-ratio spread across ALL channels is
+exactly the analysis the dashboard can't do. Read every channel's local %, not just
+the stranded ones, and explain WHY the non-stranded channels aren't absorbing the
+demand the stranded sinks lost — are they pinned at ~100% local with no inbound to
+receive-and-forward, sitting idle with no demand, or priced out? A node-wide drought
+is almost never "2 sinks gated"; it's a liquidity-shape story across the whole node,
+and naming that shape is the high-value finding.
+
 **Don't repeat yourself across days — use the dedup store, not your judgement.**
 A deterministic finding store decides what's new vs a repeat, so you never re-derive
 that from the log. As the LAST step before composing the summary, build the list of
@@ -51,6 +62,15 @@ Report strictly from the buckets it returns:
     e.g. "bfx-lnd0 drops 2.7m→4.1m since 06-12".
   - `unchanged` → SUPPRESS, or fold into ONE terse line
     ("3 findings unchanged since <first_seen>: LNBiG/bfx/podcast stranded").
+    **EXCEPT — escalate a stale unactioned decision, don't suppress it forever.**
+    A finding that carries a standing capital/operator recommendation and has been
+    open ≥3 days without the underlying numbers moving (i.e. the operator has not
+    acted) is NOT routine noise — suppressing it trains the operator to ignore the
+    very decisions that matter most. Re-surface it as ONE escalation line naming the
+    age and that it's still unactioned ("LNBiG capital call open 9 days, unactioned —
+    decide: splice/swap-refill/close"), pointing to the standing recommendation by
+    date rather than re-deriving it. Pure observational `unchanged` findings with no
+    pending action still suppress/fold as normal.
     When folding, do NOT re-state the recommendation in compressed form — that
     is exactly where vague verbs leak back in ("capital action remains the only
     mover", "open inbound toward their sinks"). Either point to the standing
@@ -453,6 +473,15 @@ Based on the day's data, think about whether to suggest:
       ppm can never cover refill cost and whose fee can't rise without killing the
       flow.
 
+  **State the running P&L when a channel (or the node) is in sustained drought.**
+  A close/resize/keep decision needs a number, not a vibe — every drought suggestion
+  circles "is this worth running at this size" but is useless without the economics
+  on the line. When you recommend a capital action under a drought, quote the
+  channel's trailing earnings (earned sats/30d, or the whole node's if the drought is
+  node-wide) against what keeping it costs (refill ppm × the sats it needs, plus the
+  on-chain cost below). "earns ~Xk sats/30d, refill+chain to keep it alive ~Y → close"
+  is the form; a recommendation without that ratio is incomplete.
+
   **Account for on-chain cost.** Every action except "raise outbound fee" touches
   the chain (open, close, resize, splice, and the swap's lockup/claim txs) and
   costs on-chain fees — a close+reopen is two txs. A capital move only makes sense
@@ -560,6 +589,12 @@ it is already on the dashboard, so it stays one compact line and never grows int
 per-channel detail. Keep the `24h —` / `now —` split: the forwarding / rebalance /
 fee counts are sliding-window (24h); active-count, backup age and tests are
 current-state. The report's value lives in Issues / Suggestions below, not Pulse.
+
+A window with ~0 forwards or ~0 sats earned, when the 7d baseline is materially
+non-zero, is itself an `Issues:` line — NOT a Suggestion. A node earning nothing is
+the headline, even when no deterministic check failed; "Issues: none" is wrong while
+revenue is dead. Lead the Issue with the drought's duration and the baseline it's
+fallen from (e.g. "0 fwds / 0 earned in 24h vs ~16/day 7d — Nh since last forward").
 
 If `Issues` is clean, render it as `✅ *Issues:* none` (drop the bullets).
 If `Fixed` is empty, render `🔧 *Fixed:* nothing`.

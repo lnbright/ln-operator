@@ -61,7 +61,7 @@ cron line or environment):
 | Env var | Default | What it controls |
 |---|---|---|
 | `LN_OPERATOR_ENABLE_AI_DAILY_CHECK` | `0` (off) | Opt-in gate. Must be `1` or the script logs `disabled` and exits 0. |
-| `DAILY_CHECK_MODEL` | `claude-opus-4-7` | Which model runs the agent. Set to any current model id (e.g. a newer Opus) to trade cost/speed for capability. |
+| `DAILY_CHECK_MODEL` | `claude-opus-4-8` | Which model runs the agent. Set to any current model id (e.g. a newer Opus) to trade cost/speed for capability. |
 | `DAILY_CHECK_MAX_BUDGET_USD` | `5` | Hard cap on API spend **per run**, in USD. Insurance against a runaway loop; a normal run is <$2. Lower it to be thrifty, raise it if you expand the prompt. |
 | `DAILY_CHECK_LND_MACAROON` | (unset → falls back to `.env` `LND_MACAROON`) | Path to the macaroon the agent uses. **Point this at a read-only macaroon** so it can't move funds (see below). |
 | `CLAUDE_BIN` | `claude` (resolved on `PATH`) | Path/name of the Claude CLI binary. |

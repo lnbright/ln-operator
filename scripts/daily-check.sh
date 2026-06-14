@@ -14,7 +14,7 @@ LOG=$REPO/logs/daily-check.log
 PROMPT=$REPO/scripts/daily-check-prompt.md
 CLAUDE="${CLAUDE_BIN:-claude}"  # resolved on PATH; override with CLAUDE_BIN
 # Model + per-run spend cap are env-overridable (see docs/daily-check.md).
-MODEL="${DAILY_CHECK_MODEL:-claude-opus-4-7}"
+MODEL="${DAILY_CHECK_MODEL:-claude-opus-4-8}"
 MAX_BUDGET_USD="${DAILY_CHECK_MAX_BUDGET_USD:-5}"
 SUMMARY=/tmp/daily-check-summary.txt
 JSON=/tmp/daily-check-result.json
@@ -58,7 +58,7 @@ echo "model=$MODEL max-budget-usd=$MAX_BUDGET_USD" >> "$LOG"
 
 # --max-budget-usd caps API spend per run (insurance against a runaway loop
 # from a bad prompt change). Typical run is <$2; default cap $5, override with
-# DAILY_CHECK_MAX_BUDGET_USD. Model defaults to claude-opus-4-7, override with
+# DAILY_CHECK_MAX_BUDGET_USD. Model defaults to claude-opus-4-8, override with
 # DAILY_CHECK_MODEL.
 # --output-format json gives us total_cost_usd / duration_ms / usage so we
 # can log and report actual spend. JSON goes to $JSON; stderr to the log.
