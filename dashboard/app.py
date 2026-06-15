@@ -760,6 +760,18 @@ TEMPLATE = """
   .timestamp { font-size: 11px; color: var(--muted); text-align: right; }
   .refresh-btn { display: inline-block; margin-top: 8px; padding: 6px 14px; background: var(--accent); color: #000; font-family: 'Space Mono', monospace; font-size: 11px; font-weight: 700; text-decoration: none; border: none; cursor: pointer; letter-spacing: 0.05em; transition: opacity 0.15s; }
   .refresh-btn:hover { opacity: 0.85; }
+  /* Top progress bar shown during a page load/refresh. The dashboard is
+     server-rendered and can take a few seconds (many LND calls); without a cue
+     the user can't tell anything is happening and re-clicks Refresh. The bar
+     trickles to ~90% over the wait and the new page replaces it on arrival;
+     while loading the Refresh button is locked so repeat clicks don't stack. */
+  #loadbar { position: fixed; top: 0; left: 0; height: 3px; width: 0;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    box-shadow: 0 0 10px var(--accent); z-index: 9999;
+    opacity: 0; transition: opacity 0.25s; pointer-events: none; }
+  body.loading #loadbar { opacity: 1; width: 92%;
+    transition: width 10s cubic-bezier(0.1, 0.75, 0.1, 1), opacity 0.25s; }
+  body.loading .refresh-btn { pointer-events: none; opacity: 0.5; cursor: wait; }
 
   .badge { display: inline-block; padding: 2px 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
   .badge-green  { background: rgba(0,217,126,0.15);  color: var(--green);  border: 1px solid rgba(0,217,126,0.3);  }
@@ -965,6 +977,7 @@ TEMPLATE = """
 {% endif %}
 </head>
 <body>
+<div id="loadbar"></div>
 <div class="wrap">
 
   <header>
@@ -1723,6 +1736,25 @@ TEMPLATE = """
 
 </div>
 <script>
+// Loading bar + refresh lock. The page is server-rendered, so a refresh keeps
+// the old DOM visible while the server works — beforeunload fires the instant a
+// navigation starts (Refresh button, F5, or a sat-flow filter link), so we show
+// the trickle bar and add body.loading, which CSS uses to disable the Refresh
+// button. The new page replaces everything on arrival, clearing the bar.
+(function () {
+  function startLoading() {
+    document.body.classList.add('loading');
+    var btn = document.querySelector('.refresh-btn');
+    if (btn) btn.textContent = '⏳ Loading…';
+  }
+  window.addEventListener('beforeunload', startLoading);
+  // Back/forward bfcache restore serves the cached page without unloading — make
+  // sure a stale loading state from when we left doesn't persist.
+  window.addEventListener('pageshow', function (e) {
+    if (e.persisted) document.body.classList.remove('loading');
+  });
+})();
+
 function pageTab(name) {
   for (const t of ['node', 'flows', 'advanced']) {
     const pane = document.getElementById('tab-' + t);
