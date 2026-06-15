@@ -990,6 +990,60 @@ def cmd_healthcheck(args):
     return report
 
 
+def detect_closed_channels(log):
+    """Snapshot newly-closed channels into the closed_channels table.
+
+    A closed channel disappears from LND's live channel list, so the flow /
+    routing tables lose its alias and fall back to a raw scid. We record each
+    one (scid→alias is permanent) so the dashboard can keep naming the peer, and
+    we raise a `channel_closed_by_peer` alert when the REMOTE side initiated the
+    close — that's a loss we didn't choose and want surfaced.
+
+    First-ever run SEEDS the table silently (every historical close would
+    otherwise alert at once); only closes detected after seeding alert.
+    Returns the number of newly-recorded closes.
+    """
+    try:
+        closed = lnd_client._get("/v1/channels/closed").get("channels", []) or []
+    except Exception as e:
+        log.warning("closed-channel detection failed: %s", e)
+        return 0
+
+    seeding = db.count_closed_channels() == 0
+    alias_cache = {}
+    new = 0
+    for c in closed:
+        chan_id = str(c.get("chan_id", "") or "")
+        if not chan_id or chan_id == "0":
+            continue  # pending/unconfirmed closes carry no scid yet
+        pubkey = c.get("remote_pubkey", "") or ""
+        if pubkey not in alias_cache:
+            try:
+                alias_cache[pubkey] = (lnd_client.get_node_info(pubkey)
+                                       .get("node", {}).get("alias", "") or pubkey[:12])
+            except Exception:
+                alias_cache[pubkey] = pubkey[:12]
+        alias = alias_cache[pubkey]
+        is_new = db.record_closed_channel(
+            chan_id, pubkey, alias,
+            int(c.get("capacity", 0) or 0), int(c.get("settled_balance", 0) or 0),
+            c.get("close_type"), c.get("close_initiator"),
+            int(c.get("close_height", 0) or 0), c.get("closing_tx_hash"))
+        if not is_new:
+            continue
+        new += 1
+        if not seeding and c.get("close_initiator") == "INITIATOR_REMOTE":
+            cap = int(c.get("capacity", 0) or 0)
+            ctype = (c.get("close_type", "") or "").lower().replace("_", " ")
+            msg = (f"{alias} closed our channel (scid {chan_id}, "
+                   f"{cap:,} sat cap, {ctype})")
+            db.save_alert("channel_closed_by_peer", msg, chan_id)
+            log.warning("peer closed channel: %s", msg)
+    if new:
+        log.info("closed-channel detect: %d new%s", new, " (seeded)" if seeding else "")
+    return new
+
+
 def cmd_run(args):
     """Full pipeline: rebalance_channels → adjust_fees → sync_routing → healthcheck."""
     log_main = get_logger("main")
@@ -1053,6 +1107,13 @@ def cmd_run(args):
             db.save_alert(a["type"], a["message"], a.get("chan_id"))
     else:
         print("  ✅ All channels healthy.")
+
+    # Step 5: Detect closed channels — record scid→alias (so flow/routing tables
+    # keep naming a closed peer) and alert when a peer closed our channel.
+    print("\n── Step 5: Closed-Channel Check ──")
+    num_closed = detect_closed_channels(log_main)
+    print(f"  {num_closed} newly-closed channel(s) recorded"
+          if num_closed else "  No new channel closures.")
 
     elapsed = time.time() - started
     log_main.info("pipeline complete in %.1fs — fees:%d rebalances:%d events:%d alerts:%d",

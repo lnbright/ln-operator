@@ -284,6 +284,19 @@
   broadcast). The
   agent now does deep §2 analysis ONLY when `run_checks` reports a failure (clean → one
   line, no hand-arithmetic).
+- closed_channels table: one row per closed channel (scid PK + remote_pubkey,
+  alias, capacity, settled_balance, close_type, close_initiator, close_height,
+  closing_tx_hash). A closed channel vanishes from LND's live channel list, so the
+  dashboard flow / routing-events tables lost its alias and showed a raw scid;
+  this snapshots scid→alias permanently so they render "LNBiG [Hub-3] (closed)"
+  instead (`db.get_closed_channel_aliases()`, merged as the fallback BELOW the live
+  alias in `dashboard/app.py`). Populated by pipeline Step 5
+  (`main.detect_closed_channels`): pulls `/v1/channels/closed`, resolves each peer's
+  alias via `get_node_info`, upserts via `db.record_closed_channel` (returns new?).
+  A newly-detected close with `close_initiator == INITIATOR_REMOTE` (the peer closed
+  on us) raises a `channel_closed_by_peer` alert. **First run SEEDS silently** — an
+  empty table means every historical close would alert at once, so seeding only
+  records; alerts fire only for closes detected after seeding.
 - graph_snapshots table: one row per `refresh_graph` run — total_nodes/channels/
   capacity + our_channels/capacity/peers. Historical, so our network position
   (growing / going dark) is trendable. Finally given a writer (`db.save_graph_snapshot`).

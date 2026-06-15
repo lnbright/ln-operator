@@ -311,6 +311,25 @@ CREATE TABLE IF NOT EXISTS alerts (
     sent_telegram    INTEGER DEFAULT 0
 );
 
+-- ─── Closed channels (alias memory + peer-close alerting) ───────────
+-- A closed channel stays in LND's /v1/channels/closed but vanishes from the
+-- live channel list, so the flow/routing tables lose its alias and fall back to
+-- a raw scid. We snapshot each close here (scid→alias is permanent) so the
+-- dashboard can still NAME a closed peer, and so a peer-INITIATED close can be
+-- surfaced as an alert. Detected once per pipeline run (detect_closed_channels).
+CREATE TABLE IF NOT EXISTS closed_channels (
+    chan_id          TEXT PRIMARY KEY,   -- numeric scid
+    remote_pubkey    TEXT,
+    alias            TEXT,
+    capacity         INTEGER,
+    settled_balance  INTEGER,
+    close_type       TEXT,
+    close_initiator  TEXT,               -- INITIATOR_LOCAL / INITIATOR_REMOTE
+    close_height     INTEGER,
+    closing_tx_hash  TEXT,
+    detected_ts      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
 -- ─── Channel maturity tracking ──────────────────────────────────
 -- Tracks how much time each channel has spent in a balanced state. This is now
 -- a dashboard-only stat ("balanced N days"); it no longer feeds the rebalance
@@ -650,6 +669,35 @@ def save_alert(alert_type, message, channel_id=None, sent_telegram=False):
             INSERT INTO alerts (alert_type, channel_id, message, sent_telegram)
             VALUES (?, ?, ?, ?)
         """, (alert_type, channel_id, message, int(sent_telegram)))
+
+
+def count_closed_channels():
+    """How many closed channels we've snapshotted (0 ⇒ table never seeded)."""
+    with get_conn() as conn:
+        return conn.execute("SELECT COUNT(*) AS n FROM closed_channels").fetchone()["n"]
+
+
+def record_closed_channel(chan_id, remote_pubkey, alias, capacity, settled_balance,
+                          close_type, close_initiator, close_height, closing_tx_hash):
+    """Snapshot a closed channel (scid→alias is permanent). Returns True if this
+    scid was not already recorded (i.e. a newly-detected close), False otherwise."""
+    with get_conn() as conn:
+        cur = conn.execute("""
+            INSERT OR IGNORE INTO closed_channels
+                (chan_id, remote_pubkey, alias, capacity, settled_balance,
+                 close_type, close_initiator, close_height, closing_tx_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (str(chan_id), remote_pubkey, alias, capacity, settled_balance,
+              close_type, close_initiator, close_height, closing_tx_hash))
+        return cur.rowcount > 0
+
+
+def get_closed_channel_aliases():
+    """scid → alias map for every closed channel, so the dashboard can name a
+    peer whose channel no longer appears in the live channel list."""
+    with get_conn() as conn:
+        return {r["chan_id"]: r["alias"]
+                for r in conn.execute("SELECT chan_id, alias FROM closed_channels")}
 
 
 # ─── Query helpers ───────────────────────────────────────────────

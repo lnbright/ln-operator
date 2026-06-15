@@ -294,6 +294,12 @@ def get_dashboard_data():
         channels_enriched.append(ch)
     data["channels"] = channels_enriched
 
+    # Closed channels vanish from the live list above, so flow/routing tables
+    # would show a raw scid. The pipeline snapshots scid→alias on close; load it
+    # so a closed peer still shows as e.g. "LNBiG [Hub-3] (closed)".
+    closed_aliases = db_all("SELECT chan_id, alias FROM closed_channels")
+    closed_alias_by_chan = {str(r["chan_id"]): r["alias"] for r in closed_aliases}
+
     data["watchtowers"] = get_watchtower_status()
 
     invoices, _     = lnd_get("/v1/invoices?reversed=true&num_max_invoices=10")
@@ -332,9 +338,16 @@ def get_dashboard_data():
                   or str(ch.get("chan_id", "")))
                  + (" ·" + ch["alias_tag"] if ch.get("alias_tag") else "")
                  for ch in channels_enriched}
+    def fwd_or_closed(scid):
+        scid = str(scid)
+        if scid in fwd_alias:
+            return fwd_alias[scid]
+        if scid in closed_alias_by_chan:
+            return f"{closed_alias_by_chan[scid]} (closed)"
+        return scid
     for fwd in data["forwarding"]:
-        fwd["in_alias"]  = fwd_alias.get(str(fwd["chan_in"]), str(fwd["chan_in"]))
-        fwd["out_alias"] = fwd_alias.get(str(fwd["chan_out"]), str(fwd["chan_out"]))
+        fwd["in_alias"]  = fwd_or_closed(fwd["chan_in"])
+        fwd["out_alias"] = fwd_or_closed(fwd["chan_out"])
 
     data["rebalances"] = db_all("""
         SELECT ts, source_alias, target_alias, amount_sats,
@@ -379,7 +392,8 @@ def get_dashboard_data():
     data["sat_flow"] = get_sat_flow(now, channels_enriched,
                                     request.args.get("flow_window", "30"),
                                     request.args.get("flow_in", ""),
-                                    request.args.get("flow_out", ""))
+                                    request.args.get("flow_out", ""),
+                                    closed_alias_by_chan)
 
     data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return data
@@ -586,7 +600,8 @@ def get_forward_failures(now, channels):
 SAT_FLOW_WINDOWS = {"30": ("30d", 30), "7": ("7d", 7), "all": ("all time", None)}
 
 
-def get_sat_flow(now, channels, window_key="30", flow_in="", flow_out=""):
+def get_sat_flow(now, channels, window_key="30", flow_in="", flow_out="",
+                 closed_aliases=None):
     """Routing-flow map: where sats come IN and where they go OUT, over a
     selectable window (30d / 7d / all time), optionally filtered to a single
     inbound and/or outbound channel.
@@ -597,8 +612,9 @@ def get_sat_flow(now, channels, window_key="30", flow_in="", flow_out=""):
       - sources: total sats received per inbound peer (where liquidity enters)
       - sinks:   total sats sent per outbound peer (where liquidity leaves)
     chan_in/chan_out are scids; we map them to peer aliases via the live channel
-    list. Scids with no current channel (closed since) fall back to the raw id —
-    most visible under 'all time'.
+    list. Scids with no current channel (closed since) fall back to the
+    snapshotted closed-channel alias ("LNBiG [Hub-3] (closed)") via
+    closed_aliases, then to the raw id — most visible under 'all time'.
 
     flow_in / flow_out are scids: when set, rows are filtered to that channel so
     you can drill into a single peer ("where do sats from Boltz go?"). The
@@ -635,8 +651,17 @@ def get_sat_flow(now, channels, window_key="30", flow_in="", flow_out=""):
                      + (" ·" + ch["alias_tag"] if ch.get("alias_tag") else "")
                      for ch in channels}
 
+    # A scid with no live channel (closed since) falls back to the snapshotted
+    # closed-channel alias ("LNBiG [Hub-3] (closed)") before the raw scid.
+    closed = closed_aliases or {}
+
     def alias(scid):
-        return alias_by_chan.get(str(scid), str(scid))
+        scid = str(scid)
+        if scid in alias_by_chan:
+            return alias_by_chan[scid]
+        if scid in closed:
+            return f"{closed[scid]} (closed)"
+        return scid
 
     # Dropdown menus — every channel that appears on each side in the window,
     # built before filtering so changing one filter never empties the other menu.
