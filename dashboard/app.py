@@ -1783,6 +1783,13 @@ TEMPLATE = """
     var href = a.getAttribute('href');
     if (!href || href.charAt(0) === '#' || href.lastIndexOf('javascript:', 0) === 0) return;
     startLoading();
+    // A link to the URL we're ALREADY on (the ↻ Refresh button, href="/") is a
+    // no-op in iOS Safari — it doesn't reload, so after the first refresh nothing
+    // happened. Force a real reload so every refresh re-fetches and shows the bar.
+    if (a.href === location.href) {
+      e.preventDefault();
+      location.reload();
+    }
   });
   window.addEventListener('beforeunload', startLoading);
   window.addEventListener('pagehide', startLoading);  // iOS fires this, not beforeunload
@@ -1877,6 +1884,19 @@ def format_age(ts):
         return f"{d}d {h}h ago" if h else f"{d}d ago"
     except Exception:
         return "—"
+
+
+@app.after_request
+def _no_cache(resp):
+    """Never cache the dashboard. Without this the browser serves repeat
+    same-URL refreshes (the ↻ link → "/") from its own cache instantly: the
+    ~1s server fetch is skipped, so the loading overlay never shows AND the data
+    is stale. no-store forces a real fetch every time — consistent overlay,
+    always-fresh numbers."""
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/")
