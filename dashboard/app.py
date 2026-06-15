@@ -779,7 +779,11 @@ TEMPLATE = """
   #loadmask { position: fixed; inset: 0; z-index: 9990; pointer-events: none;
     background: rgba(8, 8, 12, 0.45); opacity: 0; visibility: hidden;
     transition: opacity 0.25s, visibility 0.25s; }
-  body.loading #loadmask { opacity: 1; visibility: visible; }
+  /* Appear INSTANTLY on load (transition: none) — mobile browsers snapshot the
+     old page within a few ms of the tap, before a 0.25s fade-in would ever reach
+     visible, so the overlay never showed on phones. Instant = it's in the
+     snapshot. Desktop is unaffected (the page stays live during the wait). */
+  body.loading #loadmask { opacity: 1; visibility: visible; transition: none; }
   #loadbadge { position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 10px;
     padding: 10px 18px; border-radius: 999px;
@@ -1756,18 +1760,32 @@ TEMPLATE = """
 
 </div>
 <script>
-// Loading bar + refresh lock. The page is server-rendered, so a refresh keeps
-// the old DOM visible while the server works — beforeunload fires the instant a
-// navigation starts (Refresh button, F5, or a sat-flow filter link), so we show
-// the trickle bar and add body.loading, which CSS uses to disable the Refresh
-// button. The new page replaces everything on arrival, clearing the bar.
+// Loading bar + refresh lock. The page is server-rendered, so a navigation keeps
+// the old DOM visible while the server works; we add body.loading (CSS shows the
+// trickle bar, dim, badge, and disables Refresh), and the new page replaces it
+// on arrival. We trigger on the TAP itself (delegated click), not just on
+// beforeunload — mobile browsers (iOS Safari especially) fire beforeunload
+// unreliably or never, so on phones the click handler is what actually shows it;
+// beforeunload/pagehide stay as the F5 / hardware-refresh fallbacks.
 (function () {
   function startLoading() {
     document.body.classList.add('loading');
     var btn = document.querySelector('.refresh-btn');
     if (btn) btn.textContent = '⏳ Loading…';
   }
+  // Any anchor that triggers a real navigation (Refresh, sat-flow filter links).
+  // Skip in-page hash jumps, new-tab / modified clicks, and javascript: links.
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey ||
+        e.shiftKey || e.altKey) return;
+    var a = e.target.closest('a[href]');
+    if (!a || a.target === '_blank') return;
+    var href = a.getAttribute('href');
+    if (!href || href.charAt(0) === '#' || href.lastIndexOf('javascript:', 0) === 0) return;
+    startLoading();
+  });
   window.addEventListener('beforeunload', startLoading);
+  window.addEventListener('pagehide', startLoading);  // iOS fires this, not beforeunload
   // Back/forward bfcache restore serves the cached page without unloading — make
   // sure a stale loading state from when we left doesn't persist.
   window.addEventListener('pageshow', function (e) {
