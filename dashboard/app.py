@@ -772,6 +772,25 @@ TEMPLATE = """
   body.loading #loadbar { opacity: 1; width: 92%;
     transition: width 10s cubic-bezier(0.1, 0.75, 0.1, 1), opacity 0.25s; }
   body.loading .refresh-btn { pointer-events: none; opacity: 0.5; cursor: wait; }
+  /* Light dim so the page clearly reads as inactive while still leaving the
+     (stale) data legible underneath — a blocking overlay would hide exactly
+     what the operator wants to glance at during the wait. Purely visual
+     (pointer-events:none); the refresh lock above is what stops re-clicks. */
+  #loadmask { position: fixed; inset: 0; z-index: 9990; pointer-events: none;
+    background: rgba(8, 8, 12, 0.45); opacity: 0; visibility: hidden;
+    transition: opacity 0.25s, visibility 0.25s; }
+  body.loading #loadmask { opacity: 1; visibility: visible; }
+  #loadbadge { position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 18px; border-radius: 999px;
+    background: var(--surface); border: 1px solid var(--border);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+    color: var(--text); font-family: 'Space Mono', monospace;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.06em; }
+  #loadbadge .spin { width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    animation: loadspin 0.7s linear infinite; }
+  @keyframes loadspin { to { transform: rotate(360deg); } }
 
   .badge { display: inline-block; padding: 2px 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
   .badge-green  { background: rgba(0,217,126,0.15);  color: var(--green);  border: 1px solid rgba(0,217,126,0.3);  }
@@ -978,6 +997,7 @@ TEMPLATE = """
 </head>
 <body>
 <div id="loadbar"></div>
+<div id="loadmask"><div id="loadbadge"><span class="spin"></span>Loading…</div></div>
 <div class="wrap">
 
   <header>
