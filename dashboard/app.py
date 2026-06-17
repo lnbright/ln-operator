@@ -298,7 +298,17 @@ def get_dashboard_data():
     # would show a raw scid. The pipeline snapshots scid→alias on close; load it
     # so a closed peer still shows as e.g. "LNBiG [Hub-3] (closed)".
     closed_aliases = db_all("SELECT chan_id, alias FROM closed_channels")
-    closed_alias_by_chan = {str(r["chan_id"]): r["alias"] for r in closed_aliases}
+    # Several closed channels can share a peer alias (e.g. two channels to
+    # LNBiG [Hub-3] closed at different times) — they're DISTINCT channels by
+    # scid, so tag duplicates with a short scid suffix (mirrors the live
+    # sibling-channel tagging) instead of collapsing to identical-looking rows.
+    _closed_alias_counts = {}
+    for r in closed_aliases:
+        _closed_alias_counts[r["alias"]] = _closed_alias_counts.get(r["alias"], 0) + 1
+    closed_alias_by_chan = {
+        str(r["chan_id"]): r["alias"] + (" ·" + str(r["chan_id"])[-5:]
+                                         if _closed_alias_counts[r["alias"]] > 1 else "")
+        for r in closed_aliases}
 
     data["watchtowers"] = get_watchtower_status()
 
