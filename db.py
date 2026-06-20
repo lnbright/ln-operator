@@ -829,7 +829,7 @@ def save_manual_rebalance(source_chan_id, target_chan_id, source_alias, target_a
               amount_sats, fee_paid_sats, fee_ppm, payment_hash))
 
 
-def get_repeated_rebalance_failures(chan_id, min_failures=3):
+def get_repeated_rebalance_failures(chan_id, min_failures=3, recency_days=3):
     """Check if a channel has failed to be REFILLED N+ times in a row.
 
     Returns the count of consecutive failures if >= min_failures, else 0.
@@ -837,16 +837,23 @@ def get_repeated_rebalance_failures(chan_id, min_failures=3):
     A failed attempt only reflects on the target — the source had outbound
     to give; the route failure (timeout / no-route / fee-too-low) belongs
     to the receiving side.
+
+    Only attempts within `recency_days` count: once the planner stops
+    targeting a channel (gated by profit cap, or no longer depleted), the
+    failure cluster freezes and "N in a row" is no longer happening *now* —
+    leaving it unbounded re-fired the rebalance_failing alert every cycle
+    forever (a profit-capped channel last attempted days ago).
     """
+    cutoff = int(time.time()) - recency_days * 86400
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT success FROM rebalance_log
-            WHERE target_chan_id = ?
+            WHERE target_chan_id = ? AND ts >= ?
             ORDER BY ts DESC LIMIT ?
-        """, (chan_id, min_failures)).fetchall()
+        """, (chan_id, cutoff, min_failures)).fetchall()
 
     if len(rows) < min_failures:
-        return 0  # not enough history yet
+        return 0  # not enough recent history
 
     # Check if all recent attempts failed
     if all(not row["success"] for row in rows):

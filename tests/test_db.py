@@ -149,6 +149,46 @@ class FailureExpiryTests(unittest.TestCase):
         self.assertEqual(db.count_failures_since_last_success("chan"), 1)
 
 
+class RepeatedRebalanceFailuresRecencyTests(unittest.TestCase):
+    """The rebalance_failing alert only fires on a CURRENT streak.
+
+    Once the planner stops targeting a channel (gated by profit cap, or no
+    longer depleted), its failure cluster freezes — without a recency bound
+    get_repeated_rebalance_failures kept returning N forever and the alert
+    re-fired every pipeline cycle (ACINQ: 111 firings off a 9-day-old
+    cluster)."""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self._patch = patch("db.DB_PATH", self.db_path)
+        self._patch.start()
+        db.init_db()
+        self.now = int(time.time())
+
+    def tearDown(self):
+        self._patch.stop()
+        os.unlink(self.db_path)
+
+    def _attempt(self, age_days, success):
+        with db.get_conn() as conn:
+            conn.execute("""
+                INSERT INTO rebalance_log
+                    (ts, source_chan_id, target_chan_id, amount_sats, success)
+                VALUES (?, 'src', 'chan', 500000, ?)
+            """, (self.now - int(age_days * DAY), 1 if success else 0))
+
+    def test_recent_streak_counts(self):
+        for d in (0.1, 0.2, 0.3):
+            self._attempt(d, success=False)
+        self.assertEqual(db.get_repeated_rebalance_failures("chan"), 3)
+
+    def test_stale_streak_does_not_fire(self):
+        for d in (9, 9.1, 9.2):
+            self._attempt(d, success=False)
+        self.assertEqual(db.get_repeated_rebalance_failures("chan"), 0)
+
+
 class FailureRunDedupTests(unittest.TestCase):
     """Failure unit is the refill RUN, not the attempt.
 
