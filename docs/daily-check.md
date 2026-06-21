@@ -1,15 +1,32 @@
-# Daily Check (AI agent)
+# Daily Check
 
-An **optional**, **off-by-default** daily job that runs an autonomous Claude
-agent (`scripts/daily-check.sh` → `scripts/daily-check-prompt.md`) to review the
-last 24 hours of node activity and send a concise summary to Telegram.
+A daily cron job (`scripts/daily-check.sh`, 09:00) that **always runs and sends a
+concise summary to Telegram**. It has two modes, switched by one flag:
 
-> ⚠️ This agent runs with `--dangerously-skip-permissions` and the prompt
+- **Deterministic (default)** — read-only, no LLM, no spend. Runs the data-integrity
+  reconciliation (`reconcile.run_checks`) and the unit suite (`make test`) and
+  Telegrams a pass/fail summary with any issues inline.
+- **AI agent (opt-in, `LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1`)** — an autonomous Claude
+  agent (`scripts/daily-check.sh` → `scripts/daily-check-prompt.md`) reviews the last
+  24 hours of node activity, can self-fix code bugs, and sends a richer exec summary.
+
+> ⚠️ The AI agent runs with `--dangerously-skip-permissions` and the prompt
 > authorizes it to **edit code, `git commit`, and `git push origin main`**
 > unattended. Read this page and `scripts/daily-check-prompt.md` before enabling
 > it, and prefer a read-only LND macaroon (below).
 
-## What it does
+## Deterministic mode (default)
+
+No LLM, no setup. Each run executes `make test` and
+`reconcile.run_checks(window_days=1)`, then Telegrams:
+
+- 🧪 **Tests** — pass/fail, with the failing test names listed when red.
+- 🔎 **Data integrity** — `clean`, or each reconciliation issue inline
+  (`[fail]`/`[warn]` + message).
+
+Fully read-only: no code edits, no commits, no API spend.
+
+## AI agent mode (opt-in)
 
 Each run inspects the SQLite DB and live LND state and produces an exec summary:
 
@@ -49,8 +66,10 @@ sends the Telegram message. A typical run is ~5–7 min and ~$1.50–2.00, cappe
 
 ## Requirements
 
-- The `claude` CLI on `PATH` (override the binary with `CLAUDE_BIN`).
-- Telegram configured (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`) for delivery.
+- Telegram configured (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`) for delivery —
+  needed in both modes.
+- **AI agent mode only:** the `claude` CLI on `PATH` (override the binary with
+  `CLAUDE_BIN`). The deterministic mode needs no LLM.
 
 ## Customization
 
@@ -60,7 +79,7 @@ cron line or environment):
 
 | Env var | Default | What it controls |
 |---|---|---|
-| `LN_OPERATOR_ENABLE_AI_DAILY_CHECK` | `0` (off) | Opt-in gate. Must be `1` or the script logs `disabled` and exits 0. |
+| `LN_OPERATOR_ENABLE_AI_DAILY_CHECK` | `0` (off) | Mode switch. `1` runs the AI agent; anything else runs the deterministic checks. The daily run + Telegram happen either way. |
 | `DAILY_CHECK_MODEL` | `claude-opus-4-8` | Which model runs the agent. Set to any current model id (e.g. a newer Opus) to trade cost/speed for capability. |
 | `DAILY_CHECK_MAX_BUDGET_USD` | `5` | Hard cap on API spend **per run**, in USD. Insurance against a runaway loop; a normal run is <$2. Lower it to be thrifty, raise it if you expand the prompt. |
 | `DAILY_CHECK_LND_MACAROON` | (unset → falls back to `.env` `LND_MACAROON`) | Path to the macaroon the agent uses. **Point this at a read-only macaroon** so it can't move funds (see below). |
@@ -77,9 +96,10 @@ are echoed into `logs/daily-check.log` at the top of each run.
 > edit code and `git push` unattended. The macaroon governs **fund** access, not
 > code access — keep it read-only and review the prompt before enabling.
 
-## Enabling it
+## Enabling the AI agent
 
-It exits immediately unless explicitly opted in:
+The deterministic check runs daily with no setup. To switch the daily run to the
+**AI agent** instead, opt in:
 
 ```bash
 LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1
@@ -95,7 +115,7 @@ lncli bakemacaroon \
 ```
 
 ```cron
-# Daily at 09:00 — opt-in flag + read-only macaroon
+# Daily at 09:00 — AI agent enabled (flag=1) + read-only macaroon
 0 9 * * * LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1 \
   DAILY_CHECK_LND_MACAROON=/home/youruser/.lnd-macaroons/ln-operator-readonly.macaroon \
   /path/to/ln-operator/scripts/daily-check.sh
@@ -115,10 +135,11 @@ above can be prepended the same way):
 `LND_MACAROON` for that process only (`config.py` loads `.env` with
 `override=False`, so the export wins).
 
-## Disabling it
+## Disabling the AI agent
 
-Remove `LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1` from the cron line (or the whole
-line). With the flag unset the script logs `disabled` and exits 0.
+Set `LN_OPERATOR_ENABLE_AI_DAILY_CHECK=0` (or remove it). The daily run falls back
+to the **deterministic** checks — it still runs and still Telegrams, just without the
+LLM. To stop the daily check entirely, remove the whole cron line.
 
 ## Logs
 

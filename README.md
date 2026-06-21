@@ -106,10 +106,15 @@ watchtower health-badge logic.
 Node summary with per-channel balance bars and fee rates (your fees, their fees,
 their inbound fees).
 
-### Agent - daily review (Optional)
+### Daily check (deterministic by default; optional AI agent)
 
-Agent skill run every day reviewing the last 24hr of logs and data. Lands bug fixes and suggests actions to the user where human decision is needed.
-It leans on deterministic tooling rather than doing everything by hand: a Python
+A daily cron job that always runs and Telegrams a summary. By default it runs only
+read-only **deterministic** checks — the `reconcile` data-integrity arithmetic and
+the unit suite (`make test`) — with any issues surfaced inline. Opt in with
+`LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1` to instead run an **AI agent** that reviews the
+last 24hr of logs and data, lands bug fixes, and suggests actions where human
+decision is needed.
+The agent leans on the same deterministic tooling rather than doing everything by hand: a Python
 **reconciliation** module (`reconcile.run_checks`) runs the data-integrity
 arithmetic (an LLM gets SQLite arithmetic subtly wrong), a **finding-dedup store**
 (`daily_findings`) makes it report something once and re-surface it only on a
@@ -287,25 +292,28 @@ ln-operator backup [--trigger path|timer|manual] # rsync channel.backup to the c
 30 3 * * * cd /path/to/ln-operator && ./ln-operator refresh_graph >> logs/graph.log 2>&1
 ```
 
-These three lines are all the automation the node needs. The optional AI
-daily-check agent is a **separate, opt-in** cron line (off by default — see the
-[Security](#security) section and [docs/daily-check.md](docs/daily-check.md)
-before enabling). It is gated by an env flag set **on the cron line itself**, and
-should run with its own read-only macaroon:
+These three lines are all the automation the node needs. A fourth, optional line
+adds the **daily check**, which always runs and Telegrams a summary. By default it
+runs only **deterministic** checks (`make test` + the `reconcile` data-integrity
+checks) — read-only, no LLM, no spend. Setting `LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1`
+on the cron line switches that run to an **autonomous Claude agent** instead (off by
+default — see the [Security](#security) section and
+[docs/daily-check.md](docs/daily-check.md) before enabling). Use a read-only macaroon:
 
 ```cron
-# Daily at 09:00 — optional AI health-check agent (OFF unless the flag is set).
-# The opt-in flag and read-only macaroon are set inline so they apply to this
+# Daily at 09:00 — deterministic checks by default; flip the flag to 1 to run the
+# AI agent. The flag and read-only macaroon are set inline so they apply to this
 # job only. Use absolute paths — cron has a minimal PATH and no shell profile.
-0 9 * * * LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1 \
+0 9 * * * LN_OPERATOR_ENABLE_AI_DAILY_CHECK=0 \
   DAILY_CHECK_LND_MACAROON=/home/youruser/.lnd-macaroons/ln-operator-readonly.macaroon \
   /path/to/ln-operator/scripts/daily-check.sh >> /path/to/ln-operator/logs/daily-check.log 2>&1
 ```
 
-Drop the `LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1` (or the whole line) to disable it —
-without the flag the script logs `disabled` and exits 0. The agent needs the
-`claude` CLI on `PATH` (override with `CLAUDE_BIN`) and Telegram configured for
-delivery.
+Set `LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1` to run the AI agent; `0` (or absent) runs
+the deterministic checks. Remove the whole line to stop the daily check entirely.
+The AI agent additionally needs the `claude` CLI on `PATH` (override with
+`CLAUDE_BIN`); the deterministic mode needs no LLM. Telegram must be configured for
+delivery in both modes.
 
 ### Dashboard
 
@@ -352,9 +360,10 @@ journalctl -u lnd-dashboard -n 50     # full startup log
 Common causes: username not swapped (`sed` skipped), repo not at
 `/home/$USER/ln-operator`, or `.env` missing at the `EnvironmentFile=` path.
 
-The daily-check AI agent is *not* a systemd service — it runs from cron and is
-off by default. See the [Crontab](#crontab) section above for its full cron line,
-and [docs/daily-check.md](docs/daily-check.md) for the details.
+The daily check is *not* a systemd service — it runs from cron. It runs the
+deterministic checks by default; the AI agent within it is off by default. See the
+[Crontab](#crontab) section above for its full cron line, and
+[docs/daily-check.md](docs/daily-check.md) for the details.
 
 ---
 
@@ -402,15 +411,19 @@ moving on-chain funds, opening/closing channels, or baking further macaroons.
 
 ### Daily-check AI agent (off by default)
 
-`scripts/daily-check.sh` can run an **autonomous Claude agent** that edits
-code, `git commit`s, and `git push origin main` unattended, with whatever
-macaroon is in your environment. It is **disabled by default** and must be
+The daily check runs read-only **deterministic** checks (`make test` + `reconcile`)
+by default. `scripts/daily-check.sh` can *instead* run an **autonomous Claude agent**
+that edits code, `git commit`s, and `git push origin main` unattended, with whatever
+macaroon is in your environment. The agent is **disabled by default** and must be
 explicitly opted into:
 
 ```bash
 # In the cron line or environment:
 LN_OPERATOR_ENABLE_AI_DAILY_CHECK=1
 ```
+
+With the flag unset (or `0`) the daily check stays in deterministic mode — it still
+runs and still Telegrams, just without the LLM, edits, or spend.
 
 If you enable it, give it a **read-only** macaroon so it cannot move funds
 even though the prompt instructs it to stay read-only — bake one with only
@@ -449,7 +462,7 @@ skimmable. Full index: [docs/README.md](docs/README.md).
 - [Dashboard deep dive](docs/dashboard.md) — card-by-card tour ([live demo](https://www.lnbright.com/demo/)), Sat Flow drill-downs, and the watchtower health-badge logic
 
 **Operations**
-- [Daily Check](docs/daily-check.md) — the optional, off-by-default AI health-check agent
+- [Daily Check](docs/daily-check.md) — the daily health check (deterministic by default; opt-in AI agent)
 
 **Reference**
 - [Configuration](docs/configuration.md) — every `config.py` knob and its default
